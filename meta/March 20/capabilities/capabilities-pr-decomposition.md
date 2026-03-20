@@ -1218,9 +1218,11 @@ For each, the table shows: whether it's a **Capability** (subclass of `AbstractC
 
 | Item | Category | Serialization | Interface Methods | Relevant Issue | Notes |
 |---|---|---|---|---|---|
-| **Compaction** | Capability | Tier S — `- Compaction: {strategy: smart, threshold: 80000}` | `before_model_request()` (history summarization) | [#4137](https://github.com/pydantic/pydantic-ai/issues/4137) | Detailed API proposal exists |
+| **Context window on ModelProfile** | Infrastructure | N/A | N/A | [#4538](https://github.com/pydantic/pydantic-ai/issues/4538) | Adds `context_window` to `ModelProfile` from genai-prices + exposes `RunUsage` on `RunContext`. Prerequisite for Compaction — threshold detection needs `ctx.model.profile.context_window`. |
+| **Python signatures for tools (Code Mode infra)** | Infrastructure | N/A | N/A | [PR #4755](https://github.com/pydantic/pydantic-ai/pull/4755) | Extracts function signatures from `@tool` definitions and JSON schemas so Code Mode can generate correct Python calls. Prerequisite for CodeMode capability. |
+| **Compaction** | Capability | Tier S — `- Compaction: {strategy: smart, threshold: 80000}` | `before_model_request()` (history summarization) | [#4137](https://github.com/pydantic/pydantic-ai/issues/4137) | Detailed API proposal exists. Blocked by context window exposure (#4538) for threshold detection. |
 | **Memory** | Capability | Tier P — `- Memory: {backend: sqlite}` | `get_toolset()` + `get_instructions()` + `before_model_request()` | — | Backend name serializable; embedding functions not |
-| **CodeMode** | Capability | Tier P — `- CodeMode: {sandbox: docker}` | `get_toolset()` + `get_instructions()` | — | Sandbox type serializable |
+| **CodeMode** | Capability | Tier P — `- CodeMode: {sandbox: docker}` | `get_toolset()` + `get_instructions()` | — | Sandbox type serializable. Blocked by Python signatures ([PR #4755](https://github.com/pydantic/pydantic-ai/pull/4755)) for generating correct tool calls. |
 | **Approval** | Capability | Tier P — `- Approval: {mode: writes}` | Needs `before_tool_call` hook (Hook Extension required) | — | Approval callback not serializable |
 | **Sessions** | Capability | Tier P — `- Session: {store: sqlite}` | Needs `on_agent_start`/`on_agent_end` hooks | — | Store type serializable |
 | **DurableExecution** | Capability | Tier P — `- DurableExecution: temporal` | Complex (wraps model + toolsets) | — | PR refactors to WrapperAgent pattern first |
