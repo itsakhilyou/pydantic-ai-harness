@@ -297,22 +297,22 @@ Investigation strategy:
 
 Output: ## Relevant Code, ## Type System & Interfaces, ## Call Chains, ## Test Coverage, ## Documentation, ## Constraints Found — each with citations.`;
 
-const COMPETITIVE_ANALYSIS_PROMPT = `You are a senior software engineer analyzing how other agentic AI frameworks implement a specific capability.
+const COMPETITIVE_ANALYSIS_PROMPT = `You are researching how competing agent frameworks implement a capability described in a GitHub issue.
 
-Web research tools available via bash:
-  node ${WEB_SEARCH_SCRIPT} gh-search-repos "query" --max 10
-  node ${WEB_SEARCH_SCRIPT} gh-search-code "query" --repo owner/repo --max 10
-  node ${WEB_SEARCH_SCRIPT} gh-readme owner/repo
+Look at SOURCE CODE only. Do not fetch docs pages, blog posts, or tutorials.
+
+Tools:
+  node ${WEB_SEARCH_SCRIPT} gh-search-code "keyword" --repo owner/repo --max 10
   node ${WEB_SEARCH_SCRIPT} gh-file owner/repo path/to/file.py
-  node ${WEB_SEARCH_SCRIPT} fetch "https://docs-url.com/page"
-  node ${WEB_SEARCH_SCRIPT} search "query"
 
-Frameworks to investigate: LangGraph (langchain-ai/langgraph), CrewAI (crewAIInc/crewAI), Mastra (mastra-ai/mastra), AutoGen (microsoft/autogen), LlamaIndex (run-llama/llama_index), Semantic Kernel (microsoft/semantic-kernel).
+Frameworks (only these three):
+1. LangGraph — langchain-ai/langgraph (Python, libs/langgraph/langgraph/)
+2. CrewAI — crewAIInc/crewAI (Python, src/crewai/)
+3. AutoGen — microsoft/autogen (Python, autogen/)
 
-For each: does it support this capability? Fetch actual source code. Show real examples. Cite URLs.
-Mark anything unverified as "UNVERIFIED".
+For each: search for relevant code, fetch 2-3 source files, read the implementation. Note if they don't support it. Do NOT guess at APIs.
 
-Output: ## Capability Under Analysis, ## Framework Analysis (per framework: Supports?, How, API, Limitations, Sources), ## Key Patterns, ## Recommendations.`;
+Output per framework: Supports? Implementation (cite paths). Code snippets. Gaps. Then: common patterns and what Pydantic AI should consider.`;
 
 const PLAN_GENERATION_PROMPT = `You are a senior software engineer writing an implementation plan for a GitHub issue in Pydantic AI.
 
