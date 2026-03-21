@@ -104,7 +104,6 @@ jobs:
             });
 
       - name: Configure git
-        working-directory: pydantic-ai
         run: |
           git config user.name "plan-debate[bot]"
           git config user.email "plan-debate[bot]@users.noreply.github.com"
@@ -117,6 +116,7 @@ jobs:
           TAVILY_API_KEY: ${{ secrets.TAVILY_API_KEY }}
           BRAVE_API_KEY: ${{ secrets.BRAVE_API_KEY }}
         run: |
+          # CI script researches the pydantic-ai codebase, writes PLAN.md there
           node .github/plan-debate/ci-plan-debate.mjs \
             --issue ${{ steps.inputs.outputs.issue }} \
             --repo ${{ steps.inputs.outputs.repo }} \
@@ -125,29 +125,31 @@ jobs:
             --cwd ${{ github.workspace }}/pydantic-ai \
             --skip-pr
 
-      - name: Create PR on pydantic-ai
-        working-directory: pydantic-ai
+          # Copy PLAN.md to pydantic-harness (where the PR will be created)
+          cp ${{ github.workspace }}/pydantic-ai/PLAN.md ${{ github.workspace }}/PLAN.md
+
+      - name: Create PR on pydantic-harness
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           ISSUE_NUM=${{ steps.inputs.outputs.issue }}
+          ISSUE_REPO=${{ steps.inputs.outputs.repo }}
           BRANCH="plan/issue-${ISSUE_NUM}"
 
           git checkout -b "$BRANCH"
           git add PLAN.md
-          git commit -m "Add implementation plan for issue #${ISSUE_NUM}"
+          git commit -m "Plan: ${ISSUE_REPO}#${ISSUE_NUM}"
           git push -u origin "$BRANCH"
 
           gh pr create \
             --draft \
-            --title "Plan: Issue #${ISSUE_NUM}" \
-            --body "Implementation plan generated via dual-model debate (${{ steps.inputs.outputs.model_a }} + ${{ steps.inputs.outputs.model_b }}).
+            --title "Plan: ${ISSUE_REPO}#${ISSUE_NUM}" \
+            --body "Implementation plan for ${ISSUE_REPO}#${ISSUE_NUM}
 
-          Closes #${ISSUE_NUM}
+          Generated via dual-model debate (${{ steps.inputs.outputs.model_a }} + ${{ steps.inputs.outputs.model_b }}).
 
-          _Triggered from [pydantic-harness](https://github.com/pydantic/pydantic-harness)._" \
-            --head "$BRANCH" \
-            --repo ${{ steps.inputs.outputs.repo }}
+          See: https://github.com/${ISSUE_REPO}/issues/${ISSUE_NUM}" \
+            --head "$BRANCH"
 
       - name: Comment on issue (success)
         if: success()
@@ -155,13 +157,14 @@ jobs:
         with:
           script: |
             const fs = require('fs');
-            const plan = fs.readFileSync('pydantic-ai/PLAN.md', 'utf-8');
+            const plan = fs.readFileSync('PLAN.md', 'utf-8');
             const preview = plan.slice(0, 3000) + (plan.length > 3000 ? '\n\n...[see PR for full plan]' : '');
+            const issueRepo = '${{ steps.inputs.outputs.repo }}'.split('/');
             await github.rest.issues.createComment({
-              owner: 'pydantic',
-              repo: 'pydantic-ai',
+              owner: issueRepo[0],
+              repo: issueRepo[1],
               issue_number: ${{ steps.inputs.outputs.issue }},
-              body: `## 🤖 Plan debate complete\n\nA draft PR has been created with the implementation plan.\n\n<details>\n<summary>Plan preview</summary>\n\n${preview}\n\n</details>`
+              body: `## 🤖 Plan debate complete\n\nA draft PR has been created on [pydantic-harness](https://github.com/pydantic/pydantic-harness) with the implementation plan.\n\n<details>\n<summary>Plan preview</summary>\n\n${preview}\n\n</details>`
             });
 
       - name: Comment on issue (failure)
@@ -169,9 +172,10 @@ jobs:
         uses: actions/github-script@v7
         with:
           script: |
+            const issueRepo = '${{ steps.inputs.outputs.repo }}'.split('/');
             await github.rest.issues.createComment({
-              owner: 'pydantic',
-              repo: 'pydantic-ai',
+              owner: issueRepo[0],
+              repo: issueRepo[1],
               issue_number: ${{ steps.inputs.outputs.issue }},
               body: '## ❌ Plan debate failed\n\nSee [workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) for details.'
             });
