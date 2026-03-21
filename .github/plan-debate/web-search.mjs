@@ -91,16 +91,56 @@ function json(obj) { console.log(JSON.stringify(obj, null, 2)); }
 // ─── Commands ─────────────────────────────────────────────────────────────
 
 async function searchWeb() {
-	// GitHub repo search — reliable, no API key needed
-	const result = gh(["search", "repos", query, "--json", "name,url,description,stargazersCount", "--limit", String(max)]);
-	if (result) {
+	const results = [];
+
+	// Strategy 1: Tavily (best for agents, free tier 1000 queries/month)
+	if (process.env.TAVILY_API_KEY && results.length === 0) {
 		try {
-			const repos = JSON.parse(result);
-			json({ query, resultCount: repos.length, results: repos.map((r) => ({ url: r.url, title: r.name, snippet: r.description || "", stars: r.stargazersCount })) });
-			return;
+			const resp = await fetch("https://api.tavily.com/search", {
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify({ api_key: process.env.TAVILY_API_KEY, query, max_results: max, search_depth: "basic" }),
+				signal: AbortSignal.timeout(10000),
+			});
+			if (resp.ok) {
+				const data = await resp.json();
+				for (const r of data.results || []) {
+					results.push({ url: r.url, title: r.title || "", snippet: r.content || "", source: "tavily" });
+				}
+			}
 		} catch { /* fall through */ }
 	}
-	json({ query, resultCount: 0, results: [] });
+
+	// Strategy 2: Brave Search (free tier 2000 queries/month)
+	if (process.env.BRAVE_API_KEY && results.length === 0) {
+		try {
+			const params = new URLSearchParams({ q: query, count: String(max) });
+			const resp = await fetch(`https://api.search.brave.com/res/v1/web/search?${params}`, {
+				headers: { "X-Subscription-Token": process.env.BRAVE_API_KEY, Accept: "application/json" },
+				signal: AbortSignal.timeout(10000),
+			});
+			if (resp.ok) {
+				const data = await resp.json();
+				for (const r of data.web?.results || []) {
+					results.push({ url: r.url, title: r.title || "", snippet: r.description || "", source: "brave" });
+				}
+			}
+		} catch { /* fall through */ }
+	}
+
+	// Strategy 3: GitHub repo search (always works, no extra key needed)
+	if (results.length === 0) {
+		const ghResult = gh(["search", "repos", query, "--json", "name,url,description,stargazersCount", "--limit", String(max)]);
+		if (ghResult) {
+			try {
+				for (const r of JSON.parse(ghResult)) {
+					results.push({ url: r.url, title: r.name, snippet: r.description || "", stars: r.stargazersCount, source: "github" });
+				}
+			} catch { /* ignore */ }
+		}
+	}
+
+	json({ query, resultCount: results.length, source: results[0]?.source || "none", results });
 }
 
 async function fetchUrl() {
