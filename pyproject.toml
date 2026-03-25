@@ -1,32 +1,110 @@
 [build-system]
-requires = ["hatchling"]
-build-backend = "hatchling.build"
+requires = ['hatchling', 'uv-dynamic-versioning>=0.7.0']
+build-backend = 'hatchling.build'
 
 [project]
-name = "pydantic-harness"
-version = "0.0.1"
-description = "Execution environments and code mode capabilities for pydantic-ai"
-requires-python = ">=3.10"
+name = 'pydantic-harness'
+dynamic = ['version']
+description = 'Agent harness for composable, reusable AI agent capabilities, built on PydanticAI'
+readme = 'README.md'
+requires-python = '>=3.10'
+license = 'MIT'
+authors = [
+    { name = 'Pydantic Services Inc.' },
+]
+classifiers = [
+    'Development Status :: 3 - Alpha',
+    'Intended Audience :: Developers',
+    'License :: OSI Approved :: MIT License',
+    'Programming Language :: Python :: 3',
+    'Programming Language :: Python :: 3.10',
+    'Programming Language :: Python :: 3.11',
+    'Programming Language :: Python :: 3.12',
+    'Programming Language :: Python :: 3.13',
+    'Topic :: Software Development :: Libraries',
+    'Typing :: Typed',
+]
 dependencies = [
-    "pydantic-ai-slim",
-    "pydantic>=2.12",
-    "anyio>=4.5.0",
+    'pydantic-ai-slim>=0.1',
+    'pydantic>=2.12',
+    'anyio>=4.5.0',
 ]
 
 [project.optional-dependencies]
-monty = ["pydantic-monty>=0.0.5"]
+monty = ['pydantic-monty>=0.0.5']
+
+[project.urls]
+Homepage = 'https://github.com/pydantic/pydantic-harness'
+Source = 'https://github.com/pydantic/pydantic-harness'
+Issues = 'https://github.com/pydantic/pydantic-harness/issues'
+
+[dependency-groups]
 dev = [
-    "pytest>=9.0.0",
-    "anyio[trio]>=4.5.0",
-    "pytest-mock>=3.14.0",
-    "inline-snapshot>=0.19.3",
-    "dirty-equals>=0.9.0",
-    "pydantic-monty>=0.0.5",
+    'pytest>=9.0.0',
+    'pytest-xdist',
+    'pytest-mock>=3.14.0',
+    'anyio[trio]>=4.5.0',
+    'coverage',
+    'inline-snapshot>=0.19.3',
+    'dirty-equals>=0.9.0',
+    'pydantic-monty>=0.0.5',
+]
+lint = [
+    'ruff>=0.14',
+    'pyright>=1.1.408',
 ]
 
+[tool.hatch.version]
+source = 'uv-dynamic-versioning'
+
+[tool.uv-dynamic-versioning]
+vcs = 'git'
+style = 'pep440'
+bump = true
+
 [tool.hatch.build.targets.wheel]
-packages = ["pydantic_harness"]
+packages = ['pydantic_harness']
+
+[tool.ruff]
+line-length = 120
+target-version = 'py310'
+
+[tool.ruff.lint]
+extend-select = ['Q', 'RUF100', 'C90', 'UP', 'I', 'D', 'TID251']
+
+[tool.ruff.lint.per-file-ignores]
+'tests/**/*.py' = ['D']
+
+[tool.ruff.lint.flake8-quotes]
+inline-quotes = 'single'
+
+[tool.ruff.lint.mccabe]
+max-complexity = 15
+
+[tool.ruff.lint.pydocstyle]
+convention = 'google'
+
+[tool.ruff.format]
+quote-style = 'single'
+
+[tool.pyright]
+pythonVersion = '3.10'
+typeCheckingMode = 'strict'
 
 [tool.pytest.ini_options]
-testpaths = ["tests"]
+testpaths = ['tests']
 xfail_strict = true
+filterwarnings = ['error']
+
+[tool.coverage.run]
+branch = true
+source = ['pydantic_harness', 'tests']
+
+[tool.coverage.report]
+fail_under = 100
+show_missing = true
+exclude_lines = [
+    'pragma: no cover',
+    'assert_never',
+    'if TYPE_CHECKING:',
+]

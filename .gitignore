@@ -1,15 +1,34 @@
-.venv
-dist
-__pycache__
-.env
-/.coverage
-.coverage*
-.DS_Store
-.cache/
+# IDE
+.idea/
 .vscode/
-**.idea/
+
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# Coverage
+.coverage
+.coverage*
+
+# Hypothesis
+.hypothesis/
+
+# Environment
+.env
+
+# OS
+.DS_Store
+
+# Misc
+.cache/
+.pytest_cache/
+.mcp.json
 /test_tmp/
 /scratch/
-.mcp.json
-.pytest_cache/
-*.egg-info/
