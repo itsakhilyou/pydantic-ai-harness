@@ -43,7 +43,7 @@ dev = [
     'pytest>=9.0.0',
     'pytest-xdist',
     'pytest-mock>=3.14.0',
-    'anyio[trio]>=4.5.0',
+    'anyio>=4.5.0',
     'coverage',
     'inline-snapshot>=0.19.3',
     'dirty-equals>=0.9.0',
