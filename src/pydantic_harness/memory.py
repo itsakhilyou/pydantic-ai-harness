@@ -8,8 +8,10 @@ testing, `FileStore` for on-disk persistence).
 from __future__ import annotations
 
 import json
+import logging
+import re
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
@@ -18,6 +20,8 @@ from pydantic_ai.capabilities.abstract import AbstractCapability
 from pydantic_ai.tools import AgentDepsT, RunContext, Tool
 from pydantic_ai.toolsets import AgentToolset
 from pydantic_ai.toolsets.function import FunctionToolset
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -33,11 +37,23 @@ class MemoryEntry:
     tags: list[str] = field(default_factory=list[str])
     """Optional tags for categorization and search."""
 
+    scope: str = 'global'
+    """Namespace scope for this memory (default ``'global'``)."""
+
+    expires_at: str | None = None
+    """Optional ISO 8601 expiration timestamp. ``None`` means no expiry."""
+
     created_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     """ISO 8601 timestamp of when the memory was first created."""
 
     updated_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     """ISO 8601 timestamp of the last update."""
+
+    def is_expired(self) -> bool:
+        """Return True if this entry has passed its expiration time."""
+        if self.expires_at is None:
+            return False
+        return datetime.fromisoformat(self.expires_at) <= datetime.now(timezone.utc)
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize to a plain dict for JSON storage."""
@@ -45,6 +61,8 @@ class MemoryEntry:
             'key': self.key,
             'content': self.content,
             'tags': self.tags,
+            'scope': self.scope,
+            'expires_at': self.expires_at,
             'created_at': self.created_at,
             'updated_at': self.updated_at,
         }
@@ -56,33 +74,86 @@ class MemoryEntry:
             key=data['key'],
             content=data['content'],
             tags=data.get('tags', []),
+            scope=data.get('scope', 'global'),
+            expires_at=data.get('expires_at'),
             created_at=data.get('created_at', ''),
             updated_at=data.get('updated_at', ''),
         )
+
+
+def _score_entry(entry: MemoryEntry, words: list[str]) -> int:
+    r"""Score a memory entry by counting word-boundary matches across fields.
+
+    Each query word that appears as a whole word (case-insensitive) in the
+    key, content, or any tag contributes one point per field it appears in.
+    Underscores and hyphens are treated as word separators in addition to
+    the standard ``\b`` boundaries.
+    """
+    score = 0
+    for word in words:
+        # Use a boundary pattern that also treats _ and - as separators.
+        escaped = re.escape(word)
+        pattern = re.compile(rf'(?<![a-zA-Z0-9]){escaped}(?![a-zA-Z0-9])', re.IGNORECASE)
+        if pattern.search(entry.key):
+            score += 1
+        if pattern.search(entry.content):
+            score += 1
+        if any(pattern.search(tag) for tag in entry.tags):
+            score += 1
+    return score
+
+
+def _simple_similarity(a: str, b: str) -> bool:
+    """Return True if two keys share the same first 10 characters and differ only slightly.
+
+    Uses a simple character-level edit distance check: keys are considered
+    similar when they share the same 10-char prefix and differ by at most 2
+    characters (Levenshtein-like).
+    """
+    if len(a) < 10 or len(b) < 10:
+        return False
+    if a[:10] != b[:10]:
+        return False
+    if a == b:
+        return False
+    # Simple Levenshtein-like check: allow at most 2 edits
+    if abs(len(a) - len(b)) > 2:
+        return False
+    # Bounded character-level distance (sufficient for dedup warnings)
+    max_edits = 2
+    m, n = len(a), len(b)
+    prev = list(range(n + 1))
+    for i in range(1, m + 1):
+        curr = [i] + [0] * n
+        for j in range(1, n + 1):
+            cost = 0 if a[i - 1] == b[j - 1] else 1
+            curr[j] = min(curr[j - 1] + 1, prev[j] + 1, prev[j - 1] + cost)
+        prev = curr
+    return prev[n] <= max_edits
 
 
 @runtime_checkable
 class MemoryStore(Protocol):
     """Protocol for pluggable memory storage backends."""
 
-    def get(self, key: str) -> MemoryEntry | None:
+    def get(self, key: str) -> MemoryEntry | None:  # pragma: no cover
         """Retrieve a memory entry by key, or None if not found."""
         ...
 
-    def put(self, entry: MemoryEntry) -> None:
+    def put(self, entry: MemoryEntry) -> None:  # pragma: no cover
         """Store or update a memory entry."""
         ...
 
-    def delete(self, key: str) -> bool:
+    def delete(self, key: str) -> bool:  # pragma: no cover
         """Delete a memory entry by key. Returns True if it existed."""
         ...
 
-    def list_all(self) -> list[MemoryEntry]:
-        """Return all stored memory entries."""
+    def list_all(self, *, scope: str | None = None) -> list[MemoryEntry]:  # pragma: no cover
+        """Return all non-expired entries, optionally filtered by scope."""
         ...
 
-    def search(self, query: str) -> list[MemoryEntry]:
-        """Search entries by substring match on key, content, or tags."""
+    def search(self, query: str, *, scope: str | None = None) -> list[MemoryEntry]:  # pragma: no cover
+        """Search non-expired entries with word-boundary matching, sorted by relevance."""
         ...
 
 
@@ -108,18 +179,30 @@ class InMemoryStore:
         """Delete a memory entry by key."""
         return self._entries.pop(key, None) is not None
 
-    def list_all(self) -> list[MemoryEntry]:
-        """Return all stored memory entries."""
-        return list(self._entries.values())
-
-    def search(self, query: str) -> list[MemoryEntry]:
-        """Search entries by substring match on key, content, or tags."""
-        q = query.lower()
+    def list_all(self, *, scope: str | None = None) -> list[MemoryEntry]:
+        """Return all non-expired entries, optionally filtered by scope."""
         return [
             entry
             for entry in self._entries.values()
-            if q in entry.key.lower() or q in entry.content.lower() or any(q in tag.lower() for tag in entry.tags)
+            if not entry.is_expired() and (scope is None or entry.scope == scope)
         ]
+
+    def search(self, query: str, *, scope: str | None = None) -> list[MemoryEntry]:
+        """Search non-expired entries with word-boundary matching, sorted by relevance."""
+        words = query.lower().split()
+        if not words:
+            return []
+        scored: list[tuple[int, MemoryEntry]] = []
+        for entry in self._entries.values():
+            if entry.is_expired():
+                continue
+            if scope is not None and entry.scope != scope:
+                continue
+            score = _score_entry(entry, words)
+            if score > 0:
+                scored.append((score, entry))
+        scored.sort(key=lambda pair: pair[0], reverse=True)
+        return [entry for _, entry in scored]
 
 
 class FileStore:
@@ -160,25 +243,44 @@ class FileStore:
             self._save()
         return existed
 
-    def list_all(self) -> list[MemoryEntry]:
-        """Return all stored memory entries."""
-        return list(self._entries.values())
-
-    def search(self, query: str) -> list[MemoryEntry]:
-        """Search entries by substring match on key, content, or tags."""
-        q = query.lower()
+    def list_all(self, *, scope: str | None = None) -> list[MemoryEntry]:
+        """Return all non-expired entries, optionally filtered by scope."""
         return [
             entry
             for entry in self._entries.values()
-            if q in entry.key.lower() or q in entry.content.lower() or any(q in tag.lower() for tag in entry.tags)
+            if not entry.is_expired() and (scope is None or entry.scope == scope)
         ]
+
+    def search(self, query: str, *, scope: str | None = None) -> list[MemoryEntry]:
+        """Search non-expired entries with word-boundary matching, sorted by relevance."""
+        words = query.lower().split()
+        if not words:
+            return []
+        scored: list[tuple[int, MemoryEntry]] = []
+        for entry in self._entries.values():
+            if entry.is_expired():
+                continue
+            if scope is not None and entry.scope != scope:
+                continue
+            score = _score_entry(entry, words)
+            if score > 0:
+                scored.append((score, entry))
+        scored.sort(key=lambda pair: pair[0], reverse=True)
+        return [entry for _, entry in scored]
 
 
 def format_entry(entry: MemoryEntry) -> str:
     """Format a memory entry as a human-readable string."""
     line = f'[{entry.key}] {entry.content}'
+    extras: list[str] = []
     if entry.tags:
-        line += f' (tags: {", ".join(entry.tags)})'
+        extras.append(f'tags: {", ".join(entry.tags)}')
+    if entry.scope != 'global':
+        extras.append(f'scope: {entry.scope}')
+    if entry.expires_at is not None:
+        extras.append(f'expires: {entry.expires_at}')
+    if extras:
+        line += f' ({"; ".join(extras)})'
     return line
 
 
@@ -253,22 +355,47 @@ class Memory(AbstractCapability[AgentDepsT]):
         """
         store = self.store
 
-        def save_memory(key: str, content: str, tags: list[str] | None = None) -> str:
+        def save_memory(
+            key: str,
+            content: str,
+            tags: list[str] | None = None,
+            scope: str = 'global',
+            ttl_minutes: int | None = None,
+        ) -> str:
             """Save or update a memory entry.
 
             Args:
                 key: Unique key for this memory.
                 content: The content to remember.
                 tags: Optional tags for categorization and search.
+                scope: Namespace scope (default ``'global'``).
+                ttl_minutes: Optional time-to-live in minutes. The entry will expire after this duration.
             """
-            now = datetime.now(timezone.utc).isoformat()
+            now = datetime.now(timezone.utc)
+            now_iso = now.isoformat()
             existing = store.get(key)
+
+            # Dedup warning: check for similar keys among existing entries
+            for existing_entry in store.list_all():
+                if _simple_similarity(key, existing_entry.key):
+                    logger.warning(
+                        'New memory key %r is very similar to existing key %r — possible duplicate',
+                        key,
+                        existing_entry.key,
+                    )
+
+            expires_at: str | None = None
+            if ttl_minutes is not None:
+                expires_at = (now + timedelta(minutes=ttl_minutes)).isoformat()
+
             entry = MemoryEntry(
                 key=key,
                 content=content,
                 tags=tags or [],
-                created_at=existing.created_at if existing else now,
-                updated_at=now,
+                scope=scope,
+                expires_at=expires_at,
+                created_at=existing.created_at if existing else now_iso,
+                updated_at=now_iso,
             )
             store.put(entry)
             return f'Memory saved: {key}'
@@ -282,22 +409,29 @@ class Memory(AbstractCapability[AgentDepsT]):
             entry = store.get(key)
             if entry is None:
                 return f'No memory found for key: {key}'
+            if entry.is_expired():
+                return f'No memory found for key: {key}'
             return format_entry(entry)
 
-        def search_memories(query: str) -> str:
-            """Search memories by substring match on keys, content, or tags.
+        def search_memories(query: str, scope: str | None = None) -> str:
+            """Search memories by word-boundary matching on keys, content, or tags, sorted by relevance.
 
             Args:
-                query: The search query string.
+                query: The search query string (space-separated words).
+                scope: Optional scope to restrict the search to.
             """
-            results = store.search(query)
+            results = store.search(query, scope=scope)
             if not results:
                 return f'No memories found matching: {query}'
             return '\n'.join(format_entry(entry) for entry in results)
 
-        def list_memories() -> str:
-            """List all stored memories."""
-            entries = store.list_all()
+        def list_memories(scope: str | None = None) -> str:
+            """List all stored memories, optionally filtered by scope.
+
+            Args:
+                scope: Optional scope to filter by.
+            """
+            entries = store.list_all(scope=scope)
             if not entries:
                 return 'No memories stored.'
             return '\n'.join(format_entry(entry) for entry in entries)
