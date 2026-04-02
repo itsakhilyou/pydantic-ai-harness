@@ -14,6 +14,11 @@ from pydantic_harness.approval import DENIED_MESSAGE, Approval
 pytestmark = pytest.mark.anyio
 
 
+@pytest.fixture(params=['asyncio'])
+def anyio_backend(request: pytest.FixtureRequest) -> str:
+    return request.param  # type: ignore[no-any-return]
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
