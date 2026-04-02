@@ -56,11 +56,11 @@ class TestSkill:
             Skill(name='', description='bad')
 
     def test_tool_names_from_callables(self) -> None:
-        def add(a: int, b: int) -> int:
+        def add(a: int, b: int) -> int:  # pragma: no cover – tool stub
             """Add two numbers."""
             return a + b
 
-        def subtract(a: int, b: int) -> int:
+        def subtract(a: int, b: int) -> int:  # pragma: no cover – tool stub
             """Subtract two numbers."""
             return a - b
 
@@ -153,6 +153,17 @@ class TestParseSkillMarkdown:
         skill = _parse_skill_markdown(md)
         assert skill.name == 'commented'
 
+    def test_lines_without_colon_ignored(self) -> None:
+        md = textwrap.dedent("""\
+            ---
+            name: tolerant
+            description: Ignores bad lines
+            this line has no colon
+            ---
+        """)
+        skill = _parse_skill_markdown(md)
+        assert skill.name == 'tolerant'
+
     def test_unknown_frontmatter_keys_ignored(self) -> None:
         """agentskills.io compatibility: extra fields like tools, dependencies, etc. are silently ignored."""
         md = textwrap.dedent("""\
@@ -228,7 +239,7 @@ class TestSkillsCapability:
         assert cap.get_instructions() is None
 
     def test_get_toolset_with_tools(self) -> None:
-        def add(a: int, b: int) -> int:
+        def add(a: int, b: int) -> int:  # pragma: no cover – tool stub
             """Add."""
             return a + b
 
@@ -240,6 +251,19 @@ class TestSkillsCapability:
         assert 'load_skill' in toolset.tools
         assert 'unload_skill' in toolset.tools
         assert 'add' in toolset.tools
+
+    def test_get_toolset_with_function_toolset(self) -> None:
+        toolset_in: FunctionToolset[None] = FunctionToolset()
+
+        def multiply(a: int, b: int) -> int:  # pragma: no cover – tool stub
+            """Multiply."""
+            return a * b
+
+        toolset_in.add_function(multiply, takes_ctx=False)
+        cap = Skills(skills=[Skill(name='calc', description='Calculator', tools=toolset_in)])
+        toolset = cap.get_toolset()
+        assert toolset is not None
+        assert 'multiply' in toolset.tools
 
     def test_get_toolset_no_skills(self) -> None:
         cap: Skills[None] = Skills()
@@ -301,7 +325,7 @@ class TestSkillsMetaTools:
         assert results[0]['loaded'] == 'yes'
 
     def test_load_skill_success(self) -> None:
-        def add(a: int, b: int) -> int:
+        def add(a: int, b: int) -> int:  # pragma: no cover – tool stub
             """Add."""
             return a + b
 
@@ -342,7 +366,7 @@ class TestSkillsMetaTools:
         assert 'Be helpful.' in result
 
     def test_load_skill_no_instructions(self) -> None:
-        def add(a: int, b: int) -> int:
+        def add(a: int, b: int) -> int:  # pragma: no cover – tool stub
             """Add."""
             return a + b
 
@@ -399,7 +423,7 @@ class TestSkillsMetaTools:
         assert results[0]['name'] == 'math'
 
     def test_unload_skill_success(self) -> None:
-        def add(a: int, b: int) -> int:
+        def add(a: int, b: int) -> int:  # pragma: no cover – tool stub
             """Add."""
             return a + b
 
@@ -433,7 +457,7 @@ class TestSkillsMetaTools:
         assert 'not currently loaded' in result
 
     def test_unload_skill_hides_tools_again(self) -> None:
-        def add(a: int, b: int) -> int:
+        def add(a: int, b: int) -> int:  # pragma: no cover – tool stub
             """Add."""
             return a + b
 
@@ -463,7 +487,7 @@ class TestSkillsMetaTools:
 
 class TestSkillsPrepareTools:
     def test_hides_unloaded_skill_tools(self) -> None:
-        def add(a: int, b: int) -> int:
+        def add(a: int, b: int) -> int:  # pragma: no cover – tool stub
             """Add."""
             return a + b
 
@@ -485,7 +509,7 @@ class TestSkillsPrepareTools:
         assert 'add' not in names
 
     def test_shows_loaded_skill_tools(self) -> None:
-        def add(a: int, b: int) -> int:
+        def add(a: int, b: int) -> int:  # pragma: no cover – tool stub
             """Add."""
             return a + b
 
@@ -564,7 +588,7 @@ class TestSkillToolNamesFromToolset:
     def test_tool_names_from_function_toolset(self) -> None:
         toolset: FunctionToolset[None] = FunctionToolset()
 
-        def greet(name: str) -> str:
+        def greet(name: str) -> str:  # pragma: no cover – tool stub
             """Say hello."""
             return f'Hello, {name}!'
 
