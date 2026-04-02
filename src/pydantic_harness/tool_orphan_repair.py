@@ -11,6 +11,7 @@ each model call, so conversations self-heal instead of permanently breaking.
 
 from __future__ import annotations
 
+import logging
 import warnings
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any
@@ -32,6 +33,8 @@ if TYPE_CHECKING:
     from pydantic_ai.messages import ModelMessage, ModelRequestPart, ModelResponsePart
     from pydantic_ai.models import ModelRequestContext
     from pydantic_ai.tools import RunContext
+
+logger = logging.getLogger(__name__)
 
 
 _ORPHAN_CALL_CONTENT = 'Tool call was not completed.'
@@ -198,10 +201,16 @@ def _repair_response_request_pair(
         if has_non_call_content:
             # Keep the response but strip the dangling tool call parts.
             new_resp_parts: list[ModelResponsePart] = [p for p in response.parts if not isinstance(p, ToolCallPart)]
+            for cid in sorted(call_ids):
+                logger.debug('Stripped orphaned tool call %r from trailing response (text content kept)', cid)
             repairs += len(call_ids)
             return replace(response, parts=new_resp_parts), None, repairs
         else:
             # Response is nothing but unmatched tool calls -- drop it entirely.
+            logger.debug(
+                'Dropped trailing response containing only orphaned tool calls: %s',
+                ', '.join(sorted(call_ids)),
+            )
             repairs += len(call_ids)
             return None, None, repairs
 
@@ -215,6 +224,12 @@ def _repair_response_request_pair(
                 matched_ids.add(part.tool_call_id)
                 kept_parts.append(part)
             else:
+                part_type = 'RetryPromptPart' if isinstance(part, RetryPromptPart) else 'ToolReturnPart'
+                logger.debug(
+                    'Stripped orphaned %s for tool_call_id %r (no matching call in preceding response)',
+                    part_type,
+                    part.tool_call_id,
+                )
                 repairs += 1
         else:
             kept_parts.append(part)
@@ -222,6 +237,11 @@ def _repair_response_request_pair(
     # --- Phase 5: Inject synthetic returns for orphaned calls ---
     orphaned_call_ids = call_ids - matched_ids
     for call_id in sorted(orphaned_call_ids):
+        logger.debug(
+            'Injected synthetic ToolReturnPart for orphaned call %r (tool %r)',
+            call_id,
+            call_id_to_name[call_id],
+        )
         kept_parts.append(
             ToolReturnPart(
                 tool_name=call_id_to_name[call_id],
@@ -234,6 +254,7 @@ def _repair_response_request_pair(
     # --- Phase 6: Ensure the request has non-system parts ---
     non_system_parts = [p for p in kept_parts if not isinstance(p, SystemPromptPart)]
     if not non_system_parts:
+        logger.debug('Inserted placeholder UserPromptPart to maintain message alternation')
         kept_parts.append(UserPromptPart(content='Continue.'))
         repairs += 1
 
@@ -263,6 +284,11 @@ def _repair_builtin_tool_calls(
 
     new_parts: list[ModelResponsePart] = list(response.parts)
     for call_id in sorted(orphaned):
+        logger.debug(
+            'Injected synthetic BuiltinToolReturnPart for orphaned builtin call %r (tool %r)',
+            call_id,
+            builtin_call_ids[call_id],
+        )
         new_parts.append(
             BuiltinToolReturnPart(
                 tool_name=builtin_call_ids[call_id],
