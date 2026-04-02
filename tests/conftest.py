@@ -35,3 +35,13 @@ def allow_model_requests() -> Iterator[None]:
     """Temporarily allow real model requests within a test."""
     with pydantic_ai.models.override_allow_model_requests(True):
         yield
+
+
+@pytest.fixture(scope='module', params=['asyncio'])
+def anyio_backend(request: pytest.FixtureRequest) -> str:
+    """Override anyio backend to asyncio-only.
+
+    Pydantic AI uses ``asyncio.gather`` internally (e.g. in capabilities/combined.py)
+    which is incompatible with the Trio event loop.
+    """
+    return request.param  # type: ignore[return-value]
