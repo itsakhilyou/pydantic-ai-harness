@@ -65,11 +65,14 @@ async def main() -> None:
     """Demonstrate tool blocking and approval workflow."""
     # The model cannot see drop_database (blocked), will need approval for send_email,
     # and can freely use list_files.
-    print('--- Tool approval demo ---')
-    print('(drop_database is hidden, send_email requires approval, list_files is free)\n')
+    with logfire.span('tool approval — blocked + approval flow'):
+        print('--- Tool approval demo ---')
+        print('(drop_database is hidden, send_email requires approval, list_files is free)\n')
 
-    result = await agent.run('List files in /app, then send an email to alice@example.com summarizing what you found.')
-    print(f'\nResponse: {result.output}')
+        result = await agent.run(
+            'List files in /app, then send an email to alice@example.com summarizing what you found.'
+        )
+        print(f'\nResponse: {result.output}')
 
 
 if __name__ == '__main__':

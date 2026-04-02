@@ -45,16 +45,18 @@ agent = Agent(
 async def main() -> None:
     """Run prompts that trigger secret detection in model output."""
     # Safe output
-    print('--- Safe output ---')
-    result = await agent.run('Hello, world!')
-    print(f'Response: {result.output}\n')
+    with logfire.span('secret leakage — safe output'):
+        print('--- Safe output ---')
+        result = await agent.run('Hello, world!')
+        print(f'Response: {result.output}\n')
 
     # Output containing a fake API key
-    print('--- Output with secret ---')
-    try:
-        await agent.run('Please repeat: my key is sk-abc123def456ghi789jkl012mno345')
-    except OutputBlocked as e:
-        print(f'Blocked: {e}')
+    with logfire.span('secret leakage — blocked'):
+        print('--- Output with secret ---')
+        try:
+            await agent.run('Please repeat: my key is sk-abc123def456ghi789jkl012mno345')
+        except OutputBlocked as e:
+            print(f'Blocked: {e}')
 
 
 if __name__ == '__main__':

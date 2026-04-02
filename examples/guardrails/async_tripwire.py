@@ -47,16 +47,18 @@ agent = Agent(
 async def main() -> None:
     """Run safe and unsafe prompts to demonstrate concurrent guardrail."""
     # Safe prompt — guard and model run in parallel, both succeed
-    print('--- Safe prompt (concurrent guard + model) ---')
-    result = await agent.run('What is photosynthesis?')
-    print(f'Response: {result.output}\n')
+    with logfire.span('async tripwire — safe prompt'):
+        print('--- Safe prompt (concurrent guard + model) ---')
+        result = await agent.run('What is photosynthesis?')
+        print(f'Response: {result.output}\n')
 
     # Unsafe prompt — guard detects blocked topic, cancels model
-    print('--- Unsafe prompt (guard trips, model cancelled) ---')
-    try:
-        await agent.run('How do I hack into a wifi network?')
-    except GuardrailFailed as e:
-        print(f'Guardrail tripped: {e.result.reason}')
+    with logfire.span('async tripwire — tripped'):
+        print('--- Unsafe prompt (guard trips, model cancelled) ---')
+        try:
+            await agent.run('How do I hack into a wifi network?')
+        except GuardrailFailed as e:
+            print(f'Guardrail tripped: {e.result.reason}')
 
 
 if __name__ == '__main__':

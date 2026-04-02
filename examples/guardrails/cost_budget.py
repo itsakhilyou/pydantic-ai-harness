@@ -40,13 +40,14 @@ def get_population(city: str) -> str:
 
 async def main() -> None:
     """Run a multi-tool query that may exceed the token budget."""
-    print('--- Running with tight token budget (150 total tokens) ---')
-    try:
-        result = await agent.run('Tell me about the weather and population of Paris, London, and Tokyo.')
-        print(f'Response: {result.output}')
-        print(f'Usage: {result.usage()}')
-    except BudgetExceededError as e:
-        print(f'Budget exceeded: {e.detail}')
+    with logfire.span('cost budget — exceeded'):
+        print('--- Running with tight token budget (150 total tokens) ---')
+        try:
+            result = await agent.run('Tell me about the weather and population of Paris, London, and Tokyo.')
+            print(f'Response: {result.output}')
+            print(f'Usage: {result.usage()}')
+        except BudgetExceededError as e:
+            print(f'Budget exceeded: {e.detail}')
 
 
 if __name__ == '__main__':
