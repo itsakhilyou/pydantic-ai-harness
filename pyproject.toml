@@ -24,7 +24,10 @@ classifiers = [
     'Topic :: Software Development :: Libraries',
     'Typing :: Typed',
 ]
-dependencies = ['pydantic-ai-slim>=0.1']
+dependencies = [
+    'pydantic-ai-slim>=1.76.0',
+    "pydantic-monty>=0.0.9",
+]
 
 [project.urls]
 Homepage = 'https://github.com/pydantic/pydantic-harness'
@@ -51,7 +54,7 @@ style = 'pep440'
 bump = true
 
 [tool.hatch.build.targets.wheel]
-packages = ['src/pydantic_harness']
+packages = ['pydantic_harness']
 
 [tool.ruff]
 line-length = 120
@@ -78,6 +81,7 @@ quote-style = 'single'
 [tool.pyright]
 pythonVersion = '3.10'
 typeCheckingMode = 'strict'
+extraPaths = ['../monty/crates/monty-python/python']
 
 [tool.pytest.ini_options]
 xfail_strict = true
