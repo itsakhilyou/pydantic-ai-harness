@@ -186,6 +186,8 @@ class Shell(AbstractCapability[Any]):
             with anyio.CancelScope(shield=True):
                 await proc.wait()
             return f'[Command timed out after {timeout} seconds]'
+        finally:
+            await proc.aclose()
 
         stdout = b''.join(stdout_chunks).decode('utf-8', errors='replace')
         stderr = b''.join(stderr_chunks).decode('utf-8', errors='replace')

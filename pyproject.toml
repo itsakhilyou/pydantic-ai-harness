@@ -85,7 +85,15 @@ executionEnvironments = [
 
 [tool.pytest.ini_options]
 xfail_strict = true
-filterwarnings = ['error']
+filterwarnings = [
+    'error',
+    # Python 3.10 asyncio subprocess transports emit spurious ResourceWarnings
+    # and RuntimeErrors (from __del__ on a closed event loop) during GC even
+    # after the process is properly closed. Fixed in 3.11+.
+    'ignore:unclosed transport:ResourceWarning',
+    'ignore:unclosed file:ResourceWarning',
+    'ignore::pytest.PytestUnraisableExceptionWarning',
+]
 anyio_mode = 'auto'
 
 [tool.coverage.run]
