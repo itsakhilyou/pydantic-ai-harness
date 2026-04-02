@@ -7,4 +7,10 @@ Usage:
 # Each capability module is imported and re-exported here.
 # Capabilities are listed alphabetically.
 
-__all__: list[str] = []
+from pydantic_harness.filesystem import FileSystem
+from pydantic_harness.shell import Shell
+
+__all__: list[str] = [
+    'FileSystem',
+    'Shell',
+]

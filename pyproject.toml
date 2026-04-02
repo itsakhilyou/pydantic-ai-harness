@@ -24,7 +24,7 @@ classifiers = [
     'Topic :: Software Development :: Libraries',
     'Typing :: Typed',
 ]
-dependencies = ['pydantic-ai-slim>=1.76.0']
+dependencies = ['pydantic-ai-slim>=1.76.0', 'anyio>=4.0']
 
 [project.urls]
 Homepage = 'https://github.com/pydantic/pydantic-harness'
@@ -33,8 +33,8 @@ Issues = 'https://github.com/pydantic/pydantic-harness/issues'
 
 [dependency-groups]
 dev = [
-    'pytest',
     'anyio[trio]',
+    'pytest',
     'pytest-anyio',
     'coverage',
 ]
