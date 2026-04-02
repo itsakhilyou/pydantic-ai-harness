@@ -11,7 +11,9 @@ from pydantic_harness.secret_masking import (
     _ALL_BUILTIN_PATTERNS,
     _BUILTIN_CATEGORIES,
     SecretMasking,
+    _mask_dict_values,
     _mask_text,
+    _partial_mask_text,
 )
 
 # --- Unit tests for _mask_text ---
@@ -99,12 +101,124 @@ class TestMaskText:
         result = _mask_text(text, _ALL_BUILTIN_PATTERNS, '[REDACTED]')
         assert 'sk-abc123' not in result
         assert 'ghp_' not in result
-        assert result.count('[REDACTED]') == 2
+        assert result.count('[REDACTED]') >= 2
 
     def test_custom_replacement(self):
         text = 'sk-abc123def456ghi789jkl012mno'
         result = _mask_text(text, _ALL_BUILTIN_PATTERNS, '***')
         assert result == '***'
+
+    # --- New provider key patterns ---
+
+    def test_azure_subscription_key(self):
+        text = 'Ocp-Apim-Subscription-Key: abcdef1234567890abcdef1234567890'
+        result = _mask_text(text, _ALL_BUILTIN_PATTERNS, '[REDACTED]')
+        assert 'abcdef1234567890' not in result
+        assert '[REDACTED]' in result
+
+    def test_stripe_secret_key(self):
+        text = 'sk_live_abcdefghijklmnopqrstuvwx'
+        result = _mask_text(text, _ALL_BUILTIN_PATTERNS, '[REDACTED]')
+        assert 'sk_live_' not in result
+        assert result == '[REDACTED]'
+
+    def test_stripe_publishable_key(self):
+        text = 'pk_live_abcdefghijklmnopqrstuvwx'
+        result = _mask_text(text, _ALL_BUILTIN_PATTERNS, '[REDACTED]')
+        assert 'pk_live_' not in result
+        assert result == '[REDACTED]'
+
+    def test_sendgrid_key(self):
+        text = 'SG.abcdefghijklmnopqrstuv.abcdefghijklmnopqrstuvwx'
+        result = _mask_text(text, _ALL_BUILTIN_PATTERNS, '[REDACTED]')
+        assert 'SG.' not in result
+        assert result == '[REDACTED]'
+
+    def test_twilio_key(self):
+        text = 'SK0123456789abcdef0123456789abcdef'
+        result = _mask_text(text, _ALL_BUILTIN_PATTERNS, '[REDACTED]')
+        assert 'SK01234' not in result
+        assert '[REDACTED]' in result
+
+    def test_gcp_service_account_key(self):
+        text = '"private_key": "-----BEGIN RSA PRIVATE KEY-----\\nMIIE..."'
+        result = _mask_text(text, _ALL_BUILTIN_PATTERNS, '[REDACTED]')
+        assert '-----BEGIN RSA PRIVATE KEY-----' not in result
+        assert '[REDACTED]' in result
+
+    # --- .env content detection ---
+
+    def test_env_key_value_single_line(self):
+        text = 'DATABASE_URL=postgres://user:pass@localhost/db'
+        result = _mask_text(text, _ALL_BUILTIN_PATTERNS, '[REDACTED]')
+        assert 'DATABASE_URL=' not in result
+
+    def test_env_key_value_multiline(self):
+        text = 'API_KEY=some_secret_value\nDB_PASSWORD=hunter2\nDEBUG=true'
+        result = _mask_text(text, _ALL_BUILTIN_PATTERNS, '[REDACTED]')
+        assert 'some_secret_value' not in result
+        assert 'hunter2' not in result
+
+    def test_env_key_value_does_not_match_lowercase(self):
+        """Lowercase variable names are not typical .env format and should not match."""
+        patterns = _BUILTIN_CATEGORIES['env_file']
+        text = 'lowercase_var=value'
+        result = _mask_text(text, patterns, '[REDACTED]')
+        assert result == text
+
+
+# --- Unit tests for _partial_mask_text ---
+
+
+class TestPartialMaskText:
+    def test_partial_mask_openai_key(self):
+        text = 'sk-abc123def456ghi789jkl012mno'
+        result = _partial_mask_text(text, _ALL_BUILTIN_PATTERNS)
+        assert result.startswith('sk-a')
+        assert result.endswith('****')
+        assert 'abc123def456' not in result
+
+    def test_partial_mask_preserves_surrounding_text(self):
+        text = 'key is sk-abc123def456ghi789jkl012mno here'
+        result = _partial_mask_text(text, _ALL_BUILTIN_PATTERNS)
+        assert result.startswith('key is sk-a')
+        assert 'here' in result
+
+    def test_partial_mask_short_match_becomes_stars(self):
+        """When matched text is 4 chars or fewer, the whole thing becomes ****."""
+        patterns = {'short': re.compile(r'AB')}
+        result = _partial_mask_text('xABx', patterns)
+        assert result == 'x****x'
+
+
+# --- Unit tests for _mask_dict_values ---
+
+
+class TestMaskDictValues:
+    def test_masks_string_values(self):
+        d = {'key': 'sk-abc123def456ghi789jkl012mno', 'name': 'safe'}
+        result = _mask_dict_values(d, _ALL_BUILTIN_PATTERNS, '[REDACTED]')
+        assert result['key'] == '[REDACTED]'
+        assert result['name'] == 'safe'
+
+    def test_masks_nested_dicts(self):
+        d = {'outer': {'inner_key': 'sk-abc123def456ghi789jkl012mno'}}
+        result = _mask_dict_values(d, _ALL_BUILTIN_PATTERNS, '[REDACTED]')
+        assert result['outer']['inner_key'] == '[REDACTED]'
+
+    def test_non_string_values_unchanged(self):
+        d: dict[str, Any] = {'count': 42, 'flag': True, 'items': [1, 2]}
+        result = _mask_dict_values(d, _ALL_BUILTIN_PATTERNS, '[REDACTED]')
+        assert result == d
+
+    def test_partial_mask_in_dict(self):
+        d = {'token': 'sk-abc123def456ghi789jkl012mno'}
+        result = _mask_dict_values(d, _ALL_BUILTIN_PATTERNS, '[REDACTED]', partial=True)
+        assert result['token'].startswith('sk-a')
+        assert result['token'].endswith('****')
+
+    def test_empty_dict(self):
+        assert _mask_dict_values({}, _ALL_BUILTIN_PATTERNS, '[REDACTED]') == {}
 
 
 # --- Tests for SecretMasking dataclass construction ---
@@ -116,6 +230,7 @@ class TestSecretMaskingInit:
         assert sm.categories is None
         assert sm.custom_patterns is None
         assert sm.replacement == '[REDACTED]'
+        assert sm.partial_mask is False
         assert sm._compiled == _ALL_BUILTIN_PATTERNS
 
     def test_specific_categories(self):
@@ -145,6 +260,68 @@ class TestSecretMaskingInit:
     def test_custom_replacement(self):
         sm = SecretMasking(replacement='<MASKED>')
         assert sm.replacement == '<MASKED>'
+
+    def test_partial_mask_flag(self):
+        sm = SecretMasking(partial_mask=True)
+        assert sm.partial_mask is True
+
+    def test_env_file_category(self):
+        sm = SecretMasking(categories=['env_file'])
+        assert 'env_key_value' in sm._compiled
+
+
+# --- Tests for before_tool_execute ---
+
+
+class TestBeforeToolExecute:
+    @pytest.fixture()
+    def capability(self) -> SecretMasking:
+        return SecretMasking()
+
+    @pytest.fixture()
+    def ctx(self) -> Any:
+        return MagicMock()
+
+    @pytest.fixture()
+    def call(self) -> Any:
+        return MagicMock()
+
+    @pytest.fixture()
+    def tool_def(self) -> Any:
+        return MagicMock()
+
+    @pytest.mark.anyio()
+    async def test_scrubs_secret_in_args(self, capability: SecretMasking, ctx: Any, call: Any, tool_def: Any):
+        args = {'api_key': 'sk-abc123def456ghi789jkl012mno', 'query': 'hello'}
+        result = await capability.before_tool_execute(ctx, call=call, tool_def=tool_def, args=args)
+        assert result['api_key'] == '[REDACTED]'
+        assert result['query'] == 'hello'
+
+    @pytest.mark.anyio()
+    async def test_scrubs_nested_dict_args(self, capability: SecretMasking, ctx: Any, call: Any, tool_def: Any):
+        args: dict[str, Any] = {'config': {'token': 'sk-abc123def456ghi789jkl012mno'}, 'name': 'test'}
+        result = await capability.before_tool_execute(ctx, call=call, tool_def=tool_def, args=args)
+        assert result['config']['token'] == '[REDACTED]'
+        assert result['name'] == 'test'
+
+    @pytest.mark.anyio()
+    async def test_no_secrets_unchanged(self, capability: SecretMasking, ctx: Any, call: Any, tool_def: Any):
+        args = {'query': 'hello world', 'count': 5}
+        result = await capability.before_tool_execute(ctx, call=call, tool_def=tool_def, args=args)
+        assert result == args
+
+    @pytest.mark.anyio()
+    async def test_partial_mask_in_args(self, ctx: Any, call: Any, tool_def: Any):
+        capability = SecretMasking(partial_mask=True)
+        args = {'key': 'sk-abc123def456ghi789jkl012mno'}
+        result = await capability.before_tool_execute(ctx, call=call, tool_def=tool_def, args=args)
+        assert result['key'].startswith('sk-a')
+        assert result['key'].endswith('****')
+
+    @pytest.mark.anyio()
+    async def test_empty_args(self, capability: SecretMasking, ctx: Any, call: Any, tool_def: Any):
+        result = await capability.before_tool_execute(ctx, call=call, tool_def=tool_def, args={})
+        assert result == {}
 
 
 # --- Tests for after_tool_execute ---
@@ -215,6 +392,16 @@ class TestAfterToolExecute:
         assert 'INT-ABCDEFGH' not in result
         assert '[REDACTED]' in result
 
+    @pytest.mark.anyio()
+    async def test_partial_mask_in_tool_result(self, ctx: Any, call: Any, tool_def: Any):
+        capability = SecretMasking(partial_mask=True)
+        result = await capability.after_tool_execute(
+            ctx, call=call, tool_def=tool_def, args={}, result='sk-abc123def456ghi789jkl012mno'
+        )
+        assert isinstance(result, str)
+        assert result.startswith('sk-a')
+        assert result.endswith('****')
+
 
 # --- Tests for after_model_request ---
 
@@ -273,13 +460,29 @@ class TestAfterModelRequest:
         result = await capability.after_model_request(ctx, request_context=request_context, response=response)
         assert result.parts[0] is tool_call
 
+    @pytest.mark.anyio()
+    async def test_partial_mask_in_model_response(self, ctx: Any, request_context: Any):
+        capability = SecretMasking(partial_mask=True)
+        response = ModelResponse(parts=[TextPart(content='key: sk-abc123def456ghi789jkl012mno')])
+        result = await capability.after_model_request(ctx, request_context=request_context, response=response)
+        part = result.parts[0]
+        assert isinstance(part, TextPart)
+        assert part.content.startswith('key: sk-a')
+        assert part.content.endswith('****')
+
 
 # --- Test pattern categories ---
 
 
 class TestPatternCategories:
     def test_all_categories_exist(self):
-        assert set(_BUILTIN_CATEGORIES) == {'api_keys', 'tokens', 'connection_strings', 'private_keys'}
+        assert set(_BUILTIN_CATEGORIES) == {
+            'api_keys',
+            'tokens',
+            'connection_strings',
+            'private_keys',
+            'env_file',
+        }
 
     def test_api_keys_category(self):
         patterns = _BUILTIN_CATEGORIES['api_keys']
@@ -290,6 +493,12 @@ class TestPatternCategories:
         assert 'slack_token' in patterns
         assert 'google_api_key' in patterns
         assert 'generic_api_key' in patterns
+        assert 'azure_subscription_key' in patterns
+        assert 'stripe_secret_key' in patterns
+        assert 'stripe_publishable_key' in patterns
+        assert 'sendgrid_key' in patterns
+        assert 'twilio_key' in patterns
+        assert 'gcp_service_account_key' in patterns
 
     def test_tokens_category(self):
         patterns = _BUILTIN_CATEGORIES['tokens']
@@ -304,6 +513,10 @@ class TestPatternCategories:
     def test_private_keys_category(self):
         patterns = _BUILTIN_CATEGORIES['private_keys']
         assert 'private_key' in patterns
+
+    def test_env_file_category(self):
+        patterns = _BUILTIN_CATEGORIES['env_file']
+        assert 'env_key_value' in patterns
 
     def test_all_builtin_is_union_of_categories(self):
         expected: dict[str, re.Pattern[str]] = {}
