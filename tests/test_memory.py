@@ -106,6 +106,27 @@ class TestScoreEntry:
         entry = MemoryEntry(key='k', content='foxes jump')
         assert _score_entry(entry, ['fox']) == 0
 
+    def test_regex_metacharacters_in_query(self) -> None:
+        entry = MemoryEntry(key='lang', content='I use c++ daily')
+        assert _score_entry(entry, ['c++']) == 1
+
+    def test_empty_words_list(self) -> None:
+        entry = MemoryEntry(key='k', content='hello')
+        assert _score_entry(entry, []) == 0
+
+    def test_underscore_word_boundary(self) -> None:
+        entry = MemoryEntry(key='user_name', content='text')
+        assert _score_entry(entry, ['name']) == 1
+
+    def test_hyphen_word_boundary(self) -> None:
+        entry = MemoryEntry(key='my-project', content='text')
+        assert _score_entry(entry, ['project']) == 1
+
+    def test_partial_word_match(self) -> None:
+        entry = MemoryEntry(key='k', content='alice likes blue')
+        # 'alice' matches (1), 'zzz' does not (0) = score 1
+        assert _score_entry(entry, ['alice', 'zzz']) == 1
+
 
 # --- _simple_similarity ---
 
@@ -133,6 +154,18 @@ class TestSimpleSimilarity:
 
     def test_one_char_diff(self) -> None:
         assert _simple_similarity('abcdefghij_x', 'abcdefghij_y')
+
+    def test_edit_distance_exactly_three(self) -> None:
+        # Just over the threshold -- should NOT be similar
+        assert not _simple_similarity('abcdefghij_abc', 'abcdefghij_xyz')
+
+    def test_nine_char_keys(self) -> None:
+        # Just below the 10-char minimum
+        assert not _simple_similarity('abcdefghi', 'abcdefghj')
+
+    def test_exactly_ten_char_keys_not_similar(self) -> None:
+        # 10-char keys differing at position 10 do NOT share a 10-char prefix
+        assert not _simple_similarity('abcdefghij', 'abcdefghik')
 
 
 # --- InMemoryStore ---
@@ -460,6 +493,14 @@ class TestFormatEntry:
         )
         assert format_entry(entry) == '[k] hello (tags: t; scope: project; expires: 2099-01-01T00:00:00+00:00)'
 
+    def test_empty_content(self) -> None:
+        entry = MemoryEntry(key='k', content='')
+        assert format_entry(entry) == '[k] '
+
+    def test_empty_key(self) -> None:
+        entry = MemoryEntry(key='', content='hello')
+        assert format_entry(entry) == '[] hello'
+
 
 # --- Memory capability ---
 
@@ -647,6 +688,16 @@ class TestMemoryTools:
         tools = self._get_tools()
         assert 'No memory found' in tools['delete_memory']('nope')
 
+    def test_save_with_ttl_zero(self) -> None:
+        store = InMemoryStore()
+        tools = self._get_tools(store)
+        tools['save_memory']('k', 'v', None, 'global', 0)
+        entry = store.get('k')
+        assert entry is not None
+        assert entry.expires_at is not None
+        # TTL=0 means it expires immediately
+        assert entry.is_expired()
+
 
 # --- Dedup warning ---
 
@@ -724,6 +775,16 @@ class TestMemoryInstructions:
         text = cap.build_instructions(self._make_ctx())
         assert 'Currently stored memories' not in text
 
+    def test_instructions_exact_max_no_overflow(self) -> None:
+        store = InMemoryStore()
+        for i in range(5):
+            store.put(MemoryEntry(key=f'k{i}', content=f'v{i}'))
+        cap: Memory[None] = Memory(store=store, max_instructions_memories=5)
+        text = cap.build_instructions(self._make_ctx())
+        assert '... and' not in text
+        assert '[k0]' in text
+        assert '[k4]' in text
+
 
 # --- MemoryStore protocol ---
 
@@ -734,3 +795,18 @@ class TestMemoryStoreProtocol:
 
     def test_file_store_satisfies_protocol(self, tmp_path: Path) -> None:
         assert isinstance(FileStore(tmp_path / 'mem.json'), MemoryStore)
+
+
+# --- AbstractCapability conformance ---
+
+
+class TestAbstractCapabilityConformance:
+    def test_is_abstract_capability_subclass(self) -> None:
+        from pydantic_ai.capabilities.abstract import AbstractCapability
+
+        assert issubclass(Memory, AbstractCapability)
+
+    def test_instance_is_abstract_capability(self) -> None:
+        from pydantic_ai.capabilities.abstract import AbstractCapability
+
+        assert isinstance(Memory(), AbstractCapability)
