@@ -286,7 +286,7 @@ class TestAfterToolExecute:
     async def test_summarize_fn_not_called_under_limit(self) -> None:
         calls: list[str] = []
 
-        def summarize(tool_name: str, output: str) -> str:
+        def summarize(tool_name: str, output: str) -> str:  # pragma: no cover
             calls.append(tool_name)
             return 'summarized'
 
@@ -482,6 +482,27 @@ class TestLineCountLimits:
             result=text,
         )
         assert 'showing last 3 of 10 lines' in result
+
+    @pytest.mark.anyio
+    async def test_both_lines_and_chars_exceed_double_truncation(self) -> None:
+        """When both limits fire, line truncation is applied first, then char truncation."""
+        cap: ToolOutputManagement[None] = ToolOutputManagement(
+            max_output_chars=50,
+            max_output_lines=5,
+            strategy=TruncationStrategy.head,
+        )
+        # 20 lines of 100 chars each — after line truncation to 5 lines the
+        # result is still well over 50 chars, so char truncation kicks in too.
+        text = '\n'.join('x' * 100 for _ in range(20))
+        result = await cap.after_tool_execute(
+            None,  # type: ignore[arg-type]
+            call=CALL,
+            tool_def=TOOL_DEF,
+            args={},
+            result=text,
+        )
+        # Char-level truncation marker should appear in the final output.
+        assert 'chars' in result
 
 
 # ---------------------------------------------------------------------------
