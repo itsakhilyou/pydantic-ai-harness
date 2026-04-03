@@ -34,7 +34,12 @@ The sandbox uses Monty, a subset of Python. Key restrictions:
 - **Available modules**: `sys`, `typing`, `asyncio`, `math`, `json`, `re`, `datetime`, `os`, `pathlib`
 - **No `import *`**: wildcard imports are not supported
 
-State is preserved between calls (REPL-style). Set `restart: true` to reset state.\
+State is preserved between calls (REPL-style). Set `restart: true` to reset state.
+
+Returns: {
+  "output": "Text printed to stdout via print() calls. Omitted if nothing was printed.",
+  "result": "The value of the last expression, like a Python REPL. Omitted if the last statement is not an expression (e.g. assignment, function call with no return value)."
+}\
 """
 
 # TODO: Add Python function signatures for available external functions to the tool description,
@@ -109,15 +114,32 @@ class CodeExecutionToolset(WrapperToolset[AgentDepsT]):
             t_name: _make_tool_callable(t_name, t, ctx) for t_name, t in original_tools.items()
         } or None
 
-        # TODO: Capture print output via `print_callback` and include it in the return value.
+        output_chunks: list[str] = []
+
+        def _print_callback(_stream: str, text: str) -> None:
+            output_chunks.append(text)
+
         try:
-            return await self._repl.feed_run_async(code=code, external_functions=external_functions)
+            result = await self._repl.feed_run_async(
+                code=code, external_functions=external_functions, print_callback=_print_callback
+            )
         except MontySyntaxError as e:
             raise ModelRetry(f'Syntax error in code:\n{e.display()}') from e
         except MontyTypingError as e:
             raise ModelRetry(f'Type error in code:\n{e.display()}') from e
         except MontyRuntimeError as e:
             raise ModelRetry(f'Runtime error:\n{e.display()}') from e
+
+        # TODO: For stdio-based driver runtimes (e.g. Monty's current driver loop),
+        # print output goes to stdout which is also used for JSON protocol parsing.
+        # This will need a different capture strategy for those runtimes.
+        response: dict[str, Any] = {}
+        printed = ''.join(output_chunks)
+        if printed:
+            response['output'] = printed
+        if result is not None:
+            response['result'] = result
+        return response
 
 
 def _make_tool_callable(tool_name: str, original_tool: ToolsetTool[Any], ctx: RunContext[Any]) -> Callable[..., Any]:
