@@ -37,7 +37,7 @@ def _configure_logfire() -> None:
     )
     logfire.instrument_pydantic_ai()
     try:
-        logfire.instrument_anthropic()
+        logfire.instrument_anthropic()  # pyright: ignore[reportUnknownMemberType]
     except Exception:  # pragma: no cover - anthropic instrumentation is optional
         pass
 
