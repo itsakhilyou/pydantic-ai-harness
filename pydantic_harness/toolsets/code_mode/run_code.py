@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import warnings
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
@@ -67,8 +68,19 @@ The following functions are available inside the sandbox. Call them directly \
 (do **not** redefine or import them) and `await` the result. All parameters are keyword-only.\
 """
 
-# TODO: Sanitize tool names that aren't valid Python identifiers (e.g. MCP tools with
-# hyphens/dots like `get-weather`, `api.call`) and map them back on dispatch.
+_INVALID_IDENT_CHARS = re.compile(r'[^a-zA-Z0-9_]')
+
+
+def _sanitize_tool_name(name: str) -> str:
+    """Turn a tool name into a valid Python identifier.
+
+    Replaces hyphens, dots, and other non-identifier characters with underscores,
+    and prepends ``_`` if the result starts with a digit.
+    """
+    sanitized = _INVALID_IDENT_CHARS.sub('_', name)
+    if sanitized and sanitized[0].isdigit():
+        sanitized = f'_{sanitized}'
+    return sanitized or '_'
 
 
 @dataclass
@@ -120,7 +132,7 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
         # writes code. The wrapped toolset can change between steps, so we rebuild
         # the description per step rather than caching.
         wrapped_tools = await self.wrapped.get_tools(ctx)
-        callable_defs = self._partition_callable_tools(wrapped_tools)
+        callable_defs, _ = self._partition_callable_tools(wrapped_tools)
         description = self._build_description(callable_defs)
 
         return {
@@ -130,6 +142,7 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
                     name=_RUN_CODE_TOOL_NAME,
                     description=description,
                     parameters_json_schema=_RUN_CODE_JSON_SCHEMA,
+                    metadata={'code_arg_name': 'code', 'code_arg_language': 'python'},
                 ),
                 max_retries=3,
                 args_validator=cast(SchemaValidatorProt, _RUN_CODE_ARGS_VALIDATOR),
@@ -147,15 +160,23 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
             self._repl = MontyRepl()
 
         wrapped_tools = await self.wrapped.get_tools(ctx)
-        callable_defs = self._partition_callable_tools(wrapped_tools)
+        callable_defs, sanitized_to_original = self._partition_callable_tools(wrapped_tools)
 
         # Pass None instead of {} when there are no tools — Monty treats them differently.
         # Dispatch through `self.wrapped`, NOT through `tool.toolset`: when the wrapped
         # toolset is itself a wrapper (e.g. `CombinedToolset`), `tool.toolset` is the
         # innermost owning toolset and will assert-fail on the wrapper-typed `tool`.
+        #
+        # For sanitized names (e.g. `get_weather` from `get-weather`), Monty sees the
+        # safe name but we dispatch using the original name from the wrapped toolset.
         external_functions = {
-            t_name: _make_async_tool_wrapper(t_name, self.wrapped, wrapped_tools[t_name], ctx)
-            for t_name in callable_defs
+            safe_name: _make_async_tool_wrapper(
+                sanitized_to_original.get(safe_name, safe_name),
+                self.wrapped,
+                wrapped_tools[sanitized_to_original.get(safe_name, safe_name)],
+                ctx,
+            )
+            for safe_name in callable_defs
         } or None
 
         capture = _PrintCapture()
@@ -184,16 +205,28 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
             response['result'] = result
         return response
 
-    def _partition_callable_tools(self, wrapped_tools: dict[str, ToolsetTool[AgentDepsT]]) -> dict[str, ToolDefinition]:
+    def _partition_callable_tools(
+        self, wrapped_tools: dict[str, ToolsetTool[AgentDepsT]]
+    ) -> tuple[dict[str, ToolDefinition], dict[str, str]]:
         """Return tool definitions that can be called from inside the sandbox.
+
+        Tool names that are not valid Python identifiers (e.g. MCP tools with
+        hyphens or dots like ``get-weather``, ``api.call``) are sanitized to
+        underscored forms and mapped back to their original names for dispatch.
 
         Deferred tools (`kind` of `external`/`unapproved`, or `defer_loading=True`)
         cannot be invoked synchronously inside the sandbox so they are dropped here
         with a one-time warning per tool. Output tools are excluded by
         `get_wrapper_toolset`'s contract and never reach this method, so we trust
         the contract and don't defensively check for them.
+
+        Returns:
+            A tuple of ``(callable_defs, sanitized_to_original)`` where
+            ``sanitized_to_original`` maps each sanitized name back to its
+            original tool name (only for tools that were actually renamed).
         """
         callable_defs: dict[str, ToolDefinition] = {}
+        sanitized_to_original: dict[str, str] = {}
         for name, tool in wrapped_tools.items():
             td = tool.tool_def
             if td.defer or td.defer_loading:
@@ -207,8 +240,27 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
                         stacklevel=2,
                     )
                 continue
-            callable_defs[name] = td
-        return callable_defs
+
+            safe_name = _sanitize_tool_name(name)
+            if safe_name != name:
+                if safe_name in callable_defs:
+                    # The sanitized name collides with a tool already registered
+                    # (either a native tool or an earlier sanitized tool) — skip
+                    # the second one and warn so the user knows to rename manually.
+                    existing = sanitized_to_original.get(safe_name, safe_name)
+                    warnings.warn(
+                        f'CodeMode: tool {name!r} sanitizes to {safe_name!r} which '
+                        f'collides with {existing!r}; '
+                        f'{name!r} will be hidden from the sandbox.',
+                        UserWarning,
+                        stacklevel=2,
+                    )
+                    continue
+                sanitized_to_original[safe_name] = name
+                td = replace(td, name=safe_name)
+
+            callable_defs[safe_name] = td
+        return callable_defs, sanitized_to_original
 
     def _build_description(self, callable_defs: dict[str, ToolDefinition]) -> str:
         """Render the `run_code` description: base prose + TypedDicts + function signatures."""

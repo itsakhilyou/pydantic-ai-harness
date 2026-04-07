@@ -31,6 +31,7 @@ from pydantic_harness.capabilities import CodeMode
 from pydantic_harness.toolsets import CodeModeToolset
 from pydantic_harness.toolsets.code_mode.run_code import (
     _PrintCapture,  # pyright: ignore[reportPrivateUsage]
+    _sanitize_tool_name,  # pyright: ignore[reportPrivateUsage]
 )
 
 pytestmark = pytest.mark.anyio
@@ -682,6 +683,157 @@ async def test_code_mode_via_agent_run_executes_run_code_and_returns_result() ->
 async def test_code_mode_can_be_registered_as_agent_capability() -> None:
     """`CodeMode` can be passed via `Agent(capabilities=[...])` without raising."""
     Agent(TestModel(), capabilities=[CodeMode[None]()])
+
+
+# ---------------------------------------------------------------------------
+# Tool name sanitization
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    'original, expected',
+    [
+        ('get_weather', 'get_weather'),  # already valid — no change
+        ('get-weather', 'get_weather'),  # hyphen → underscore
+        ('api.call', 'api_call'),  # dot → underscore
+        ('api.call-now', 'api_call_now'),  # mixed
+        ('123tool', '_123tool'),  # leading digit → prepend underscore
+        ('a', 'a'),  # single char
+        ('-', '_'),  # single invalid char
+    ],
+)
+def test_sanitize_tool_name(original: str, expected: str) -> None:
+    assert _sanitize_tool_name(original) == expected
+
+
+async def test_hyphenated_tool_name_is_sanitized_and_callable() -> None:
+    """A tool with hyphens in the name is automatically renamed and callable from the sandbox."""
+    td = ToolDefinition(
+        name='get-weather',
+        description='Get the weather.',
+        parameters_json_schema={
+            'type': 'object',
+            'properties': {'city': {'type': 'string'}},
+            'required': ['city'],
+        },
+    )
+    static = _StaticToolset([td], results={'get-weather': 'sunny'})
+    wrapper = CodeMode[None]().get_wrapper_toolset(static)
+    assert isinstance(wrapper, CodeModeToolset)
+
+    ctx = build_run_context(None)
+    tools = await wrapper.get_tools(ctx)
+    description = tools['run_code'].tool_def.description
+    assert description is not None
+    # The sanitized name appears in the description, not the original.
+    assert 'get_weather' in description
+    assert 'get-weather' not in description
+
+    # End-to-end: the model writes `await get_weather(...)` and the call
+    # dispatches to the original `get-weather` tool in the wrapped toolset.
+    result = await wrapper.call_tool(
+        'run_code',
+        {'code': "print(await get_weather(city='NYC'))"},
+        ctx,
+        tools['run_code'],
+    )
+    assert result == {'output': 'sunny\n'}
+
+
+async def test_dotted_tool_name_is_sanitized_and_callable() -> None:
+    """A tool with dots in the name is automatically renamed and callable."""
+    td = ToolDefinition(
+        name='api.lookup',
+        description='Look up an API.',
+        parameters_json_schema={
+            'type': 'object',
+            'properties': {'key': {'type': 'string'}},
+            'required': ['key'],
+        },
+    )
+    static = _StaticToolset([td], results={'api.lookup': 'found'})
+    wrapper = CodeMode[None]().get_wrapper_toolset(static)
+    assert isinstance(wrapper, CodeModeToolset)
+
+    ctx = build_run_context(None)
+    tools = await wrapper.get_tools(ctx)
+    result = await wrapper.call_tool(
+        'run_code',
+        {'code': "print(await api_lookup(key='x'))"},
+        ctx,
+        tools['run_code'],
+    )
+    assert result == {'output': 'found\n'}
+
+
+async def test_sanitized_name_collision_warns_and_drops_second() -> None:
+    """When two tool names sanitize to the same identifier, the second is dropped with a warning."""
+    td1 = ToolDefinition(
+        name='get-weather',
+        description='Get weather (hyphens).',
+        parameters_json_schema={'type': 'object', 'properties': {'x': {'type': 'string'}}, 'required': ['x']},
+    )
+    td2 = ToolDefinition(
+        name='get.weather',
+        description='Get weather (dots).',
+        parameters_json_schema={'type': 'object', 'properties': {'x': {'type': 'string'}}, 'required': ['x']},
+    )
+    static = _StaticToolset([td1, td2], results={'get-weather': 'rain'})
+    wrapper = CodeMode[None]().get_wrapper_toolset(static)
+    assert isinstance(wrapper, CodeModeToolset)
+
+    ctx = build_run_context(None)
+    with pytest.warns(UserWarning, match=r"tool 'get.weather' sanitizes to 'get_weather'"):
+        tools = await wrapper.get_tools(ctx)
+
+    description = tools['run_code'].tool_def.description
+    assert description is not None
+    # Only the first tool survives.
+    assert description.count('get_weather') >= 1
+    assert 'Get weather (dots)' not in description
+
+
+async def test_sanitized_name_collision_with_native_tool() -> None:
+    """A sanitized name that collides with a native (already valid) tool is dropped."""
+    td_native = ToolDefinition(
+        name='get_weather',
+        description='Native tool.',
+        parameters_json_schema={'type': 'object', 'properties': {'x': {'type': 'string'}}, 'required': ['x']},
+    )
+    td_hyphen = ToolDefinition(
+        name='get-weather',
+        description='Hyphenated tool.',
+        parameters_json_schema={'type': 'object', 'properties': {'x': {'type': 'string'}}, 'required': ['x']},
+    )
+    static = _StaticToolset([td_native, td_hyphen], results={'get_weather': 'ok'})
+    wrapper = CodeMode[None]().get_wrapper_toolset(static)
+    assert isinstance(wrapper, CodeModeToolset)
+
+    ctx = build_run_context(None)
+    with pytest.warns(UserWarning, match=r"tool 'get-weather' sanitizes to 'get_weather'.*collides with 'get_weather'"):
+        tools = await wrapper.get_tools(ctx)
+
+    description = tools['run_code'].tool_def.description
+    assert description is not None
+    assert 'Native tool' in description
+    assert 'Hyphenated tool' not in description
+
+
+# ---------------------------------------------------------------------------
+# Logfire metadata
+# ---------------------------------------------------------------------------
+
+
+async def test_run_code_tool_has_code_metadata() -> None:
+    """The `run_code` ToolDefinition carries metadata for Logfire code rendering."""
+    wrapper = CodeMode[None]().get_wrapper_toolset(_build_function_toolset(add))
+    assert isinstance(wrapper, CodeModeToolset)
+
+    tools = await wrapper.get_tools(build_run_context(None))
+    metadata = tools['run_code'].tool_def.metadata
+    assert metadata is not None
+    assert metadata['code_arg_name'] == 'code'
+    assert metadata['code_arg_language'] == 'python'
 
 
 # ---------------------------------------------------------------------------
