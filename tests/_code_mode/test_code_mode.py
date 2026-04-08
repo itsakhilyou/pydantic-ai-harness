@@ -469,6 +469,18 @@ async def test_filter_keeps_rejected_tools_native() -> None:
     assert 'async def greet' not in description
 
 
+async def test_native_tool_call_passes_through() -> None:
+    """Calling a native (non-sandboxed) tool passes through to the wrapped toolset."""
+    capability = CodeMode[None](tools=lambda ctx, td: td.name == 'add')
+    wrapper = capability.get_wrapper_toolset(_build_function_toolset(add, greet))
+    assert isinstance(wrapper, CodeModeToolset)
+
+    ctx = build_run_context(None)
+    tools = await wrapper.get_tools(ctx)
+    result = await wrapper.call_tool('greet', {'name': 'Alice', 'greeting': 'Hi'}, ctx, tools['greet'])
+    assert result == 'Hi, Alice!'
+
+
 async def test_filter_excluding_everything_yields_run_code_with_no_functions() -> None:
     """A filter that rejects every tool produces a `run_code` with no functions block."""
     capability = CodeMode[None](tools=lambda ctx, td: False)
@@ -599,6 +611,34 @@ async def test_deferred_tools_are_dropped_with_one_time_warning() -> None:
 
     # Second `get_tools` call must not warn again — the set is preserved across calls
     # within the same toolset instance.
+    import warnings as _warnings
+
+    with _warnings.catch_warnings():
+        _warnings.simplefilter('error')
+        await wrapper.get_tools(ctx)
+
+
+async def test_deferred_execution_tools_are_dropped_with_warning() -> None:
+    """Tools with `kind='external'` (deferred execution) are excluded with a separate warning."""
+    td_external = ToolDefinition(
+        name='approve_action',
+        description='Needs approval.',
+        parameters_json_schema={'type': 'object', 'properties': {'x': {'type': 'string'}}, 'required': ['x']},
+        kind='external',
+    )
+    static = _StaticToolset([_make_address_tool_def('get_user', 'Get a user.', 'street'), td_external])
+    wrapper = CodeMode[None]().get_wrapper_toolset(static)
+    assert isinstance(wrapper, CodeModeToolset)
+
+    ctx = build_run_context(None)
+    with pytest.warns(UserWarning, match=r"tool 'approve_action' requires deferred execution"):
+        tools = await wrapper.get_tools(ctx)
+
+    description = tools['run_code'].tool_def.description
+    assert description is not None
+    assert 'approve_action' not in description
+
+    # Second call must not warn again.
     import warnings as _warnings
 
     with _warnings.catch_warnings():
