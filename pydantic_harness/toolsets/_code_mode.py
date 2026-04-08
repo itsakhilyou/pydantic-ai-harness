@@ -13,7 +13,7 @@ from pydantic import Field, TypeAdapter
 from pydantic_ai import AbstractToolset, RunContext, ToolDefinition, WrapperToolset
 from pydantic_ai.exceptions import ApprovalRequired, CallDeferred, ModelRetry, UserError
 from pydantic_ai.function_signature import FunctionSignature
-from pydantic_ai.messages import ToolCallPart, ToolReturn, ToolReturnPart
+from pydantic_ai.messages import ToolCallPart, ToolReturn, ToolReturnContent, ToolReturnPart, is_multi_modal_content
 from pydantic_ai.tools import AgentDepsT, ToolSelector, matches_tool_selector
 from pydantic_ai.toolsets.abstract import SchemaValidatorProt, ToolsetTool
 from pydantic_monty import (
@@ -42,6 +42,9 @@ _RUN_CODE_ADAPTER = TypeAdapter(_RunCodeArguments)
 _RUN_CODE_JSON_SCHEMA = _RUN_CODE_ADAPTER.json_schema()
 _RUN_CODE_ARGS_VALIDATOR = _RUN_CODE_ADAPTER.validator
 _TOOL_RETURN_ADAPTER: TypeAdapter[Any] = TypeAdapter(Any)
+# Validates Monty results back to proper types (e.g. reconstructs BinaryContent from serialized dicts)
+# so that multimodal content flows through to the model natively.
+_TOOL_RETURN_CONTENT_VALIDATOR: TypeAdapter[Any] = TypeAdapter(ToolReturnContent)
 
 _RUN_CODE_BASE_DESCRIPTION = """\
 Write and run Python code in a sandboxed environment.
@@ -54,10 +57,12 @@ The sandbox uses Monty, a subset of Python. Key restrictions:
 
 State is preserved between calls (REPL-style). Set `restart: true` to reset state.
 
-Returns: {
-  "output": "Text printed to stdout via print() calls. Omitted if nothing was printed.",
-  "result": "The value of the last expression, like a Python REPL. Omitted if the last statement is not an expression (e.g. assignment, function call with no return value)."
-}\
+The last expression's value is automatically captured as the return value — you do **not** need to \
+`print()` it. Avoid `print()` for return values as it produces Python string representations, not \
+structured data. Use `print()` only for supplementary logging or debug output.
+
+Returns the last expression's value directly. If `print()` was also called, returns \
+`{"output": "<printed text>", "result": <last expression>}`.\
 """
 
 _FUNCTIONS_HEADER = """\
@@ -306,14 +311,30 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
         # TODO: For stdio-based driver runtimes (e.g. Monty's current driver loop),
         # print output goes to stdout which is also used for JSON protocol parsing.
         # This will need a different capture strategy for those runtimes.
-        response: dict[str, Any] = {}
         printed = capture.joined
-        if printed:
-            response['output'] = printed
+
+        # Validate result to reconstruct multimodal types (e.g. BinaryContent from
+        # serialized dicts) so they flow through to the model natively.
         if result is not None:
-            response['result'] = result
+            result = _TOOL_RETURN_CONTENT_VALIDATOR.validate_python(result)
+
+        # Build return value:
+        # - No print → return result directly (multimodal content stays top-level
+        #   so _split_content can extract it for native model delivery)
+        # - Print + multimodal result → list format so _split_content can extract files
+        # - Print + plain result → dict with output/result keys
+        if not printed:
+            return_value: Any = result if result is not None else {}
+        elif result is None:
+            return_value = {'output': printed}
+        elif _contains_multimodal(result):
+            # Flatten lists so _split_content can find each multimodal item at top level.
+            return_value = [printed, *result] if isinstance(result, list) else [printed, result]
+        else:
+            return_value = {'output': printed, 'result': result}
+
         return ToolReturn(
-            return_value=response,
+            return_value=return_value,
             metadata={'tool_calls': nested_calls, 'tool_returns': nested_returns},
         )
 
@@ -374,6 +395,18 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
                     stacklevel=2,
                 )
                 continue
+            # Warn when a sandboxed tool has no return schema — the generated
+            # signature will show `-> Any`, giving the model no type information
+            # about the return shape, which limits code mode effectiveness.
+            if td.return_schema is None and name not in self._warned_deferred:
+                self._warned_deferred.add(name)
+                warnings.warn(
+                    f'CodeMode: tool {name!r} has no return schema; '
+                    f'its signature will show `-> Any`, which may reduce code mode effectiveness.',
+                    UserWarning,
+                    stacklevel=2,
+                )
+
             if safe_name != name:
                 sanitized_to_original[safe_name] = name
                 td = replace(td, name=safe_name)
@@ -403,6 +436,15 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
             sections.append('```python\n' + '\n\n'.join(type_blocks) + '\n```')
         sections.append('```python\n' + '\n\n'.join(function_blocks) + '\n```')
         return '\n\n'.join(sections)
+
+
+def _contains_multimodal(value: Any) -> bool:
+    """Check if a value is or directly contains multimodal content (images, audio, etc.)."""
+    if is_multi_modal_content(value):
+        return True
+    if isinstance(value, list):
+        return any(is_multi_modal_content(item) for item in value)  # pyright: ignore[reportUnknownVariableType]
+    return False
 
 
 class _PrintCapture:

@@ -137,6 +137,7 @@ def _make_address_tool_def(name: str, description: str, addr_field: str) -> Tool
             },
             'required': ['addr', 'label'],
         },
+        return_schema={'type': 'string'},
     )
 
 
@@ -335,7 +336,8 @@ async def test_run_code_returns_last_expression_value() -> None:
     ctx = await build_ctx(None, wrapper)
     tools = await wrapper.get_tools(ctx)
     result = await wrapper.call_tool('run_code', {'code': '1 + 2'}, ctx, tools['run_code'])
-    assert result.return_value == {'result': 3}
+    # No print output → result returned directly (not wrapped in a dict).
+    assert result.return_value == 3
 
 
 async def test_run_code_syntax_error_becomes_model_retry() -> None:
@@ -666,6 +668,54 @@ async def test_deferred_execution_tools_are_dropped_with_warning() -> None:
         await wrapper.get_tools(ctx)
 
 
+async def test_tool_without_return_schema_warns() -> None:
+    """A sandboxed tool with no return_schema triggers a one-time warning."""
+    td = ToolDefinition(
+        name='search',
+        description='Search for things.',
+        parameters_json_schema={'type': 'object', 'properties': {'q': {'type': 'string'}}, 'required': ['q']},
+        # No return_schema — simulates an MCP tool without outputSchema.
+    )
+    static = _StaticToolset([td], results={'search': 'found it'})
+    wrapper = CodeMode[None]().get_wrapper_toolset(static)
+    assert isinstance(wrapper, CodeModeToolset)
+
+    ctx = build_run_context(None)
+    with pytest.warns(UserWarning, match=r"tool 'search' has no return schema"):
+        tools = await wrapper.get_tools(ctx)
+
+    # Tool is still callable despite the warning.
+    description = tools['run_code'].tool_def.description
+    assert description is not None
+    assert 'async def search' in description
+
+    # Second call must not warn again.
+    import warnings as _warnings
+
+    with _warnings.catch_warnings():
+        _warnings.simplefilter('error')
+        await wrapper.get_tools(ctx)
+
+
+async def test_tool_with_return_schema_does_not_warn() -> None:
+    """A sandboxed tool WITH a return_schema does not trigger the warning."""
+    import warnings as _warnings
+
+    td = ToolDefinition(
+        name='get_user',
+        description='Get a user.',
+        parameters_json_schema={'type': 'object', 'properties': {'id': {'type': 'integer'}}, 'required': ['id']},
+        return_schema={'type': 'object', 'properties': {'name': {'type': 'string'}}},
+    )
+    static = _StaticToolset([td], results={'get_user': {'name': 'Alice'}})
+    wrapper = CodeMode[None]().get_wrapper_toolset(static)
+    assert isinstance(wrapper, CodeModeToolset)
+
+    with _warnings.catch_warnings():
+        _warnings.simplefilter('error')
+        await wrapper.get_tools(build_run_context(None))
+
+
 # ---------------------------------------------------------------------------
 # Agent.run end-to-end (with FunctionModel hand-driving the model output)
 # ---------------------------------------------------------------------------
@@ -778,6 +828,7 @@ async def test_hyphenated_tool_name_is_sanitized_and_callable() -> None:
             'properties': {'city': {'type': 'string'}},
             'required': ['city'],
         },
+        return_schema={'type': 'string'},
     )
     static = _StaticToolset([td], results={'get-weather': 'sunny'})
     wrapper = CodeMode[None]().get_wrapper_toolset(static)
@@ -812,6 +863,7 @@ async def test_dotted_tool_name_is_sanitized_and_callable() -> None:
             'properties': {'key': {'type': 'string'}},
             'required': ['key'],
         },
+        return_schema={'type': 'string'},
     )
     static = _StaticToolset([td], results={'api.lookup': 'found'})
     wrapper = CodeMode[None]().get_wrapper_toolset(static)
@@ -834,11 +886,13 @@ async def test_sanitized_name_collision_warns_and_drops_second() -> None:
         name='get-weather',
         description='Get weather (hyphens).',
         parameters_json_schema={'type': 'object', 'properties': {'x': {'type': 'string'}}, 'required': ['x']},
+        return_schema={'type': 'string'},
     )
     td2 = ToolDefinition(
         name='get.weather',
         description='Get weather (dots).',
         parameters_json_schema={'type': 'object', 'properties': {'x': {'type': 'string'}}, 'required': ['x']},
+        return_schema={'type': 'string'},
     )
     static = _StaticToolset([td1, td2], results={'get-weather': 'rain'})
     wrapper = CodeMode[None]().get_wrapper_toolset(static)
@@ -861,11 +915,13 @@ async def test_sanitized_name_collision_with_native_tool() -> None:
         name='get_weather',
         description='Native tool.',
         parameters_json_schema={'type': 'object', 'properties': {'x': {'type': 'string'}}, 'required': ['x']},
+        return_schema={'type': 'string'},
     )
     td_hyphen = ToolDefinition(
         name='get-weather',
         description='Hyphenated tool.',
         parameters_json_schema={'type': 'object', 'properties': {'x': {'type': 'string'}}, 'required': ['x']},
+        return_schema={'type': 'string'},
     )
     static = _StaticToolset([td_native, td_hyphen], results={'get_weather': 'ok'})
     wrapper = CodeMode[None]().get_wrapper_toolset(static)
@@ -913,7 +969,8 @@ async def test_tool_returning_tool_return_is_unwrapped() -> None:
 
     result = await wrapper.call_tool('run_code', {'code': 'await fancy()'}, ctx, tools['run_code'])
     # The sandbox receives the unwrapped value (42), not the ToolReturn wrapper.
-    assert result.return_value == {'result': 42}
+    # No print output → result returned directly.
+    assert result.return_value == 42
 
     # The nested ToolReturnPart carries the ToolReturn metadata.
     returns = result.metadata['tool_returns']
@@ -976,6 +1033,125 @@ async def test_invalid_tool_args_surface_as_model_retry() -> None:
             ctx,
             tools['run_code'],
         )
+
+
+# ---------------------------------------------------------------------------
+# Multimodal tool returns
+# ---------------------------------------------------------------------------
+
+
+async def test_tool_returning_binary_image_is_returned_directly() -> None:
+    """A tool that returns BinaryContent passes through the sandbox and is
+    returned as native multimodal content (not wrapped in a dict)."""
+    from pydantic_ai.messages import BinaryContent
+
+    image_bytes = b'\x89PNG\r\n\x1a\n fake image data'
+
+    def gen_image() -> Any:
+        """Generate an image."""
+        return BinaryContent(data=image_bytes, media_type='image/png')
+
+    wrapper = CodeMode[None]().get_wrapper_toolset(_build_function_toolset(gen_image))
+    assert isinstance(wrapper, CodeModeToolset)
+    ctx = await build_ctx(None, wrapper)
+    tools = await wrapper.get_tools(ctx)
+
+    result = await wrapper.call_tool('run_code', {'code': 'await gen_image()'}, ctx, tools['run_code'])
+    # No print → multimodal content returned directly for native model delivery.
+    rv = result.return_value
+    assert isinstance(rv, BinaryContent)
+    assert rv.data == image_bytes
+    assert rv.media_type == 'image/png'
+
+
+async def test_tool_returning_binary_image_with_print_uses_list_format() -> None:
+    """When print output accompanies a multimodal return, the result is a list
+    so _split_content can extract the image for native delivery."""
+    from pydantic_ai.messages import BinaryContent
+
+    image_bytes = b'\x89PNG fake'
+
+    def gen_image() -> Any:
+        """Generate an image."""
+        return BinaryContent(data=image_bytes, media_type='image/png')
+
+    wrapper = CodeMode[None]().get_wrapper_toolset(_build_function_toolset(gen_image))
+    assert isinstance(wrapper, CodeModeToolset)
+    ctx = await build_ctx(None, wrapper)
+    tools = await wrapper.get_tools(ctx)
+
+    result = await wrapper.call_tool(
+        'run_code',
+        {'code': 'img = await gen_image()\nprint("generated")\nimg'},
+        ctx,
+        tools['run_code'],
+    )
+    # Print + multimodal → list format.
+    rv = result.return_value
+    assert isinstance(rv, list)
+    assert rv[0] == 'generated\n'
+    assert isinstance(rv[1], BinaryContent)
+    assert rv[1].data == image_bytes
+
+
+async def test_tool_returning_list_with_binary_image_and_print() -> None:
+    """A list result containing multimodal items with print output gets flattened
+    so _split_content can find each multimodal item at the top level."""
+    from pydantic_ai.messages import BinaryContent
+
+    image_bytes = b'\x89PNG list'
+
+    def gen_images() -> Any:
+        """Generate a list with an image."""
+        return [BinaryContent(data=image_bytes, media_type='image/png'), 'caption']
+
+    wrapper = CodeMode[None]().get_wrapper_toolset(_build_function_toolset(gen_images))
+    assert isinstance(wrapper, CodeModeToolset)
+    ctx = await build_ctx(None, wrapper)
+    tools = await wrapper.get_tools(ctx)
+
+    result = await wrapper.call_tool(
+        'run_code',
+        {'code': 'imgs = await gen_images()\nprint("done")\nimgs'},
+        ctx,
+        tools['run_code'],
+    )
+    # Print + list-with-multimodal → flattened list.
+    rv = result.return_value
+    assert isinstance(rv, list)
+    assert rv[0] == 'done\n'
+    assert isinstance(rv[1], BinaryContent)
+    assert rv[1].data == image_bytes
+    assert rv[2] == 'caption'
+
+
+async def test_tool_returning_tool_return_with_binary_content() -> None:
+    """A tool that wraps a BinaryContent in a ToolReturn has the image properly unwrapped
+    and returned as native multimodal content."""
+    from pydantic_ai.messages import BinaryContent
+    from pydantic_ai.messages import ToolReturn as ToolReturnMsg
+
+    image_bytes = b'\x89PNG wrapped'
+
+    def gen_image() -> Any:
+        """Generate an image wrapped in ToolReturn."""
+        return ToolReturnMsg(
+            return_value=BinaryContent(data=image_bytes, media_type='image/png'), metadata={'src': 'test'}
+        )
+
+    wrapper = CodeMode[None]().get_wrapper_toolset(_build_function_toolset(gen_image))
+    assert isinstance(wrapper, CodeModeToolset)
+    ctx = await build_ctx(None, wrapper)
+    tools = await wrapper.get_tools(ctx)
+
+    result = await wrapper.call_tool('run_code', {'code': 'await gen_image()'}, ctx, tools['run_code'])
+    rv = result.return_value
+    assert isinstance(rv, BinaryContent)
+    assert rv.data == image_bytes
+
+    # ToolReturn metadata is preserved on the nested return part.
+    returns = result.metadata['tool_returns']
+    assert returns['pyd_ai_code_mode__1'].metadata == {'src': 'test'}
 
 
 # ---------------------------------------------------------------------------
