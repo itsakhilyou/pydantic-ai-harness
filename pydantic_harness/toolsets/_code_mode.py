@@ -210,17 +210,16 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
         # tool calls go through the standard validation/execution path. We
         # inherit `root_capability` from the agent's ToolManager (for capability
         # hooks) but use the *wrapped* toolset and its tools.
-        from pydantic_ai._tool_manager import ToolManager  # pyright: ignore[reportPrivateUsage]
+        from pydantic_ai.tool_manager import ToolManager
 
         parent_tm = ctx.tool_manager
-        tool_manager: Any = None
-        if parent_tm is not None:
-            tool_manager = ToolManager(
-                toolset=self.wrapped,
-                root_capability=parent_tm.root_capability,
-                ctx=ctx,
-                tools=tool.wrapped_tools,
-            )
+        assert parent_tm is not None, 'CodeModeToolset requires ctx.tool_manager to be set'
+        tool_manager = ToolManager(
+            toolset=self.wrapped,
+            root_capability=parent_tm.root_capability,
+            ctx=ctx,
+            tools=tool.wrapped_tools,
+        )
 
         # Collect nested tool calls and returns keyed by tool_call_id so they
         # can be attached as metadata on the run_code ToolReturnPart.
@@ -238,11 +237,7 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
             nested_calls[tool_call_id] = call_part
 
             try:
-                if tool_manager is not None:
-                    result = await tool_manager.handle_call(call_part, wrap_validation_errors=False)
-                else:
-                    # Direct dispatch for tests without an agent (ctx.tool_manager is None).
-                    result = await self.wrapped.call_tool(original_name, kwargs, ctx, tool.wrapped_tools[original_name])
+                result = await tool_manager.handle_call(call_part, wrap_validation_errors=False)
             except (CallDeferred, ApprovalRequired) as e:
                 # Approval/deferral require a round-trip back to the caller, which
                 # the sandbox cannot do. We raise UserError here; because this runs

@@ -60,6 +60,21 @@ def build_run_context(deps: T, run_step: int = 0) -> RunContext[T]:
     )
 
 
+async def build_ctx(deps: T, toolset: AbstractToolset[T], run_step: int = 0) -> RunContext[T]:
+    """Build a `RunContext` with a prepared `ToolManager`.
+
+    Use this for tests that call `call_tool` — `CodeModeToolset` requires
+    `ctx.tool_manager` to be set.
+    """
+    from pydantic_ai.tool_manager import ToolManager
+
+    ctx = build_run_context(deps, run_step=run_step)
+    tm = ToolManager(toolset=toolset)
+    prepared_tm = await tm.for_run_step(ctx)
+    ctx.tool_manager = prepared_tm
+    return ctx
+
+
 # ---------------------------------------------------------------------------
 # Sample tool functions used by tests
 # ---------------------------------------------------------------------------
@@ -201,7 +216,7 @@ async def test_run_code_executes_call_through_monty() -> None:
     wrapper = CodeMode[None]().get_wrapper_toolset(toolset)
     assert isinstance(wrapper, CodeModeToolset)
 
-    ctx = build_run_context(None)
+    ctx = await build_ctx(None, wrapper)
     tools = await wrapper.get_tools(ctx)
     result = await wrapper.call_tool(
         'run_code',
@@ -230,7 +245,7 @@ async def test_run_code_executes_string_returning_tool_with_default_arg() -> Non
     """
     wrapper = CodeMode[None]().get_wrapper_toolset(_build_function_toolset(greet))
     assert isinstance(wrapper, CodeModeToolset)
-    ctx = build_run_context(None)
+    ctx = await build_ctx(None, wrapper)
     tools = await wrapper.get_tools(ctx)
     result = await wrapper.call_tool(
         'run_code',
@@ -245,7 +260,7 @@ async def test_run_code_can_chain_multiple_tool_calls_in_one_snippet() -> None:
     """A realistic LLM snippet that calls two tools in one `run_code` invocation."""
     wrapper = CodeMode[None]().get_wrapper_toolset(_build_function_toolset(add, greet))
     assert isinstance(wrapper, CodeModeToolset)
-    ctx = build_run_context(None)
+    ctx = await build_ctx(None, wrapper)
     tools = await wrapper.get_tools(ctx)
     code = "total = await add(a=2, b=3)\nmsg = await greet(name=str(total), greeting='Result is')\nprint(msg)"
     result = await wrapper.call_tool('run_code', {'code': code}, ctx, tools['run_code'])
@@ -265,7 +280,7 @@ async def test_run_code_renders_no_arg_tool_signature() -> None:
 
     wrapper = CodeMode[None]().get_wrapper_toolset(_build_function_toolset(now_iso))
     assert isinstance(wrapper, CodeModeToolset)
-    ctx = build_run_context(None)
+    ctx = await build_ctx(None, wrapper)
     tools = await wrapper.get_tools(ctx)
 
     description = tools['run_code'].tool_def.description
@@ -288,7 +303,7 @@ async def test_run_code_state_persists_between_calls() -> None:
     wrapper = CodeMode[None]().get_wrapper_toolset(_build_function_toolset(add))
     assert isinstance(wrapper, CodeModeToolset)
 
-    ctx = build_run_context(None)
+    ctx = await build_ctx(None, wrapper)
     tools = await wrapper.get_tools(ctx)
     run_code = tools['run_code']
 
@@ -303,7 +318,7 @@ async def test_run_code_restart_resets_repl_state() -> None:
     wrapper = CodeMode[None]().get_wrapper_toolset(_build_function_toolset(add))
     assert isinstance(wrapper, CodeModeToolset)
 
-    ctx = build_run_context(None)
+    ctx = await build_ctx(None, wrapper)
     tools = await wrapper.get_tools(ctx)
     run_code = tools['run_code']
 
@@ -318,7 +333,7 @@ async def test_run_code_returns_last_expression_value() -> None:
     """When the last statement is an expression, its value is returned in `result`."""
     wrapper = CodeMode[None]().get_wrapper_toolset(_build_function_toolset(add))
     assert isinstance(wrapper, CodeModeToolset)
-    ctx = build_run_context(None)
+    ctx = await build_ctx(None, wrapper)
     tools = await wrapper.get_tools(ctx)
     result = await wrapper.call_tool('run_code', {'code': '1 + 2'}, ctx, tools['run_code'])
     assert result.return_value == {'result': 3}
@@ -328,7 +343,7 @@ async def test_run_code_syntax_error_becomes_model_retry() -> None:
     """A Python syntax error is surfaced as `ModelRetry` so the model can fix it."""
     wrapper = CodeMode[None]().get_wrapper_toolset(_build_function_toolset(add))
     assert isinstance(wrapper, CodeModeToolset)
-    ctx = build_run_context(None)
+    ctx = await build_ctx(None, wrapper)
     tools = await wrapper.get_tools(ctx)
     with pytest.raises(ModelRetry, match=r'Syntax error in code'):
         await wrapper.call_tool('run_code', {'code': 'def ('}, ctx, tools['run_code'])
@@ -361,7 +376,7 @@ async def test_run_code_typing_error_becomes_model_retry(monkeypatch: pytest.Mon
 
     wrapper = CodeMode[None]().get_wrapper_toolset(_build_function_toolset(add))
     assert isinstance(wrapper, CodeModeToolset)
-    ctx = build_run_context(None)
+    ctx = await build_ctx(None, wrapper)
     tools = await wrapper.get_tools(ctx)
 
     with pytest.raises(ModelRetry, match=r'Type error in code') as exc_info:
@@ -385,7 +400,7 @@ async def test_for_run_returns_fresh_instance_with_cleared_repl() -> None:
     """`for_run` must hand back a new toolset instance — concurrent runs cannot share REPL state."""
     wrapper = CodeMode[None]().get_wrapper_toolset(_build_function_toolset(add))
     assert isinstance(wrapper, CodeModeToolset)
-    ctx = build_run_context(None)
+    ctx = await build_ctx(None, wrapper)
 
     # Force lazy REPL creation on the *original* instance.
     tools = await wrapper.get_tools(ctx)
@@ -443,7 +458,7 @@ async def test_for_run_step_preserves_repl_when_wrapped_changes() -> None:
 
     wrapper = CodeMode[None]().get_wrapper_toolset(_SwappingToolset())
     assert isinstance(wrapper, CodeModeToolset)
-    ctx = build_run_context(None)
+    ctx = await build_ctx(None, wrapper)
 
     # Lazily create the REPL on the original instance.
     tools = await wrapper.get_tools(ctx)
@@ -485,7 +500,7 @@ async def test_native_tool_call_passes_through() -> None:
     wrapper = capability.get_wrapper_toolset(_build_function_toolset(add, greet))
     assert isinstance(wrapper, CodeModeToolset)
 
-    ctx = build_run_context(None)
+    ctx = await build_ctx(None, wrapper)
     tools = await wrapper.get_tools(ctx)
     result = await wrapper.call_tool('greet', {'name': 'Alice', 'greeting': 'Hi'}, ctx, tools['greet'])
     assert result == 'Hi, Alice!'
@@ -561,7 +576,7 @@ async def test_typed_dict_argument_round_trips_through_monty() -> None:
     wrapper = CodeMode[None]().get_wrapper_toolset(_build_function_toolset(lookup_person))
     assert isinstance(wrapper, CodeModeToolset)
 
-    ctx = build_run_context(None)
+    ctx = await build_ctx(None, wrapper)
     tools = await wrapper.get_tools(ctx)
     code = (
         "addr = {'street': '1 Main St', 'city': 'NYC'}\n"
@@ -584,7 +599,7 @@ async def test_conflicting_typed_dicts_get_tool_name_prefix() -> None:
     wrapper = CodeMode[None]().get_wrapper_toolset(static)
     assert isinstance(wrapper, CodeModeToolset)
 
-    ctx = build_run_context(None)
+    ctx = await build_ctx(None, wrapper)
     tools = await wrapper.get_tools(ctx)
     description = tools['run_code'].tool_def.description
     assert description is not None
@@ -787,7 +802,7 @@ async def test_hyphenated_tool_name_is_sanitized_and_callable() -> None:
     wrapper = CodeMode[None]().get_wrapper_toolset(static)
     assert isinstance(wrapper, CodeModeToolset)
 
-    ctx = build_run_context(None)
+    ctx = await build_ctx(None, wrapper)
     tools = await wrapper.get_tools(ctx)
     description = tools['run_code'].tool_def.description
     assert description is not None
@@ -821,7 +836,7 @@ async def test_dotted_tool_name_is_sanitized_and_callable() -> None:
     wrapper = CodeMode[None]().get_wrapper_toolset(static)
     assert isinstance(wrapper, CodeModeToolset)
 
-    ctx = build_run_context(None)
+    ctx = await build_ctx(None, wrapper)
     tools = await wrapper.get_tools(ctx)
     result = await wrapper.call_tool(
         'run_code',
@@ -912,7 +927,7 @@ async def test_tool_returning_tool_return_is_unwrapped() -> None:
 
     wrapper = CodeMode[None]().get_wrapper_toolset(_build_function_toolset(fancy))
     assert isinstance(wrapper, CodeModeToolset)
-    ctx = build_run_context(None)
+    ctx = await build_ctx(None, wrapper)
     tools = await wrapper.get_tools(ctx)
 
     result = await wrapper.call_tool('run_code', {'code': 'await fancy()'}, ctx, tools['run_code'])
@@ -934,7 +949,7 @@ async def test_approval_required_surfaces_as_model_retry() -> None:
 
     wrapper = CodeMode[None]().get_wrapper_toolset(_build_function_toolset(needs_approval))
     assert isinstance(wrapper, CodeModeToolset)
-    ctx = build_run_context(None)
+    ctx = await build_ctx(None, wrapper)
     tools = await wrapper.get_tools(ctx)
 
     with pytest.raises(ModelRetry, match='approval and deferral are not supported'):
@@ -954,7 +969,7 @@ async def test_model_retry_from_wrapped_tool_surfaces_as_model_retry() -> None:
 
     wrapper = CodeMode[None]().get_wrapper_toolset(_build_function_toolset(flaky))
     assert isinstance(wrapper, CodeModeToolset)
-    ctx = build_run_context(None)
+    ctx = await build_ctx(None, wrapper)
     tools = await wrapper.get_tools(ctx)
 
     with pytest.raises(ModelRetry, match='try again please'):
