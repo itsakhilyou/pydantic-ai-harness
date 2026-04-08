@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from pydantic_ai import AbstractToolset, RunContext
+from pydantic_ai import AbstractToolset
 from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.tools import AgentDepsT, ToolSelector
 
