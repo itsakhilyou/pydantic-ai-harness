@@ -978,6 +978,27 @@ async def test_model_retry_from_wrapped_tool_surfaces_as_model_retry() -> None:
         await wrapper.call_tool('run_code', {'code': 'await flaky()'}, ctx, tools['run_code'])
 
 
+async def test_invalid_tool_args_surface_as_model_retry() -> None:
+    """Wrong argument types passed to a sandboxed tool surface as ModelRetry.
+
+    ToolManager validates args before execution. Validation errors propagate
+    through Monty as RuntimeError → MontyRuntimeError → ModelRetry.
+    """
+    wrapper = CodeMode[None]().get_wrapper_toolset(_build_function_toolset(add))
+    assert isinstance(wrapper, CodeModeToolset)
+    ctx = await build_ctx(None, wrapper)
+    tools = await wrapper.get_tools(ctx)
+
+    # Pass a string where int is expected — ToolManager should reject this.
+    with pytest.raises(ModelRetry, match='Runtime error'):
+        await wrapper.call_tool(
+            'run_code',
+            {'code': "await add(a='not_a_number', b=3)"},
+            ctx,
+            tools['run_code'],
+        )
+
+
 # ---------------------------------------------------------------------------
 # OTel / Logfire instrumentation
 # ---------------------------------------------------------------------------
