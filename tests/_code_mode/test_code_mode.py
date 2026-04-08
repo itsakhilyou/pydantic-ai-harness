@@ -781,6 +781,8 @@ async def test_code_mode_can_be_registered_as_agent_capability() -> None:
         ('123tool', '_123tool'),  # leading digit → prepend underscore
         ('a', 'a'),  # single char
         ('-', '_'),  # single invalid char
+        ('for', 'for_'),  # Python keyword → append underscore
+        ('import', 'import_'),  # Python keyword
     ],
 )
 def test_sanitize_tool_name(original: str, expected: str) -> None:

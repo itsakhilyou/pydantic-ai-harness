@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import keyword
 import re
 import warnings
 from collections.abc import Callable
@@ -74,11 +75,13 @@ def _sanitize_tool_name(name: str) -> str:
     """Turn a tool name into a valid Python identifier.
 
     Replaces hyphens, dots, and other non-identifier characters with underscores,
-    and prepends `_` if the result starts with a digit.
+    prepends `_` if the result starts with a digit or is a Python keyword.
     """
     sanitized = _INVALID_IDENT_CHARS.sub('_', name)
     if sanitized and sanitized[0].isdigit():
         sanitized = f'_{sanitized}'
+    if keyword.iskeyword(sanitized):
+        sanitized = f'{sanitized}_'
     return sanitized or '_'
 
 
