@@ -56,9 +56,7 @@ style = 'pep440'
 bump = true
 
 [tool.uv.sources]
-# Use Monty `main` so we get `MontyRepl.feed_run_async()` (the deprecated
-# `run_repl_async` helper still works on 0.0.9 but the new direct method is the
-# supported path going forward). Drop this once the next monty release ships.
+# Use Monty `main` for `MontyRepl.feed_run_async` (not yet in a PyPI release).
 pydantic-monty = { git = 'https://github.com/pydantic/monty.git', branch = 'main', subdirectory = 'crates/monty-python' }
 
 [tool.hatch.build.targets.wheel]
