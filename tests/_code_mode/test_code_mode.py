@@ -209,7 +209,17 @@ async def test_run_code_executes_call_through_monty() -> None:
         ctx,
         tools['run_code'],
     )
-    assert result == {'output': '5\n'}
+    assert result.return_value == {'output': '5\n'}
+
+    # Nested tool calls are recorded as ToolCallPart/ToolReturnPart pairs in metadata.
+    nested = result.metadata['tool_call_parts']
+    assert len(nested) == 2  # one call + one return
+    assert nested[0].tool_name == 'add'
+    assert nested[0].args == {'a': 2, 'b': 3}
+    assert nested[0].tool_call_id == 'code_mode_1'
+    assert nested[1].tool_name == 'add'
+    assert nested[1].content == 5
+    assert nested[1].tool_call_id == 'code_mode_1'
 
 
 async def test_run_code_executes_string_returning_tool_with_default_arg() -> None:
@@ -228,7 +238,7 @@ async def test_run_code_executes_string_returning_tool_with_default_arg() -> Non
         ctx,
         tools['run_code'],
     )
-    assert result == {'output': 'Hello, Alice!\n'}
+    assert result.return_value == {'output': 'Hello, Alice!\n'}
 
 
 async def test_run_code_can_chain_multiple_tool_calls_in_one_snippet() -> None:
@@ -239,7 +249,7 @@ async def test_run_code_can_chain_multiple_tool_calls_in_one_snippet() -> None:
     tools = await wrapper.get_tools(ctx)
     code = "total = await add(a=2, b=3)\nmsg = await greet(name=str(total), greeting='Result is')\nprint(msg)"
     result = await wrapper.call_tool('run_code', {'code': code}, ctx, tools['run_code'])
-    assert result == {'output': 'Result is, 5!\n'}
+    assert result.return_value == {'output': 'Result is, 5!\n'}
 
 
 async def test_run_code_renders_no_arg_tool_signature() -> None:
@@ -270,7 +280,7 @@ async def test_run_code_renders_no_arg_tool_signature() -> None:
         ctx,
         tools['run_code'],
     )
-    assert result == {'output': '2026-04-08T12:00:00Z\n'}
+    assert result.return_value == {'output': '2026-04-08T12:00:00Z\n'}
 
 
 async def test_run_code_state_persists_between_calls() -> None:
@@ -283,9 +293,9 @@ async def test_run_code_state_persists_between_calls() -> None:
     run_code = tools['run_code']
 
     first = await wrapper.call_tool('run_code', {'code': 'x = await add(a=1, b=2)'}, ctx, run_code)
-    assert first == {}  # assignment, no output, no expression result
+    assert first.return_value == {}  # assignment, no output, no expression result
     second = await wrapper.call_tool('run_code', {'code': 'print(x * 10)'}, ctx, run_code)
-    assert second == {'output': '30\n'}
+    assert second.return_value == {'output': '30\n'}
 
 
 async def test_run_code_restart_resets_repl_state() -> None:
@@ -311,7 +321,7 @@ async def test_run_code_returns_last_expression_value() -> None:
     ctx = build_run_context(None)
     tools = await wrapper.get_tools(ctx)
     result = await wrapper.call_tool('run_code', {'code': '1 + 2'}, ctx, tools['run_code'])
-    assert result == {'result': 3}
+    assert result.return_value == {'result': 3}
 
 
 async def test_run_code_syntax_error_becomes_model_retry() -> None:
@@ -543,7 +553,7 @@ async def test_typed_dict_argument_round_trips_through_monty() -> None:
         'print(await lookup_person(person=p, count=3))'
     )
     result = await wrapper.call_tool('run_code', {'code': code}, ctx, tools['run_code'])
-    assert result == {'output': '3x Alice @ 1 Main St\n'}
+    assert result.return_value == {'output': '3x Alice @ 1 Main St\n'}
 
 
 async def test_conflicting_typed_dicts_get_tool_name_prefix() -> None:
@@ -581,7 +591,7 @@ async def test_conflicting_typed_dicts_get_tool_name_prefix() -> None:
         ctx,
         tools['run_code'],
     )
-    assert result == {'output': 'user-result company-result\n'}
+    assert result.return_value == {'output': 'user-result company-result\n'}
 
 
 # ---------------------------------------------------------------------------
@@ -777,7 +787,7 @@ async def test_hyphenated_tool_name_is_sanitized_and_callable() -> None:
         ctx,
         tools['run_code'],
     )
-    assert result == {'output': 'sunny\n'}
+    assert result.return_value == {'output': 'sunny\n'}
 
 
 async def test_dotted_tool_name_is_sanitized_and_callable() -> None:
@@ -803,7 +813,7 @@ async def test_dotted_tool_name_is_sanitized_and_callable() -> None:
         ctx,
         tools['run_code'],
     )
-    assert result == {'output': 'found\n'}
+    assert result.return_value == {'output': 'found\n'}
 
 
 async def test_sanitized_name_collision_warns_and_drops_second() -> None:
@@ -874,6 +884,46 @@ async def test_run_code_tool_has_code_metadata() -> None:
     assert metadata is not None
     assert metadata['code_arg_name'] == 'code'
     assert metadata['code_arg_language'] == 'python'
+
+
+async def test_tool_returning_tool_return_is_unwrapped() -> None:
+    """A wrapped tool that returns a `ToolReturn` has its value unwrapped for the sandbox."""
+    from pydantic_ai.messages import ToolReturn as ToolReturnMsg
+
+    def fancy() -> Any:
+        """Return a ToolReturn with metadata."""
+        return ToolReturnMsg(return_value=42, metadata={'source': 'test'})
+
+    wrapper = CodeMode[None]().get_wrapper_toolset(_build_function_toolset(fancy))
+    assert isinstance(wrapper, CodeModeToolset)
+    ctx = build_run_context(None)
+    tools = await wrapper.get_tools(ctx)
+
+    result = await wrapper.call_tool('run_code', {'code': 'await fancy()'}, ctx, tools['run_code'])
+    # The sandbox receives the unwrapped value (42), not the ToolReturn wrapper.
+    assert result.return_value == {'result': 42}
+
+    # The nested ToolReturnPart carries the ToolReturn metadata.
+    parts = result.metadata['tool_call_parts']
+    return_part = parts[1]
+    assert return_part.metadata == {'source': 'test'}
+
+
+async def test_approval_required_surfaces_as_model_retry() -> None:
+    """Tools that raise ApprovalRequired inside the sandbox surface as ModelRetry."""
+    from pydantic_ai.exceptions import ApprovalRequired as _ApprovalRequired
+
+    def needs_approval() -> str:
+        """A tool that requires approval."""
+        raise _ApprovalRequired('needs human')
+
+    wrapper = CodeMode[None]().get_wrapper_toolset(_build_function_toolset(needs_approval))
+    assert isinstance(wrapper, CodeModeToolset)
+    ctx = build_run_context(None)
+    tools = await wrapper.get_tools(ctx)
+
+    with pytest.raises(ModelRetry, match='approval and deferral are not supported'):
+        await wrapper.call_tool('run_code', {'code': 'await needs_approval()'}, ctx, tools['run_code'])
 
 
 # ---------------------------------------------------------------------------

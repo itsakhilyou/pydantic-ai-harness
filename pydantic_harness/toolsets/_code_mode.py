@@ -10,9 +10,9 @@ from typing import Annotated, Any, cast
 
 from pydantic import Field, TypeAdapter
 from pydantic_ai import AbstractToolset, RunContext, ToolDefinition, WrapperToolset
-from pydantic_ai.exceptions import ModelRetry
+from pydantic_ai.exceptions import ApprovalRequired, CallDeferred, ModelRetry, UserError
 from pydantic_ai.function_signature import FunctionSignature
-from pydantic_ai.messages import ToolCallPart
+from pydantic_ai.messages import ToolCallPart, ToolReturn, ToolReturnPart
 from pydantic_ai.tools import AgentDepsT, ToolSelector, matches_tool_selector
 from pydantic_ai.toolsets.abstract import SchemaValidatorProt, ToolsetTool
 from pydantic_monty import (
@@ -40,6 +40,7 @@ _RUN_CODE_TOOL_NAME = 'run_code'
 _RUN_CODE_ADAPTER = TypeAdapter(_RunCodeArguments)
 _RUN_CODE_JSON_SCHEMA = _RUN_CODE_ADAPTER.json_schema()
 _RUN_CODE_ARGS_VALIDATOR = _RUN_CODE_ADAPTER.validator
+_TOOL_RETURN_ADAPTER = TypeAdapter(Any)
 
 _RUN_CODE_BASE_DESCRIPTION = """\
 Write and run Python code in a sandboxed environment.
@@ -215,15 +216,58 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
                 tools=tool.wrapped_tools,
             )
 
+        # Collect nested ToolCallPart/ToolReturnPart pairs so they can be attached
+        # as metadata on the run_code ToolReturnPart for observability.
+        nested_parts: list[ToolCallPart | ToolReturnPart] = []
+        call_counter = 0
+
+        async def dispatch_tool_call(original_name: str, kwargs: dict[str, Any]) -> Any:
+            """Dispatch a single tool call from inside the sandbox."""
+            nonlocal call_counter
+            call_counter += 1
+            tool_call_id = f'code_mode_{call_counter}'
+            call_part = ToolCallPart(tool_name=original_name, args=kwargs, tool_call_id=tool_call_id)
+            nested_parts.append(call_part)
+
+            try:
+                if tool_manager is not None:
+                    result = await tool_manager.handle_call(call_part, wrap_validation_errors=False)
+                else:
+                    # Direct dispatch for tests without an agent (ctx.tool_manager is None).
+                    result = await self.wrapped.call_tool(
+                        original_name, kwargs, ctx, tool.wrapped_tools[original_name]
+                    )
+            except (CallDeferred, ApprovalRequired) as e:
+                raise UserError(
+                    'Tool approval and deferral are not supported in code mode. '
+                    f'Tool {original_name!r} raised {type(e).__name__}; ensure wrapped '
+                    'tools do not use approval or deferral when used with CodeMode.'
+                ) from e
+
+            # Unwrap ToolReturn to get the plain value for the sandbox,
+            # preserving the full ToolReturn metadata on the return part.
+            return_metadata: Any = None
+            if isinstance(result, ToolReturn):
+                return_metadata = result.metadata
+                result = result.return_value
+
+            return_part = ToolReturnPart(
+                tool_name=original_name,
+                content=result,
+                tool_call_id=tool_call_id,
+                metadata=return_metadata,
+            )
+            nested_parts.append(return_part)
+
+            # Serialize to JSON-compatible form so Monty receives only plain data.
+            return _TOOL_RETURN_ADAPTER.dump_python(result)
+
         # For sanitized names (e.g. `get_weather` from `get-weather`), Monty sees the
         # safe name but we dispatch using the original name from the wrapped toolset.
         external_functions = {
-            safe_name: _make_async_tool_wrapper(
+            safe_name: _make_sandbox_callable(
                 sanitized_to_original.get(safe_name, safe_name),
-                tool_manager,
-                self.wrapped,
-                tool.wrapped_tools,
-                ctx,
+                dispatch_tool_call,
             )
             for safe_name in callable_defs
         } or None
@@ -252,7 +296,7 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
             response['output'] = printed
         if result is not None:
             response['result'] = result
-        return response
+        return ToolReturn(return_value=response, metadata={'tool_call_parts': nested_parts})
 
     def _partition_callable_tools(
         self, wrapped_tools: dict[str, ToolsetTool[AgentDepsT]]
@@ -387,26 +431,18 @@ class _PrintCapture:
         return ''.join(self._chunks)
 
 
-def _make_async_tool_wrapper(
-    tool_name: str,
-    tool_manager: Any | None,
-    fallback_toolset: AbstractToolset[Any],
-    fallback_tools: dict[str, ToolsetTool[Any]],
-    ctx: RunContext[Any],
+def _make_sandbox_callable(
+    original_name: str,
+    dispatch: Callable[..., Any],
 ) -> Callable[..., Any]:
-    """Build the `async def` wrapper that Monty will dispatch to for `tool_name`.
+    """Build the `async def` callable that Monty dispatches to for a sandbox tool.
 
-    When a `ToolManager` is available (normal agent runs), dispatches through
-    `handle_call` for proper validation, tracing, and capability hooks.
-
-    Falls back to direct `toolset.call_tool` when no `ToolManager` is present
-    (e.g. in tests constructing toolsets directly, or `TemporalRunContext`).
+    Thin wrapper that routes keyword args to the shared `dispatch_tool_call`
+    closure defined in `call_tool`, which handles ToolManager dispatch,
+    exception handling, result serialization, and nested-parts bookkeeping.
     """
 
     async def wrapper(**kwargs: Any) -> Any:
-        if tool_manager is not None:
-            call = ToolCallPart(tool_name=tool_name, args=kwargs)
-            return await tool_manager.handle_call(call, wrap_validation_errors=False)
-        return await fallback_toolset.call_tool(tool_name, kwargs, ctx, fallback_tools[tool_name])
+        return await dispatch(original_name, kwargs)
 
     return wrapper
