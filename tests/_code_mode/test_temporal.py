@@ -11,8 +11,10 @@ runs `temporalite` automatically.
 
 from __future__ import annotations
 
+import json
 from collections.abc import AsyncIterator
 from datetime import timedelta
+from typing import Any
 
 import pytest
 
@@ -122,9 +124,12 @@ temporal_code_mode_agent = TemporalAgent(
 @workflow.defn
 class CodeModeWorkflow:
     @workflow.run
-    async def run(self, prompt: str) -> str:
+    async def run(self, prompt: str) -> dict[str, Any]:
         result = await temporal_code_mode_agent.run(prompt)
-        return str(result.output)
+        return {
+            'output': str(result.output),
+            'messages': result.all_messages_json().decode(),
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -146,10 +151,57 @@ async def test_code_mode_runs_in_temporal_workflow(client: Client) -> None:
         workflows=[CodeModeWorkflow],
         plugins=[AgentPlugin(temporal_code_mode_agent)],
     ):
-        output = await client.execute_workflow(
+        result = await client.execute_workflow(
             CodeModeWorkflow.run,
             args=['Calculate 3 + 4'],
             id='test_code_mode_temporal_1',
             task_queue=TASK_QUEUE,
         )
-        assert '7' in output
+
+    assert result['output'] == 'done: 7'
+
+    messages = json.loads(result['messages'])
+    assert len(messages) == 4
+
+    # 1. User prompt
+    assert messages[0]['kind'] == 'request'
+    assert messages[0]['parts'][0]['part_kind'] == 'user-prompt'
+    assert messages[0]['parts'][0]['content'] == 'Calculate 3 + 4'
+
+    # 2. Model response — run_code tool call
+    assert messages[1]['kind'] == 'response'
+    tc = messages[1]['parts'][0]
+    assert tc['part_kind'] == 'tool-call'
+    assert tc['tool_name'] == 'run_code'
+    assert tc['args'] == {'code': 'result = await add(a=3, b=4)\nresult'}
+    assert tc['tool_call_id'] == 'test_tc_1'
+
+    # 3. Tool return with nested tool call metadata
+    assert messages[2]['kind'] == 'request'
+    tr = messages[2]['parts'][0]
+    assert tr['part_kind'] == 'tool-return'
+    assert tr['tool_name'] == 'run_code'
+    assert tr['content'] == 7
+    assert tr['tool_call_id'] == 'test_tc_1'
+
+    # Verify nested tool call/return metadata
+    metadata = tr['metadata']
+    assert metadata is not None
+    nested_calls = metadata['tool_calls']
+    nested_returns = metadata['tool_returns']
+    assert len(nested_calls) == 1
+    assert len(nested_returns) == 1
+
+    nested_call = next(iter(nested_calls.values()))
+    assert nested_call['tool_name'] == 'add'
+    assert nested_call['args'] == {'a': 3, 'b': 4}
+
+    nested_return = next(iter(nested_returns.values()))
+    assert nested_return['tool_name'] == 'add'
+    assert nested_return['content'] == 7
+    assert nested_return['tool_call_id'] == nested_call['tool_call_id']
+
+    # 4. Final text response
+    assert messages[3]['kind'] == 'response'
+    assert messages[3]['parts'][0]['part_kind'] == 'text'
+    assert messages[3]['parts'][0]['content'] == 'done: 7'

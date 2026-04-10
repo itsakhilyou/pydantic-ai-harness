@@ -98,4 +98,51 @@ def test_code_mode_runs_in_dbos_workflow(dbos_instance: DBOS) -> None:
     workflow. DBOS defaults to `parallel_ordered_events` mode, which triggers
     the sequential FutureSnapshot resolution path."""
     result = dbos_code_mode_agent.run_sync('Calculate 3 + 4')
-    assert '7' in str(result.output)
+    assert result.output == 'done: 7'
+
+    messages = result.all_messages()
+    assert len(messages) == 4
+
+    # 1. User prompt
+    assert isinstance(messages[0], ModelRequest)
+    user_part = messages[0].parts[0]
+    assert user_part.part_kind == 'user-prompt'
+    assert user_part.content == 'Calculate 3 + 4'  # pyright: ignore[reportUnknownMemberType]
+
+    # 2. Model response — run_code tool call
+    assert isinstance(messages[1], ModelResponse)
+    tc = messages[1].parts[0]
+    assert isinstance(tc, ToolCallPart)
+    assert tc.tool_name == 'run_code'
+    assert tc.args == {'code': 'result = await add(a=3, b=4)\nresult'}
+    assert tc.tool_call_id == 'test_tc_1'
+
+    # 3. Tool return with nested tool call metadata
+    assert isinstance(messages[2], ModelRequest)
+    tr = messages[2].parts[0]
+    assert isinstance(tr, ToolReturnPart)
+    assert tr.tool_name == 'run_code'
+    assert tr.content == 7
+    assert tr.tool_call_id == 'test_tc_1'
+
+    # Verify nested tool call/return metadata
+    assert tr.metadata is not None
+    nested_calls: dict[str, ToolCallPart] = tr.metadata['tool_calls']
+    nested_returns: dict[str, ToolReturnPart] = tr.metadata['tool_returns']
+    assert len(nested_calls) == 1
+    assert len(nested_returns) == 1
+
+    nested_call = next(iter(nested_calls.values()))
+    assert nested_call.tool_name == 'add'
+    assert nested_call.args == {'a': 3, 'b': 4}
+
+    nested_return = next(iter(nested_returns.values()))
+    assert nested_return.tool_name == 'add'
+    assert nested_return.content == 7
+    assert nested_return.tool_call_id == nested_call.tool_call_id
+
+    # 4. Final text response
+    assert isinstance(messages[3], ModelResponse)
+    final = messages[3].parts[0]
+    assert isinstance(final, TextPart)
+    assert final.content == 'done: 7'

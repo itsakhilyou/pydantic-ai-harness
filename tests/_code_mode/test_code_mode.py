@@ -1312,14 +1312,13 @@ class TestCodeMode:
     # Sequential tool resolution
     # ---------------------------------------------------------------------------
 
-    async def test_sequential_tool_resolves_futures_sequentially(self) -> None:
-        """When a tool has `sequential=True`, FutureSnapshot tasks are resolved
-        one at a time rather than gathered in parallel. All tools still appear as
-        `async def` to the model — sequentialization is transparent."""
+    async def test_sequential_tool_rendered_as_sync_and_resolved_inline(self) -> None:
+        """A tool with `sequential=True` is rendered as `def` (sync) and
+        resolved inline at FunctionSnapshot via `resume(return_value=...)`."""
         from dataclasses import replace as dc_replace
 
         class _SeqToolset(AbstractToolset[None]):
-            """Marks add as sequential to trigger sequential resolution."""
+            """Marks add as sequential; greet stays parallel."""
 
             def __init__(self) -> None:
                 self._inner = _build_function_toolset(add, greet)
@@ -1343,18 +1342,73 @@ class TestCodeMode:
         seq_wrapper = CodeModeToolset[None](wrapped=_SeqToolset(), tool_selector='all')
         ctx = await build_ctx(None, seq_wrapper)
         tools = await seq_wrapper.get_tools(ctx)
+        run_code = tools['run_code']
 
+        # Sequential tool rendered as `def`, parallel tool as `async def`.
+        desc = run_code.tool_def.description or ''
+        assert 'def add(' in desc
+        assert 'async def add(' not in desc
+        assert 'async def greet(' in desc
+
+        # Sequential tool called without `await`, parallel with `await`.
         result = await seq_wrapper.call_tool(
             'run_code',
-            {'code': 'import asyncio\nresults = await asyncio.gather(add(a=1, b=2), greet(name="World"))\nresults'},
+            {
+                'code': 'result_add = add(a=1, b=2)\nresult_greet = await greet(name="World")\n[result_add, result_greet]'
+            },
+            ctx,
+            run_code,
+        )
+        assert result.return_value == [3, 'Hello, World!']
+
+    async def test_sequential_tool_barrier_awaits_pending_parallel_tasks(self) -> None:
+        """When a sequential tool is called while parallel tasks are pending,
+        the pending tasks are awaited first (barrier) before dispatching."""
+        from dataclasses import replace as dc_replace
+
+        class _SeqToolset(AbstractToolset[None]):
+            def __init__(self) -> None:
+                self._inner = _build_function_toolset(add, greet)
+
+            @property
+            def id(self) -> str | None:
+                return None  # pragma: no cover
+
+            async def get_tools(self, ctx: RunContext[None]) -> dict[str, ToolsetTool[None]]:
+                tools = await self._inner.get_tools(ctx)
+                return {
+                    n: dc_replace(t, tool_def=dc_replace(t.tool_def, sequential=True)) if n == 'add' else t
+                    for n, t in tools.items()
+                }
+
+            async def call_tool(
+                self, name: str, tool_args: dict[str, Any], ctx: RunContext[None], tool: ToolsetTool[None]
+            ) -> Any:
+                return await self._inner.call_tool(name, tool_args, ctx, tool)
+
+        seq_wrapper = CodeModeToolset[None](wrapped=_SeqToolset(), tool_selector='all')
+        ctx = await build_ctx(None, seq_wrapper)
+        tools = await seq_wrapper.get_tools(ctx)
+
+        # Start a parallel call (greet, async def), then call a sequential tool (add, def).
+        # The barrier should await greet before dispatching add.
+        result = await seq_wrapper.call_tool(
+            'run_code',
+            {
+                'code': (
+                    'future_greet = greet(name="World")\n'
+                    'result_add = add(a=1, b=2)\n'
+                    'result_greet = await future_greet\n'
+                    '[result_add, result_greet]'
+                )
+            },
             ctx,
             tools['run_code'],
         )
         assert result.return_value == [3, 'Hello, World!']
 
     async def test_sequential_tool_error_surfaces_as_model_retry(self) -> None:
-        """An error from a tool in sequential resolution mode is passed back into
-        Monty via ExternalException and surfaces as ModelRetry."""
+        """An error from a sequential tool (resolved inline) surfaces as ModelRetry."""
         from dataclasses import replace as dc_replace
 
         class _SeqToolset(AbstractToolset[None]):
@@ -1379,14 +1433,14 @@ class TestCodeMode:
         tools = await seq_wrapper.get_tools(ctx)
         run_code = tools['run_code']
         # Make a successful call so the REPL is no longer fresh (type checking skipped).
-        await seq_wrapper.call_tool('run_code', {'code': 'await add(a=1, b=2)'}, ctx, run_code)
+        await seq_wrapper.call_tool('run_code', {'code': 'add(a=1, b=2)'}, ctx, run_code)
         # Now bad args go through the runtime path in sequential resolution.
         with pytest.raises(ModelRetry, match='Runtime error'):
-            await seq_wrapper.call_tool('run_code', {'code': "await add(a='bad', b=3)"}, ctx, run_code)
+            await seq_wrapper.call_tool('run_code', {'code': "add(a='bad', b=3)"}, ctx, run_code)
 
     async def test_global_sequential_mode_forces_sequential_resolution(self) -> None:
         """When the parallel execution mode is `sequential`, tool calls inside the
-        sandbox are resolved sequentially. Signatures stay `async def`."""
+        sandbox are resolved sequentially via FutureSnapshot. Signatures stay `async def`."""
         from pydantic_ai.tool_manager import ToolManager
 
         wrapper = CodeMode[None]().get_wrapper_toolset(_build_function_toolset(add))
@@ -1397,7 +1451,7 @@ class TestCodeMode:
             tools = await wrapper.get_tools(ctx)
             run_code = tools['run_code']
 
-            # All tools are still rendered as `async def`.
+            # All tools are still rendered as `async def` (global mode doesn't affect rendering).
             desc = run_code.tool_def.description
             assert desc is not None
             assert 'async def add(' in desc
