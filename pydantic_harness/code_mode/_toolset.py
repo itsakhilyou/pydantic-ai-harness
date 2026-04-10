@@ -391,12 +391,12 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
 
         Tools requiring deferred execution (kind `external`/`unapproved`) or
         deferred loading (`defer_loading=True`) cannot run in the sandbox and
-        are excluded from ``callable_defs``. Their names are returned in the
+        are excluded from `callable_defs`. Their names are returned in the
         third element so the caller can promote them back to native tools.
 
         Returns:
-            A tuple of ``(callable_defs, sanitized_to_original, native_fallbacks)``
-            where ``native_fallbacks`` contains original tool names that should
+            A tuple of `(callable_defs, sanitized_to_original, native_fallbacks)`
+            where `native_fallbacks` contains original tool names that should
             be exposed as native tool calls instead of being sandboxed.
         """
         callable_defs: dict[str, ToolDefinition] = {}
