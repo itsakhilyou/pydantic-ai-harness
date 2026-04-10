@@ -681,8 +681,8 @@ wheels = [
 
 [[package]]
 name = "pydantic-ai-slim"
-version = "1.79.1.dev5+acbfe629"
-source = { git = "https://github.com/pydantic/pydantic-ai.git?subdirectory=pydantic_ai_slim&branch=tool-search-cap#acbfe629c1a75b0173e04e9ca832ad1ab536925a" }
+version = "1.79.1.dev3+7389e51a"
+source = { git = "https://github.com/pydantic/pydantic-ai.git?subdirectory=pydantic_ai_slim&branch=main#7389e51a6a9f2321ca1fa727a17c313b23c89349" }
 dependencies = [
     { name = "exceptiongroup", marker = "python_full_version < '3.11'" },
     { name = "genai-prices" },
@@ -814,8 +814,8 @@ wheels = [
 
 [[package]]
 name = "pydantic-graph"
-version = "1.79.1.dev5+acbfe629"
-source = { git = "https://github.com/pydantic/pydantic-ai.git?subdirectory=pydantic_graph&branch=tool-search-cap#acbfe629c1a75b0173e04e9ca832ad1ab536925a" }
+version = "1.79.1.dev3+7389e51a"
+source = { git = "https://github.com/pydantic/pydantic-ai.git?subdirectory=pydantic_graph&branch=main#7389e51a6a9f2321ca1fa727a17c313b23c89349" }
 dependencies = [
     { name = "httpx" },
     { name = "logfire-api" },
@@ -851,7 +851,7 @@ lint = [
 
 [package.metadata]
 requires-dist = [
-    { name = "pydantic-ai-slim", git = "https://github.com/pydantic/pydantic-ai.git?subdirectory=pydantic_ai_slim&branch=tool-search-cap" },
+    { name = "pydantic-ai-slim", git = "https://github.com/pydantic/pydantic-ai.git?subdirectory=pydantic_ai_slim&branch=main" },
     { name = "pydantic-monty", marker = "extra == 'code-mode'", specifier = ">=0.0.10" },
 ]
 provides-extras = ["code-mode"]
