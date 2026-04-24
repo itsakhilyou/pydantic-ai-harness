@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 
 import pytest
+from pydantic import BaseModel
 from pydantic_ai import Agent
 from pydantic_ai.models.test import TestModel
 
@@ -22,7 +23,7 @@ def anyio_backend() -> str:
 async def test_guard_allows_safe_output():
     agent = Agent(
         TestModel(custom_output_text='harmless reply'),
-        capabilities=[OutputGuard[None](guard=lambda out: 'SSN' not in out)],
+        capabilities=[OutputGuard[None](guard=lambda out: 'SSN' not in str(out))],
     )
     result = await agent.run('hello')
     assert result.output == 'harmless reply'
@@ -31,16 +32,18 @@ async def test_guard_allows_safe_output():
 async def test_guard_blocks_unsafe_output():
     agent = Agent(
         TestModel(custom_output_text='leaks SSN 123-45-6789'),
-        capabilities=[OutputGuard[None](guard=lambda out: 'SSN' not in out, block_message='contains SSN')],
+        capabilities=[
+            OutputGuard[None](guard=lambda out: 'SSN' not in str(out), block_message='contains SSN'),
+        ],
     )
     with pytest.raises(OutputBlocked, match='contains SSN'):
         await agent.run('hello')
 
 
 async def test_async_guard_awaited():
-    async def guard(output: str) -> bool:
+    async def guard(output: object) -> bool:
         await asyncio.sleep(0)
-        return 'bad' not in output
+        return 'bad' not in str(output)
 
     agent = Agent(
         TestModel(custom_output_text='ok reply'),
@@ -57,7 +60,7 @@ async def test_async_guard_awaited():
 
 
 async def test_guard_raising_propagates():
-    def guard(_: str) -> bool:
+    def guard(_: object) -> bool:
         raise RuntimeError('guard exploded')
 
     agent = Agent(
@@ -66,6 +69,38 @@ async def test_guard_raising_propagates():
     )
     with pytest.raises(RuntimeError, match='guard exploded'):
         await agent.run('hello')
+
+
+async def test_guard_receives_structured_output_unchanged():
+    """For typed outputs the guard gets the model instance, not a stringified form."""
+
+    class Answer(BaseModel):
+        reply: str
+        internal_url: str
+
+    seen: list[object] = []
+
+    def guard(output: object) -> bool:
+        seen.append(output)
+        assert isinstance(output, Answer)
+        return 'internal.example.com' not in output.internal_url
+
+    agent = Agent(
+        TestModel(custom_output_args={'reply': 'hi', 'internal_url': 'https://public.example.com/x'}),
+        output_type=Answer,
+        capabilities=[OutputGuard[None](guard=guard)],
+    )
+    result = await agent.run('hello')
+    assert isinstance(result.output, Answer)
+    assert seen == [result.output]
+
+    agent_bad = Agent(
+        TestModel(custom_output_args={'reply': 'hi', 'internal_url': 'https://internal.example.com/x'}),
+        output_type=Answer,
+        capabilities=[OutputGuard[None](guard=guard)],
+    )
+    with pytest.raises(OutputBlocked):
+        await agent_bad.run('hello')
 
 
 def test_output_blocked_is_guardrail_error():

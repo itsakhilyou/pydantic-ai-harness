@@ -28,8 +28,8 @@ def no_secrets(prompt: str) -> bool:
     return 'api_key' not in prompt.lower()
 
 
-def no_pii(output: str) -> bool:
-    return 'SSN' not in output
+def no_pii(output: object) -> bool:
+    return 'SSN' not in str(output)
 
 
 agent = Agent(
@@ -40,6 +40,29 @@ agent = Agent(
     ],
 )
 ```
+
+`OutputGuard` receives `result.output` unchanged — no automatic stringification. For a string output the guard reads it directly; for a typed (Pydantic model) output the guard gets the model instance, so pick the serialization that fits the check:
+
+```python
+from pydantic import BaseModel
+from pydantic_ai_harness import OutputGuard
+
+
+class Answer(BaseModel):
+    reply: str
+    sources: list[str]
+
+
+def no_internal_urls(output: object) -> bool:
+    if isinstance(output, Answer):
+        return not any('internal.example.com' in url for url in output.sources)
+    return 'internal.example.com' not in str(output)
+
+
+OutputGuard(guard=no_internal_urls)
+```
+
+This avoids the trap of `str(MyModel(...))` producing a `MyModel(field=...)` repr that hides field contents from regex-based checks. If you want JSON text, call `output.model_dump_json()` inside the guard.
 
 Both guards accept async callables too:
 

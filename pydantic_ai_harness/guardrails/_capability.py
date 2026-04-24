@@ -34,18 +34,30 @@ if TYPE_CHECKING:
     from pydantic_ai.run import AgentRunResult
 
 
-GuardrailFunc = Callable[[str], bool | Awaitable[bool]]
-"""Signature of the callable passed to `InputGuard` / `OutputGuard`.
+InputGuardFunc = Callable[[str], bool | Awaitable[bool]]
+"""Signature of the callable passed to `InputGuard`.
 
-The callable receives the text to validate and returns `True` when safe.
-It may be sync or async. Raising an exception is treated as a hard failure
-and propagates up to the caller.
+The callable receives the user prompt and returns `True` when safe. It may
+be sync or async. Raising an exception is treated as a hard failure and
+propagates up to the caller.
+"""
+
+OutputGuardFunc = Callable[[object], bool | Awaitable[bool]]
+"""Signature of the callable passed to `OutputGuard`.
+
+The callable receives `result.output` unchanged — for typed outputs this is
+the Pydantic model (not a stringified form), so the guard can read fields
+directly or serialize with `model_dump_json()` if it wants to match against
+JSON text. Returning `True` marks the output safe.
 """
 
 
-async def _evaluate(guard: GuardrailFunc, value: str) -> bool:
+async def _evaluate(
+    guard: InputGuardFunc | OutputGuardFunc,
+    value: object,
+) -> bool:
     """Call `guard` and await it if it returned an awaitable."""
-    result = guard(value)
+    result = guard(value)  # pyright: ignore[reportArgumentType]
     if inspect.isawaitable(result):
         return await result
     return result
@@ -101,7 +113,7 @@ class InputGuard(AbstractCapability[AgentDepsT]):
     belongs in a separate capability hooking `after_model_request`.
     """
 
-    guard: GuardrailFunc
+    guard: InputGuardFunc
     """Callable that returns `True` when the prompt is safe to send to the model."""
 
     parallel: bool = False
@@ -180,26 +192,33 @@ class InputGuard(AbstractCapability[AgentDepsT]):
 class OutputGuard(AbstractCapability[AgentDepsT]):
     """Validate the final agent output.
 
-    The `guard` callable receives the stringified run output and returns
-    `True` when the output is safe to expose to the caller. Returning
-    `False` raises
+    The `guard` callable receives `result.output` unchanged — no automatic
+    stringification — and returns `True` when the output is safe to expose.
+    Returning `False` raises
     [`OutputBlocked`][pydantic_ai_harness.guardrails.OutputBlocked] with
     `block_message`. Raising an exception from the guard propagates it.
+
+    For string outputs the guard works directly on the text. For typed
+    (Pydantic model) outputs the guard receives the model instance, so
+    choose the serialization that fits your check: read a field directly,
+    or call `model_dump_json()` to match against JSON text. Defaulting to
+    `str(model)` would produce a `MyModel(field=...)` repr rather than JSON
+    and easily hide fields from regex-based checks.
 
     ```python
     from pydantic_ai import Agent
     from pydantic_ai_harness import OutputGuard
 
 
-    def no_pii(output: str) -> bool:
-        return 'SSN' not in output
+    def no_pii(output: object) -> bool:
+        return 'SSN' not in str(output)
 
 
     agent = Agent('openai:gpt-4.1', capabilities=[OutputGuard(guard=no_pii)])
     ```
     """
 
-    guard: GuardrailFunc
+    guard: OutputGuardFunc
     """Callable that returns `True` when the output is safe."""
 
     block_message: str = 'Output blocked by output guardrail.'
@@ -212,7 +231,6 @@ class OutputGuard(AbstractCapability[AgentDepsT]):
         result: AgentRunResult[Any],
     ) -> AgentRunResult[Any]:
         """Validate `result.output` and raise `OutputBlocked` on failure."""
-        output = str(result.output)
-        if not await _evaluate(self.guard, output):
+        if not await _evaluate(self.guard, result.output):
             raise OutputBlocked(self.block_message)
         return result
