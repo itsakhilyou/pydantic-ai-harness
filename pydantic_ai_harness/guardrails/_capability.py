@@ -169,16 +169,14 @@ class InputGuard(AbstractCapability[AgentDepsT]):
                 return_when=asyncio.FIRST_COMPLETED,
             )
             if guard_task in done:
-                guard_exc = guard_task.exception()
-                if guard_exc is not None:
+                if guard_task.exception() is not None:
                     handler_task.cancel()
-                    raise guard_exc
+                    await guard_task  # re-raises the guard's exception
                 return await handler_task
-            # Handler finished first: if it raised, propagate and cancel the guard.
-            handler_exc = handler_task.exception()
-            if handler_exc is not None:
+            # Handler finished first: if it raised, cancel the guard and propagate.
+            if handler_task.exception() is not None:
                 guard_task.cancel()
-                raise handler_exc
+                await handler_task  # re-raises the handler's exception
             # Handler succeeded; still need the guard verdict before committing the response.
             await guard_task
             return handler_task.result()
