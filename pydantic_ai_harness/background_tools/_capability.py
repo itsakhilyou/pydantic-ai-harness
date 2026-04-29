@@ -6,7 +6,8 @@ import asyncio
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
-from pydantic_ai.capabilities import AbstractCapability, CapabilityOrdering, PendingMessageDrainCapability
+from pydantic_ai.capabilities import AbstractCapability, CapabilityOrdering
+from pydantic_ai.capabilities._pending_messages import PendingMessageDrainCapability
 from pydantic_ai.messages import SystemPromptPart, ToolCallPart
 from pydantic_ai.tools import (
     AgentDepsT,
