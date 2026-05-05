@@ -38,13 +38,22 @@ jobs:
           ref: main
           persist-credentials: false
 
+      # Check out pydantic-ai into a workspace subdir, then move it OUTSIDE the
+      # harness tree (`actions/checkout` requires `path:` to live under
+      # `$GITHUB_WORKSPACE`, but tools that walk the harness tree — pyright,
+      # ruff, pytest collection — must not see the pydantic-ai checkout, or
+      # they'll surface thousands of unrelated findings from pydantic-ai's own
+      # `tests/`. `${{ runner.temp }}` lives outside workspace so it's invisible
+      # to those walkers.
       - name: Checkout pydantic-ai @ ${{ inputs.pydantic-ai-ref }}
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           repository: ${{ inputs.pydantic-ai-repo }}
           ref: ${{ inputs.pydantic-ai-ref }}
-          path: pydantic-ai
+          path: _pydantic-ai-checkout
           persist-credentials: false
+      - name: Move pydantic-ai outside the harness tree
+        run: mv _pydantic-ai-checkout "${RUNNER_TEMP}/pydantic-ai"
 
       - uses: astral-sh/setup-uv@cec208311dfd045dd5311c1add060b2062131d57 # v8.0.0
         with:
@@ -60,15 +69,10 @@ jobs:
       - run: uv sync --frozen --all-extras --group lint --group dev
       - run: |
           uv pip install --no-deps \
-            -e ./pydantic-ai/pydantic_ai_slim \
-            -e ./pydantic-ai/pydantic_graph
+            -e "${RUNNER_TEMP}/pydantic-ai/pydantic_ai_slim" \
+            -e "${RUNNER_TEMP}/pydantic-ai/pydantic_graph"
 
       - run: uv run ruff format --check
       - run: uv run ruff check
-      # Scope pyright to harness sources. The pydantic-ai checkout sits at
-      # `./pydantic-ai/` inside the working tree, and pyright's `exclude` in
-      # pyproject.toml doesn't list it (no need to in normal CI — the dir doesn't
-      # exist there). Without scoping, pyright walks into pydantic-ai's own tests
-      # and surfaces thousands of unrelated findings.
-      - run: uv run pyright pydantic_ai_harness tests
+      - run: uv run pyright
       - run: uv run pytest
