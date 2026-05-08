@@ -144,13 +144,13 @@ The Quick start above is deliberately small. Here's the other end of the spectru
 import logfire
 from pydantic_ai import Agent
 from pydantic_ai.capabilities import MCP, Thinking, WebSearch
-from pydantic_ai.models.anthropic import AnthropicCompaction
 from pydantic_ai_harness import CodeMode
 
 # Community packages, alphabetical:
 from pydantic_ai_backends import ConsoleCapability
 from pydantic_ai_shields import CostTracking, InputGuard, SecretRedaction, ToolGuard
 from pydantic_ai_skills import SkillsCapability
+from pydantic_ai_summarization import ContextManagerCapability
 from pydantic_ai_todo import TodoCapability
 from pydantic_deep import MemoryCapability, StuckLoopDetection
 from subagents_pydantic_ai import SubAgentCapability, SubAgentConfig
@@ -161,37 +161,37 @@ logfire.instrument_pydantic_ai()
 
 agent = Agent(
     'anthropic:claude-opus-4-7',
-    name='shrubbery',
     capabilities=[
+        # --- Execution ---
+        # Wraps every tool into a single run_code, sandboxed by Monty.
+        CodeMode(),
+
         # --- Reasoning ---
         # Provider-adaptive thinking; uses native extended thinking on supporting models.
         Thinking(effort='xhigh'),
+
+        # --- Context management ---
+        # Sliding window + LLM compaction. By @vstorm-co:
+        # https://github.com/vstorm-co/summarization-pydantic-ai
+        # Pydantic AI also ships `AnthropicCompaction` and `OpenAICompaction` for
+        # provider-native compaction.
+        ContextManagerCapability(max_tokens=180_000),
 
         # --- Tools ---
         # Connect to any MCP server -- here, the open-source Hacker News server
         # (https://github.com/cyanheads/hn-mcp-server).
         MCP('https://hn.caseyjhand.com/mcp'),
 
-        # Filesystem + shell. By @vstorm-co: https://github.com/vstorm-co/pydantic-ai-backend
-        ConsoleCapability(),
-
         # Provider-adaptive web search; falls back to a local DuckDuckGo implementation.
         WebSearch(),
 
-        # --- Execution ---
-        # Wraps every tool above into a single run_code, sandboxed by Monty.
-        CodeMode(),
-
-        # --- Context management ---
-        # LLM compaction tied to Anthropic's prompt caching. For a provider-agnostic
-        # alternative, see ContextManagerCapability by @vstorm-co:
-        # https://github.com/vstorm-co/summarization-pydantic-ai
-        AnthropicCompaction(),
+        # Filesystem + shell. By @vstorm-co: https://github.com/vstorm-co/pydantic-ai-backend
+        ConsoleCapability(),
 
         # --- Memory & persistence ---
         # Persistent ./MEMORY.md per agent name. By @vstorm-co:
         # https://github.com/vstorm-co/pydantic-deepagents
-        MemoryCapability(agent_name='shrubbery'),
+        MemoryCapability(agent_name='harness-example'),
 
         # --- Orchestration ---
         # Agent skills (Anthropic's spec) by @DougTrajano:
