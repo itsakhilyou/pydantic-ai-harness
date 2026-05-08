@@ -15,7 +15,7 @@ Pydantic AI's [capabilities](https://ai.pydantic.dev/capabilities/) and [hooks](
 
 The [capability matrix](#capability-matrix) tracks where we are. [Tell us what to prioritize.](#help-us-prioritize)
 
-**Contents:** [Installation](#installation) · [Quick start](#quick-start) · [Full ecosystem agent](#full-ecosystem-agent) · [Capability matrix](#capability-matrix) · [Help us prioritize](#help-us-prioritize) · [Build your own](#build-your-own) · [Contributing](#contributing) · [Version policy](#version-policy) · [Pydantic AI references](#pydantic-ai-references) · [License](#license)
+**Contents:** [Installation](#installation) · [Quick start](#quick-start) · [Capability matrix](#capability-matrix) · [An ecosystem agent](#an-ecosystem-agent) · [Help us prioritize](#help-us-prioritize) · [Build your own](#build-your-own) · [Contributing](#contributing) · [Version policy](#version-policy) · [Pydantic AI references](#pydantic-ai-references) · [License](#license)
 
 ## Installation
 
@@ -42,18 +42,30 @@ uv add "pydantic-ai-slim[anthropic,mcp,duckduckgo,logfire]" "pydantic-ai-harness
 ```python
 import logfire
 from pydantic_ai import Agent
-from pydantic_ai.capabilities import MCP, WebSearch  # from the core pydantic-ai package
+from pydantic_ai.capabilities import MCP, WebSearch
 from pydantic_ai_harness import CodeMode
 
+# See https://ai.pydantic.dev/logfire/ for setup details.
 logfire.configure()
 logfire.instrument_pydantic_ai()
 
 agent = Agent(
     'anthropic:claude-opus-4-7',
     capabilities=[
+        # Connect to any MCP server -- here, the open-source Hacker News server
+        # (https://github.com/cyanheads/hn-mcp-server). builtin=False forces the
+        # local FastMCP toolset so CodeMode can wrap the tools; without it,
+        # providers that natively support MCP server connectors execute the tools
+        # server-side and bypass the sandbox.
         MCP('https://hn.caseyjhand.com/mcp', builtin=False),
-        # Disable the provider builtin so CodeMode can wrap the local DDG fallback.
+        # Provider-adaptive web search; builtin=False routes through the local
+        # DuckDuckGo fallback (the [duckduckgo] extra above) so CodeMode can batch
+        # web searches alongside the HN calls in a single run_code.
         WebSearch(builtin=False),
+        # Wraps every tool into a single run_code tool, sandboxed by Monty
+        # (https://github.com/pydantic/monty -- pulled in by the [code-mode] extra).
+        # The model writes Python that calls multiple tools with loops, conditionals,
+        # asyncio.gather, and local filtering -- one model round-trip for N tool calls.
         CodeMode(),
     ],
 )
@@ -65,84 +77,21 @@ result = agent.run_sync(
 )
 print(result.output)
 """
-**Summary:** The most-discussed HN story (across top/best/show feeds) clearing the 100-point bar is **["Vibe coding and agentic engineering are getting closer than I'd like"](https://simonwillison.net/2026/May/6/vibe-coding-and-agentic-engineering/)** by Simon Willison, posted to HN by user **e12e** -- a long-time HNer (joined 2012, ~15k karma, 9,700+ submissions, self-described "perpetual student and sometimes developer" based in Tromsø, Norway). The piece (748 points, **853 comments**, featured on the Best feed) argues that the two modes Willison once kept mentally separate -- quick, throwaway "vibe coding" and disciplined "agentic engineering" -- are starting to blur, since agents like Claude Code now reliably handle non-trivial tasks like "build a JSON API endpoint that runs a SQL query" with tests and docs on the first pass. The thread is unusually substantive: top commenters debate whether LLMs created or merely *exposed* sloppy engineering practices (etothet, a456463), warn about a "normalization of deviance" as engineers stop reviewing diffs (kelnos, Amber-chen), and push back on Willison's claim that the SDLC was designed around "a few hundred lines of code per day" (vmaurin, sevenzero). Recurring themes include the "jagged frontier" of model capability (u8), the maintenance-phase cost of AI-generated complexity (turtlebits, _doctor_love), the need for new audit/sandbox abstractions (arian_, jFriedensreich), and reports of declining Claude Code quality (galkk). Web/HN coverage beyond the post itself is thin -- the Algolia search surfaced only one related Willison piece, ["GLM-5: From Vibe Coding to Agentic Engineering"](https://simonwillison.net/2026/Feb/11/glm-5/) (Feb 2026), suggesting this is primarily a community discussion around Willison's own framing rather than a widely-syndicated news story.
+The most-discussed HN story across top/best/show clearing 100 points is "Vibe coding
+and agentic engineering are getting closer than I'd like" by Simon Willison (748 points,
+853 comments, on the Best feed), submitted by long-time HNer e12e. The piece argues
+that the two modes Willison once kept mentally separate -- throwaway "vibe coding" and
+disciplined "agentic engineering" -- are blurring, since agents like Claude Code now
+reliably handle non-trivial tasks like "build a JSON API endpoint that runs a SQL query"
+with tests and docs on the first pass. The HN thread is unusually substantive, with
+commenters debating whether LLMs created or merely *exposed* sloppy engineering
+practices and warning of a "normalization of deviance" as engineers stop reviewing diffs.
 """
 ```
 
-[`MCP`](https://ai.pydantic.dev/capabilities/#provider-adaptive-tools) (from the core `pydantic-ai` package) connects your agent to any MCP server -- here, the open-source [Hacker News MCP server](https://github.com/cyanheads/hn-mcp-server). Passing `builtin=False` forces the local toolset so `CodeMode` can wrap the tools; without it, providers that natively support MCP servers (e.g. Anthropic) execute tools server-side and bypass the sandbox.
+[![Logfire trace from the Quick start run](docs/images/quick-start-trace.png)](https://logfire-us.pydantic.dev/public-trace/84bcf123-2106-49da-9f6f-5c26395339bb?spanId=7650806a0785b946)
 
-[`WebSearch`](https://ai.pydantic.dev/capabilities/#provider-adaptive-tools) (also from core) is provider-adaptive -- by default it uses the model's builtin web search when available and falls back to a local DuckDuckGo implementation otherwise. Here we pass `builtin=False` for the same reason as `MCP`: we want every web call to flow through `CodeMode` so it can be batched alongside the HN tools in a single `run_code` invocation.
-
-[`CodeMode`](pydantic_ai_harness/code_mode/) wraps all tools into a single `run_code` tool powered by our [Monty](https://github.com/pydantic/monty) sandbox, so the model can orchestrate multiple tool calls with Python code instead of one model round-trip per call. For the prompt above, the model batches the three parallel feed fetches into one `run_code` call, dedupes and filters them in plain Python, then issues another batch of three parallel calls (`hn_get_thread`, `hn_get_user`, web search) -- keeping the intermediate story lists out of the model's context window.
-
-[`logfire`](https://pydantic.dev/logfire) gives you a trace for every agent run. With CodeMode, you can see the `run_code` span with each nested tool call as a child span -- making it easy to debug what the model's code actually did. See [a public trace from the run above](https://logfire-us.pydantic.dev/public-trace/84bcf123-2106-49da-9f6f-5c26395339bb?spanId=7650806a0785b946), or the [Pydantic AI Logfire docs](https://ai.pydantic.dev/logfire/) for setup details.
-
-## Full ecosystem agent
-
-The example above is intentionally minimal. The example below is *illustrative*: it pulls together capabilities from across the Pydantic AI ecosystem -- this repo, the core `pydantic-ai` package, and the community packages we [endorse below](#capability-matrix) -- to show what an agent at the upper bound of what's possible today can look like. Some of these capabilities have setup requirements (e.g. a `./skills` directory, a Postgres database for persistent todos), and the community packages are versioned independently, so this snippet isn't necessarily one you'd copy-paste verbatim. The [capability matrix](#capability-matrix) tracks the status of each one.
-
-```python
-import logfire
-from pydantic_ai import Agent
-from pydantic_ai.capabilities import MCP, Thinking, WebSearch
-from pydantic_ai_harness import CodeMode
-from pydantic_ai_backends import ConsoleCapability
-from pydantic_ai_summarization import ContextManagerCapability
-from pydantic_deep import MemoryCapability, StuckLoopDetection
-from pydantic_ai_skills import SkillsCapability
-from subagents_pydantic_ai import SubAgentCapability, SubAgentConfig
-from pydantic_ai_todo import TodoCapability
-from pydantic_ai_shields import CostTracking, InputGuard, SecretRedaction, ToolGuard
-
-logfire.configure()
-logfire.instrument_pydantic_ai()
-
-agent = Agent(
-    'anthropic:claude-sonnet-4-6',
-    capabilities=[
-        # --- Reasoning ---
-        Thinking(effort='medium'),
-
-        # --- Tools & execution ---
-        CodeMode(),
-        MCP('https://hn.caseyjhand.com/mcp', builtin=False),
-        # Filesystem + shell, by @vstorm-co: https://github.com/vstorm-co/pydantic-ai-backend
-        ConsoleCapability(),
-        WebSearch(),
-
-        # --- Context management ---
-        # Sliding window + LLM compaction, by @vstorm-co: https://github.com/vstorm-co/summarization-pydantic-ai
-        ContextManagerCapability(max_tokens=180_000),
-
-        # --- Memory & persistence ---
-        # Writes ./MEMORY.md, by @vstorm-co: https://github.com/vstorm-co/pydantic-deepagents
-        MemoryCapability(agent_name='demo'),
-
-        # --- Orchestration ---
-        # Anthropic Agent Skills spec, by @DougTrajano: https://github.com/DougTrajano/pydantic-ai-skills
-        SkillsCapability(directories=['./skills']),
-        # By @vstorm-co: https://github.com/vstorm-co/subagents-pydantic-ai
-        SubAgentCapability(subagents=[
-            SubAgentConfig(
-                name='researcher',
-                description='Deep research on a topic',
-                instructions='You are a thorough research assistant.',
-            ),
-        ]),
-        # In-memory; AsyncPostgresStorage available for persistence. By @vstorm-co: https://github.com/vstorm-co/pydantic-ai-todo
-        TodoCapability(enable_subtasks=True),
-
-        # --- Safety & reliability ---
-        # The next four are by @vstorm-co: https://github.com/vstorm-co/pydantic-ai-shields
-        CostTracking(budget_usd=5.0),
-        InputGuard(guard=lambda p: 'ignore previous instructions' not in p.lower()),
-        ToolGuard(blocked=['rm'], require_approval=['write_file']),
-        SecretRedaction(),
-        # By @vstorm-co: https://github.com/vstorm-co/pydantic-deepagents
-        StuckLoopDetection(),
-    ],
-)
-```
+**[See this run as a public Logfire trace →](https://logfire-us.pydantic.dev/public-trace/84bcf123-2106-49da-9f6f-5c26395339bb?spanId=7650806a0785b946)** Each `run_code` span fans out into the tool calls the model issued from inside the sandbox -- it's the easiest way to understand what code mode actually did.
 
 ## Capability matrix
 
@@ -186,6 +135,107 @@ We studied leading coding agents, agent frameworks, and Claw-style assistants to
 | | **Current time** | Inject current date/time into system prompt | :construction: [PR&nbsp;#170](https://github.com/pydantic/pydantic-ai-harness/pull/170) | |
 
 > Packages by [vstorm-co](https://github.com/vstorm-co) are endorsed by the Pydantic AI team. We're working with them to upstream some of their implementations into this repo.
+
+## An ecosystem agent
+
+The Quick start above is deliberately small. Here's the other end of the spectrum -- an agent wired up with capabilities drawn from across the Pydantic AI ecosystem: this repo, core `pydantic-ai`, and the community packages we vouch for in the matrix above.
+
+```python
+import logfire
+from pydantic_ai import Agent
+from pydantic_ai.capabilities import MCP, Thinking, WebSearch
+from pydantic_ai.models.anthropic import AnthropicCompaction
+from pydantic_ai_harness import CodeMode
+
+# Community packages, alphabetical:
+from pydantic_ai_backends import ConsoleCapability
+from pydantic_ai_shields import CostTracking, InputGuard, SecretRedaction, ToolGuard
+from pydantic_ai_skills import SkillsCapability
+from pydantic_ai_todo import TodoCapability
+from pydantic_deep import MemoryCapability, StuckLoopDetection
+from subagents_pydantic_ai import SubAgentCapability, SubAgentConfig
+
+# See https://ai.pydantic.dev/logfire/ for setup details.
+logfire.configure()
+logfire.instrument_pydantic_ai()
+
+agent = Agent(
+    'anthropic:claude-opus-4-7',
+    name='brian',
+    capabilities=[
+        # --- Reasoning ---
+        # Provider-adaptive thinking; uses native extended thinking on supporting models.
+        Thinking(effort='high'),
+
+        # --- Tools ---
+        # Connect to any MCP server -- here, the open-source Hacker News server
+        # (https://github.com/cyanheads/hn-mcp-server).
+        MCP('https://hn.caseyjhand.com/mcp'),
+
+        # Filesystem + shell. By @vstorm-co: https://github.com/vstorm-co/pydantic-ai-backend
+        ConsoleCapability(),
+
+        # Provider-adaptive web search; falls back to a local DuckDuckGo implementation.
+        WebSearch(),
+
+        # --- Execution ---
+        # Wraps every tool above into a single run_code, sandboxed by Monty.
+        CodeMode(),
+
+        # --- Context management ---
+        # LLM compaction tied to Anthropic's prompt caching. For a provider-agnostic
+        # alternative, see ContextManagerCapability by @vstorm-co:
+        # https://github.com/vstorm-co/summarization-pydantic-ai
+        AnthropicCompaction(),
+
+        # --- Memory & persistence ---
+        # Persistent ./MEMORY.md per agent name. By @vstorm-co:
+        # https://github.com/vstorm-co/pydantic-deepagents
+        MemoryCapability(agent_name='brian'),
+
+        # --- Orchestration ---
+        # Agent skills (Anthropic's spec) by @DougTrajano:
+        # https://github.com/DougTrajano/pydantic-ai-skills
+        # @vstorm-co's pydantic-deep also offers skills loading; the two have different
+        # spec footprints (Doug's is closer to programmatic skills).
+        SkillsCapability(directories=['./skills']),
+
+        # Spawn sub-agents with their own toolsets and instructions. By @vstorm-co:
+        # https://github.com/vstorm-co/subagents-pydantic-ai
+        SubAgentCapability(subagents=[
+            SubAgentConfig(
+                name='researcher',
+                description='Deep research on a topic',
+                instructions='You are a thorough research assistant.',
+            ),
+        ]),
+
+        # Track tasks and subtasks; in-memory by default, AsyncPostgresStorage available.
+        # By @vstorm-co: https://github.com/vstorm-co/pydantic-ai-todo
+        TodoCapability(enable_subtasks=True),
+
+        # --- Safety & reliability ---
+        # The next four are by @vstorm-co: https://github.com/vstorm-co/pydantic-ai-shields
+        # Per-run cost cap with a callback hook.
+        CostTracking(budget_usd=5.0),
+
+        # Reject prompts that look like prompt-injection attempts.
+        InputGuard(guard=lambda p: 'ignore previous instructions' not in p.lower()),
+
+        # Block or require approval per tool name.
+        ToolGuard(blocked=['rm'], require_approval=['write_file']),
+
+        # Detect API keys/tokens in tool I/O and redact before they reach the model.
+        SecretRedaction(),
+
+        # Bail out if the agent gets stuck calling the same tools in a loop.
+        # By @vstorm-co: https://github.com/vstorm-co/pydantic-deepagents
+        StuckLoopDetection(),
+    ],
+)
+```
+
+This snippet is illustrative, not literally copy-pasteable: a few capabilities have setup requirements (a `./skills` directory, a Postgres database for `TodoCapability`'s persistent storage), and the community packages move independently of this one. The [capability matrix](#capability-matrix) tracks each one's status. As the harness ships first-party versions, the imports above will collapse onto fewer packages -- but the example will keep working, since the API surface is the same.
 
 ## Help us prioritize
 
