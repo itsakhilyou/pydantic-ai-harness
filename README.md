@@ -49,7 +49,7 @@ logfire.configure()
 logfire.instrument_pydantic_ai()
 
 agent = Agent(
-    'anthropic:claude-sonnet-4-6',
+    'anthropic:claude-opus-4-7',
     capabilities=[
         MCP('https://hn.caseyjhand.com/mcp', builtin=False),
         WebSearch(),
@@ -58,17 +58,15 @@ agent = Agent(
 )
 
 result = agent.run_sync(
-    "Fetch the top, best, and 'show HN' Hacker News feeds in parallel. "
-    "Dedupe stories across feeds into a dict keyed by id, then keep only those with >100 points. "
-    "Pick the survivor with the most comments. In parallel, fetch its comment thread, "
-    "its submitter's profile, and a web search for follow-up coverage. "
-    "Return a one-paragraph synthesis."
+    "Across the top, best, and 'show HN' Hacker News feeds, find the most-discussed "
+    "story with at least 100 points. Pull its comment thread, its submitter's profile, "
+    "and any web coverage. Summarize what you find in one paragraph."
 )
 print(result.output)
 """
-Here is a synthesized one-paragraph summary drawing on all three parallel data sources -- the comment thread, the submitter's profile, and web coverage:
+Here's the summary:
 
-The dominant story across Hacker News's top, best, and Show HN feeds right now -- with 745 points and 853 comments -- is Simon Willison's May 6, 2026 post, "Vibe coding and agentic engineering are getting closer than I'd like." Willison defines "agentic engineering" as building software using coding agents -- tools like Claude Code and OpenAI Codex -- where the defining feature is that they can both generate and execute code, allowing them to test and iterate independently of turn-by-turn human guidance. His central worry, expressed on Heavybit's High Leverage podcast, is that the clean boundary he'd drawn between vibe coding and agentic engineering is dissolving -- vibe coding being the mode where you're not looking at the code at all, possibly not even a programmer, asking for a thing and getting a thing, never caring about code quality. He argues that if you're building software for other people, vibe coding is "grossly irresponsible," because other people get hurt by your bugs and a higher standard is required. The HN comment thread crackles with tension on exactly this point: top commenters argue that the line between responsible professional development and reckless automation is becoming increasingly difficult to maintain, and that errors are becoming more subtle rather than disappearing -- silent logic bugs are far harder to catch than non-compiling code. The submitter, e12e (karma 15,024, based in Tromsø, Norway), is a prolific HN curator rather than the author; the piece itself is by Willison, creator of Datasette and co-creator of the Django web framework. The broader coverage underscores that this debate is far from settled: the convergence of vibe coding and agentic engineering represents more than a technical shift -- it's a fundamental change in how the profession thinks about code quality, professional responsibility, and trust in automated systems.
+The most-discussed Hacker News story across the top, best, and Show HN feeds (with >=100 points) is "Google Chrome silently installs a 4 GB AI model on your device without consent" (1,715 points, 1,120 comments), submitted by john-doe, a long-time HN user with 2,941 karma, an account dating back to late 2020, and 301 total submissions -- mostly low-engagement posts, making this submission a clear outlier hit. The linked piece on thatprivacyguy.com argues that Google Chrome is downloading a 4 GB Gemini Nano model onto users' machines without consent, with no opt-in, no opt-out short of enterprise tooling, and an automatic re-download every time the user deletes it, a claim echoed across mainstream coverage: cybersecurity researcher Alexander Hanff says Chrome automatically installs the 4 GB Gemini Nano model without user notification or consent, with the file (typically named weights.bin) intended to power on-device features like "Help me write" and scam detection, and the download happens automatically when Chrome determines a device meets the hardware requirements; Tom's Hardware adds that Hanff argues the practice may violate EU law and waste thousands of kilowatts of energy. The HN comment thread is sharply split: defenders argue the framing is overblown -- comparing it to bundling a spellcheck dictionary with Word and noting users consented to autoupdates when installing Chrome, while critics object on practical grounds (a sysadmin worries about 4 GB x thousands of student profiles on an NFS home server and Windows AppData bloat), on principle (auto-update should be reserved for bug fixes and security patches, not silent feature payloads), and on transparency (Google could trivially have shown an opt-out dialog); several commenters share concrete mitigations such as disabling the optimization-guide-on-device-model and prompt-api-for-gemini-nano flags in chrome://flags and deleting the weights file, while others push back on the article's environmental-impact math and question whether the underlying Gemma-class model is even useful enough to justify the footprint.
 """
 ```
 
