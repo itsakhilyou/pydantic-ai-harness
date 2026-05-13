@@ -143,7 +143,7 @@ The Quick start above is deliberately small. Here's the other end of the spectru
 ```python
 import logfire
 from pydantic_ai import Agent
-from pydantic_ai.capabilities import MCP, Thinking, WebSearch
+from pydantic_ai.capabilities import MCP, Thinking, ToolSearch, WebSearch
 from pydantic_ai_harness import CodeMode
 
 # Community packages, alphabetical:
@@ -184,6 +184,13 @@ agent = Agent(
 
         # Provider-adaptive web search; falls back to a local DuckDuckGo implementation.
         WebSearch(),
+
+        # Progressive tool discovery for large tool sets (e.g. a chatty MCP server):
+        # tools marked `defer_loading=True` stay out of the model's context until it
+        # searches for them -- native provider tool search where available, a local
+        # `search_tools` tool elsewhere. Composes with CodeMode: a discovered tool
+        # folds into `run_code` from that step on.
+        ToolSearch(),
 
         # Filesystem + shell. By @vstorm-co: https://github.com/vstorm-co/pydantic-ai-backend
         ConsoleCapability(),
