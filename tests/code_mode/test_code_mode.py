@@ -1331,6 +1331,7 @@ class TestCodeMode:
     @pytest.mark.skipif(not logfire_installed, reason='logfire not installed')
     async def test_sandboxed_tool_calls_produce_otel_spans(self, capfire: CaptureLogfire) -> None:
         """Sandboxed tool calls dispatched through ToolManager produce OTel execute_tool spans."""
+        from pydantic_ai.capabilities import Instrumentation
         from pydantic_ai.messages import (
             ModelMessage,
             ModelResponse,
@@ -1351,8 +1352,7 @@ class TestCodeMode:
 
         agent: Agent[None, str] = Agent(
             FunctionModel(model_fn),
-            capabilities=[CodeMode[None]()],
-            instrument=InstrumentationSettings(include_content=True),
+            capabilities=[CodeMode[None](), Instrumentation(settings=InstrumentationSettings(include_content=True))],
         )
 
         @agent.tool_plain
