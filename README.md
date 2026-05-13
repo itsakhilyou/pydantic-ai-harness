@@ -166,11 +166,7 @@ agent = Agent(
         # Wraps every tool into a single run_code, sandboxed by Monty.
         CodeMode(),
 
-        # Progressive tool discovery for large tool sets (e.g. a chatty MCP server):
-        # tools marked `defer_loading=True` stay out of the model's context until it
-        # searches for them -- native provider tool search where available, a local
-        # `search_tools` tool elsewhere. Composes with CodeMode: a discovered tool
-        # folds into `run_code` from that step on.
+        # Progressive tool discovery for large tool sets; discovered tools fold into run_code.
         ToolSearch(),
 
         # --- Reasoning ---
