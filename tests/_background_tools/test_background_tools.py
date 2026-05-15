@@ -10,10 +10,10 @@ from pydantic_ai.messages import (
     ModelMessage,
     ModelRequest,
     ModelResponse,
-    SystemPromptPart,
     TextPart,
     ToolCallPart,
     ToolReturnPart,
+    UserPromptPart,
 )
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 from pydantic_ai.usage import RequestUsage
@@ -39,9 +39,9 @@ def _ack_seen(messages: list[ModelMessage]) -> bool:
 
 
 def _follow_up_seen(messages: list[ModelMessage], needle: str) -> bool:
-    """True if any system prompt in the history contains *needle* (e.g. 'completed' / 'failed')."""
+    """True if any drained user prompt in the history contains *needle* (e.g. 'completed' / 'failed')."""
     return any(
-        isinstance(part, SystemPromptPart) and needle in part.content
+        isinstance(part, UserPromptPart) and isinstance(part.content, str) and needle in part.content
         for msg in messages
         if isinstance(msg, ModelRequest)
         for part in msg.parts

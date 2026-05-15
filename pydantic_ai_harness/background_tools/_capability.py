@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Any
 
 from pydantic_ai.capabilities import AbstractCapability, CapabilityOrdering
 from pydantic_ai.capabilities._pending_messages import PendingMessageDrainCapability
-from pydantic_ai.messages import SystemPromptPart, ToolCallPart
+from pydantic_ai.messages import ToolCallPart
 from pydantic_ai.tools import (
     AgentDepsT,
     RunContext,
@@ -41,9 +41,10 @@ class BackgroundTools(AbstractCapability[AgentDepsT]):
     When the model calls a tool that matches the selector, the capability spawns the
     tool's handler in an `asyncio.Task` and immediately returns an acknowledgment
     string to the agent. When the task completes, its result (or error) is enqueued
-    via [`RunContext.enqueue`][pydantic_ai.tools.RunContext.enqueue] as a `'follow_up'`
-    message — Pydantic AI's pending message queue redirects the agent to a fresh
-    `ModelRequest` instead of ending, so the model receives the result and can act on it.
+    via [`RunContext.enqueue`][pydantic_ai.tools.RunContext.enqueue] as an `'asap'`
+    message — Pydantic AI's pending message queue delivers it on the next model
+    request, or redirects the agent to a fresh request if it would otherwise end,
+    so the model receives the result and can act on it.
 
     ```python
     from pydantic_ai import Agent
@@ -110,18 +111,15 @@ class BackgroundTools(AbstractCapability[AgentDepsT]):
         async def _run() -> None:
             try:
                 result = await handler(args)
-                ctx.enqueue(
-                    SystemPromptPart(f"Background tool '{tool_name}' (task {task_id}) completed.\nResult: {result}"),
-                    priority='follow_up',
-                )
+                # 'asap' (the default) is the right semantic for background tool results:
+                # deliver as soon as possible — into the next model request if the agent
+                # is still running, or by redirecting if it would otherwise terminate.
+                ctx.enqueue(f"Background tool '{tool_name}' (task {task_id}) completed.\nResult: {result}")
             except asyncio.CancelledError:
                 # Run cleanup cancelled us; don't enqueue a spurious failure follow-up.
                 raise
             except Exception as e:
-                ctx.enqueue(
-                    SystemPromptPart(f"Background tool '{tool_name}' (task {task_id}) failed: {e}"),
-                    priority='follow_up',
-                )
+                ctx.enqueue(f"Background tool '{tool_name}' (task {task_id}) failed: {e}")
             finally:
                 self._tasks.pop(task_id, None)
                 self._completion_event.set()

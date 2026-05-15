@@ -61,9 +61,9 @@ agent = Agent('openai:gpt-5', capabilities=[
 
 ## Result delivery
 
-Results are enqueued as `'follow_up'` priority messages on Pydantic AI's pending message queue. When the agent would otherwise produce a final result, the queue is drained and the agent continues with a fresh `ModelRequest` containing all completed background results.
+Results are enqueued as `'asap'` priority messages on Pydantic AI's pending message queue. The next time the agent makes a model request, the result is delivered alongside it; if the agent would otherwise terminate before another request, the queue redirects it through a fresh `ModelRequest` so the model still receives the result.
 
-The follow-up message format is a `SystemPromptPart` containing:
+The message format is a plain string (wrapped in a `UserPromptPart` by `enqueue`):
 
 - On success: `Background tool 'X' (task <id>) completed.\nResult: <return value>`
 - On failure: `Background tool 'X' (task <id>) failed: <error message>`
@@ -74,7 +74,7 @@ The model sees the task ID alongside the result so it can correlate against the 
 
 - Each agent run gets fresh task state via the capability's `for_run` hook -- concurrent runs do not share tasks
 - If the surrounding agent run is cancelled (e.g. via `asyncio.wait_for` timeout), all live background tasks are cancelled in the capability's `wrap_run` cleanup
-- `asyncio.CancelledError` from a cancelled task does not produce a follow-up; it propagates as a normal task cancellation
+- `asyncio.CancelledError` from a cancelled task does not produce a result message; it propagates as a normal task cancellation
 
 ## Limitations
 
