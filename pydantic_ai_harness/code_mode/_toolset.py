@@ -506,8 +506,22 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
     @staticmethod
     def _build_description(callable_defs: dict[str, ToolDefinition]) -> str:
         """Render the `run_code` description: base prose + TypedDicts + function signatures."""
-        if not callable_defs:
+        catalog = CodeModeToolset._render_catalog(callable_defs)
+        if not catalog:
             return _RUN_CODE_BASE_DESCRIPTION
+        return _RUN_CODE_BASE_DESCRIPTION + '\n\n' + catalog
+
+    @staticmethod
+    def _render_catalog(callable_defs: dict[str, ToolDefinition]) -> str:
+        """Render the functions-header + TypedDict + function-signature blocks, or `''` if no defs.
+
+        Excludes the `run_code` base prose; the catalog is the discovery-driven portion that's
+        cache-hostile when carried in `run_code.description`. Used by `_build_description`
+        (default static-description path) and by `CodeModeDynamicCatalog` (which moves it to
+        instructions instead).
+        """
+        if not callable_defs:
+            return ''
 
         sigs, conflicting = _get_sigs_and_conflicting(callable_defs)
         type_blocks = FunctionSignature.render_type_definitions(sigs, conflicting)
@@ -518,9 +532,7 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
 
         has_sync = any(td.sequential for td in callable_defs.values())
         has_async = any(not td.sequential for td in callable_defs.values())
-        header = _functions_header(has_sync=has_sync, has_async=has_async)
-
-        sections = [_RUN_CODE_BASE_DESCRIPTION, header]
+        sections = [_functions_header(has_sync=has_sync, has_async=has_async)]
         if type_blocks:
             sections.append('```python\n' + '\n\n'.join(type_blocks) + '\n```')
         sections.append('```python\n' + '\n\n'.join(function_blocks) + '\n```')

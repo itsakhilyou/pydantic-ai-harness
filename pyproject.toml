@@ -71,6 +71,12 @@ lint = [
     'pyright>=1.1.408',
 ]
 
+[tool.uv.sources]
+# Tier 2 depends on `RunContext.enqueue` and the pending message queue, which live on
+# pydantic-ai's `background-tools` branch (PR #4980). Switch back to a published version
+# once that lands.
+pydantic-ai-slim = { git = 'https://github.com/pydantic/pydantic-ai.git', branch = 'background-tools', subdirectory = 'pydantic_ai_slim' }
+
 [tool.hatch.version]
 source = 'uv-dynamic-versioning'
 
