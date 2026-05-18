@@ -274,7 +274,7 @@ class TestLocalSearchAnnouncement:
         )
 
         assert len(ctx.pending_messages) == 1
-        request = ctx.pending_messages[0].payload
+        request = ctx.pending_messages[0].request
         assert isinstance(request, ModelRequest)
         [part] = request.parts
         assert isinstance(part, SystemPromptPart)
@@ -356,7 +356,7 @@ class TestNativeSearchAnnouncement:
         await cap.after_model_request(ctx, request_context=None, response=response)
 
         assert len(ctx.pending_messages) == 1
-        request = ctx.pending_messages[0].payload
+        request = ctx.pending_messages[0].request
         assert isinstance(request, ModelRequest)
         [part] = request.parts
         assert isinstance(part, SystemPromptPart) and '`weather`' in part.content
