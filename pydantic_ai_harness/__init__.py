@@ -4,9 +4,9 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from .code_mode import CodeMode
-    from .sql_mode import SQLModeBuilder, SQLModeToolset
+    from .sql_mode import SQLMode, SQLModeToolset
 
-__all__ = ['CodeMode', 'SQLModeBuilder', 'SQLModeToolset']
+__all__ = ['CodeMode', 'SQLMode', 'SQLModeToolset']
 
 
 def __getattr__(name: str) -> object:
@@ -14,7 +14,7 @@ def __getattr__(name: str) -> object:
         from .code_mode import CodeMode
 
         return CodeMode
-    if name in ('SQLModeBuilder', 'SQLModeToolset'):
+    if name in ('SQLMode', 'SQLModeToolset'):
         from . import sql_mode
 
         return getattr(sql_mode, name)

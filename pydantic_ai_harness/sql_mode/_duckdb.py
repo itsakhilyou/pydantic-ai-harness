@@ -1,8 +1,8 @@
 """DuckDB-backed execution for SQLMode.
 
-Each `run_sql` call gets a brand-new, locked-down, in-memory DuckDB connection:
-the registered tools are exposed as DuckDB user-defined functions, the query
-runs, and the connection is thrown away -- nothing persists between calls.
+Each `run_sql` call gets a fresh, locked-down, in-memory DuckDB connection: the
+selected tools are registered as DuckDB user-defined functions, the query runs,
+and the connection is thrown away -- nothing persists between calls.
 """
 
 from __future__ import annotations
@@ -10,11 +10,11 @@ from __future__ import annotations
 import functools
 import importlib.util
 import json
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from inspect import Parameter, Signature
 from typing import TYPE_CHECKING, Any
 
-from pydantic_ai.exceptions import ModelRetry
+from pydantic_ai.exceptions import ModelRetry, UserError
 from pydantic_core import to_jsonable_python
 
 try:
@@ -33,8 +33,10 @@ if importlib.util.find_spec('numpy') is None:  # pragma: no cover
 if TYPE_CHECKING:
     from anyio.from_thread import BlockingPortal
 
-    from pydantic_ai_harness.sql_mode._builder import _RegisteredTool  # pyright: ignore[reportPrivateUsage]
+    from pydantic_ai_harness.sql_mode._toolset import _CallableTool  # pyright: ignore[reportPrivateUsage]
 
+# A coroutine that runs a tool call: `(original_tool_name, kwargs) -> result`.
+DispatchFn = Callable[[str, dict[str, Any]], Awaitable[Any]]
 
 # Applied in order on every connection. `lock_configuration` MUST come last: it
 # freezes every preceding setting so the model's SQL cannot turn them back on.
@@ -48,26 +50,20 @@ _LOCKDOWN_STATEMENTS: tuple[str, ...] = (
 )
 
 
-def _build_udf(tool: _RegisteredTool, portal: BlockingPortal) -> Callable[..., Any]:
+def _build_udf(tool: _CallableTool, portal: BlockingPortal, dispatch: DispatchFn) -> Callable[..., Any]:
     """Build the synchronous callable DuckDB invokes for `tool`.
 
     DuckDB calls this once per row, from a worker thread. JSON arguments are
-    parsed and validated against the tool's pydantic types; the return value is
-    dumped back to JSON. Async tools are run on the event loop via `portal`.
+    parsed; the tool is dispatched on the event loop through `portal`; the return
+    value is serialized back to JSON when the tool's return type is non-scalar.
     """
 
     def udf(*raw_args: Any) -> Any:
-        """Validate arguments, invoke the tool, and serialize its result for DuckDB."""
-        kwargs = {
-            param.name: (param.adapter.validate_json(raw) if param.is_json else param.adapter.validate_python(raw))
-            for param, raw in zip(tool.params, raw_args)
-        }
-        if tool.is_async:
-            result = portal.call(functools.partial(tool.fn, **kwargs))
-        else:
-            result = tool.fn(**kwargs)
+        """Parse arguments, dispatch the tool call, and serialize its result for DuckDB."""
+        kwargs = {param.name: (json.loads(raw) if param.is_json else raw) for param, raw in zip(tool.params, raw_args)}
+        result = portal.call(functools.partial(dispatch, tool.original_name, kwargs))
         if tool.return_is_json:
-            return tool.return_adapter.dump_json(result, warnings=False).decode()
+            return json.dumps(to_jsonable_python(result, serialize_unknown=True))
         return result
 
     # DuckDB matches a UDF's arity via `inspect.signature`, so give the variadic
@@ -109,28 +105,35 @@ def _format_result(cursor: duckdb.DuckDBPyConnection, max_rows: int) -> dict[str
 
 
 def run_query(
-    tools: tuple[_RegisteredTool, ...],
+    callable_tools: tuple[_CallableTool, ...],
     query: str,
     portal: BlockingPortal,
     max_rows: int,
+    dispatch: DispatchFn,
 ) -> dict[str, Any]:
     """Run `query` against a fresh, locked-down, in-memory DuckDB database.
 
-    Called in a worker thread. The connection is created, has `tools` registered
-    as user-defined functions, is locked down, runs the query, and is closed.
-    Raises `ModelRetry` on any SQL or tool error so the model can try again.
+    Called in a worker thread. The connection is created, has `callable_tools`
+    registered as user-defined functions, is locked down, runs the query, and is
+    closed. Raises `ModelRetry` on a SQL or tool error so the model can try again.
     """
     con = duckdb.connect(':memory:')
     try:
         con.execute('LOAD json')
-        for tool in tools:
-            con.create_function(  # pyright: ignore[reportUnknownMemberType]
-                tool.name,
-                _build_udf(tool, portal),
-                [duckdb.dtype(param.duck_type) for param in tool.params],
-                duckdb.dtype(tool.return_duck_type),
-                side_effects=True,
-            )
+        for tool in callable_tools:
+            try:
+                con.create_function(  # pyright: ignore[reportUnknownMemberType]
+                    tool.sql_name,
+                    _build_udf(tool, portal, dispatch),
+                    [duckdb.dtype(param.duck_type) for param in tool.params],
+                    duckdb.dtype(tool.return_duck_type),
+                    side_effects=True,
+                )
+            except duckdb.Error as e:
+                raise UserError(
+                    f'SQLMode could not register tool {tool.original_name!r} as the DuckDB function '
+                    f'{tool.sql_name!r}: {e}. Rename the tool so it does not clash with a DuckDB built-in.'
+                ) from e
         for statement in _LOCKDOWN_STATEMENTS:
             con.execute(statement)
         try:
