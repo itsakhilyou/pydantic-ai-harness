@@ -73,8 +73,8 @@ def _build_run_context(deps: T = None, run_step: int = 0) -> RunContext[T]:  # p
     )
 
 
-def _add(a: int, b: int) -> int:
-    """Add two numbers."""
+def add(a: int, b: int) -> int:
+    """Add two numbers. Body is invoked by the run_code e2e test (`test_run_code_calls_eager_tool_in_catalog`)."""
     return a + b
 
 
@@ -92,25 +92,25 @@ class TestCatalogMove:
     """Verify the wrapper toolset rewrites `run_code.description` and emits instructions."""
 
     async def test_description_becomes_static_prose(self) -> None:
-        wrapper = _CatalogToolset(wrapped=_build_code_mode_toolset(_add))
+        wrapper = _CatalogToolset(wrapped=_build_code_mode_toolset(add))
         tools = await wrapper.get_tools(_build_run_context())
 
         description = tools[_RUN_CODE_TOOL_NAME].tool_def.description
         assert description is not None
         # The catalog (function signature) is gone from the description...
-        assert 'async def _add' not in description
+        assert 'async def add' not in description
         # ...but the base prose is still there.
         assert 'sandboxed environment' in description
 
     async def test_catalog_surfaces_as_dynamic_instruction_part(self) -> None:
-        wrapper = _CatalogToolset(wrapped=_build_code_mode_toolset(_add))
+        wrapper = _CatalogToolset(wrapped=_build_code_mode_toolset(add))
         ctx = _build_run_context()
         await wrapper.get_tools(ctx)
         instructions = await wrapper.get_instructions(ctx)
 
         # With no upstream instructions, the catalog is the only InstructionPart returned.
         assert isinstance(instructions, InstructionPart)
-        assert 'async def _add' in instructions.content
+        assert 'async def add' in instructions.content
         # `dynamic=True` so Anthropic/Bedrock place the cache breakpoint before this block.
         assert instructions.dynamic is True
 
@@ -121,7 +121,7 @@ class TestCatalogMove:
             async def get_instructions(self, ctx: RunContext[None]) -> str:  # pyright: ignore[reportIncompatibleMethodOverride]
                 return 'wrapped instructions'
 
-        base = FunctionToolset[None](tools=[Tool(_add)])
+        base = FunctionToolset[None](tools=[Tool(add)])
         wrapper = _CatalogToolset(wrapped=_UpstreamToolset(wrapped=base, tool_selector='all'))
         ctx = _build_run_context()
         await wrapper.get_tools(ctx)
@@ -130,7 +130,7 @@ class TestCatalogMove:
         assert isinstance(instructions, list)
         assert instructions[0] == 'wrapped instructions'
         assert isinstance(instructions[1], InstructionPart)
-        assert 'async def _add' in instructions[1].content
+        assert 'async def add' in instructions[1].content
 
     async def test_get_instructions_appends_to_upstream_sequence(self) -> None:
         """If the wrapped toolset returns a sequence, the catalog extends it."""
@@ -141,7 +141,7 @@ class TestCatalogMove:
             ) -> list[str | InstructionPart]:
                 return ['a', InstructionPart(content='b')]
 
-        base = FunctionToolset[None](tools=[Tool(_add)])
+        base = FunctionToolset[None](tools=[Tool(add)])
         wrapper = _CatalogToolset(wrapped=_UpstreamToolset(wrapped=base, tool_selector='all'))
         ctx = _build_run_context()
         await wrapper.get_tools(ctx)
@@ -151,11 +151,11 @@ class TestCatalogMove:
         assert instructions[0] == 'a'
         assert isinstance(instructions[1], InstructionPart) and instructions[1].content == 'b'
         # The catalog is appended at the end.
-        assert isinstance(instructions[2], InstructionPart) and 'async def _add' in instructions[2].content
+        assert isinstance(instructions[2], InstructionPart) and 'async def add' in instructions[2].content
 
     async def test_no_run_code_in_chain_is_no_op(self) -> None:
         """When the wrapped toolset doesn't produce a `run_code` tool, nothing is rewritten."""
-        base = FunctionToolset[None](tools=[Tool(_add)])
+        base = FunctionToolset[None](tools=[Tool(add)])
         wrapper = _CatalogToolset(wrapped=base)
         ctx = _build_run_context()
 
@@ -191,7 +191,7 @@ class TestCatalogMove:
 
         wrapper = _CatalogToolset(
             wrapped=_ChangingToolset(
-                wrapped=FunctionToolset[None](tools=[Tool(_add)]),
+                wrapped=FunctionToolset[None](tools=[Tool(add)]),
                 tool_selector='all',
             )
         )
@@ -208,7 +208,7 @@ class TestCatalogMove:
 
     async def test_for_run_step_returns_self_when_wrapped_unchanged(self) -> None:
         """If the wrapped toolset is unchanged across a step, the wrapper is the same instance."""
-        wrapper = _CatalogToolset(wrapped=_build_code_mode_toolset(_add))
+        wrapper = _CatalogToolset(wrapped=_build_code_mode_toolset(add))
         ctx = _build_run_context()
         await wrapper.get_tools(ctx)
 
@@ -240,7 +240,7 @@ class TestCapabilityShape:
         assert fresh._announced_tools == set()  # pyright: ignore[reportPrivateUsage]
 
     def test_get_wrapper_toolset_returns_catalog_wrapper(self) -> None:
-        base = FunctionToolset[None](tools=[Tool(_add)])
+        base = FunctionToolset[None](tools=[Tool(add)])
         wrapped = CodeModeDynamicCatalog[None]().get_wrapper_toolset(base)
         assert isinstance(wrapped, _CatalogToolset)
         assert wrapped.wrapped is base
@@ -423,13 +423,13 @@ class TestAgentEndToEnd:
             assert run_code_def.description is not None
             captured_request_descriptions.append([run_code_def.description])
 
-            # ...and any system-prompt parts in the latest request (so we can verify
-            # the announcement landed where we expected on turn 2).
+            # ...and the system-prompt parts in the latest request (so we can verify
+            # the announcement landed where we expected on turn 2). The agent always
+            # appends a fresh `ModelRequest` for the model to respond to, so
+            # `messages[-1]` is always a `ModelRequest` here.
             last_request = messages[-1]
-            if isinstance(last_request, ModelRequest):
-                captured_system_prompts.append(
-                    [p.content for p in last_request.parts if isinstance(p, SystemPromptPart)]
-                )
+            assert isinstance(last_request, ModelRequest)
+            captured_system_prompts.append([p.content for p in last_request.parts if isinstance(p, SystemPromptPart)])
 
             # Turn 1: kick off a local tool-search.
             if len(captured_request_descriptions) == 1:
@@ -481,3 +481,46 @@ class TestAgentEndToEnd:
             for p in msg.parts
         )
         assert result.output == 'done'
+
+    async def test_run_code_calls_eager_tool_in_catalog(self) -> None:
+        """Eager tools listed in the instructions catalog are still callable via `run_code`.
+
+        Sanity-check end-to-end: the catalog moves into instructions (no signature in
+        `run_code.description`), but the underlying tool stays sandboxed and dispatch
+        through `run_code` still works.
+        """
+
+        def model_fn(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            run_code_def = next(td for td in info.function_tools if td.name == 'run_code')
+            assert run_code_def.description is not None
+            # The catalog is moved out of run_code.description — no signature here.
+            assert 'async def add' not in run_code_def.description
+            # First turn: invoke `add` through the sandbox.
+            if not any(isinstance(msg, ModelResponse) for msg in messages):
+                return ModelResponse(
+                    parts=[
+                        ToolCallPart(
+                            tool_name='run_code',
+                            # CodeMode renders all tools as `async def` by default — use `await`.
+                            args={'code': 'result = await add(a=3, b=4)\nresult'},
+                            tool_call_id='c1',
+                        )
+                    ],
+                    usage=RequestUsage(input_tokens=1, output_tokens=1),
+                )
+            # Second turn: pull the run_code return out of the latest ModelRequest.
+            last_request = messages[-1]
+            assert isinstance(last_request, ModelRequest)
+            run_code_return = next(p for p in last_request.parts if isinstance(p, ToolReturnPart))
+            return ModelResponse(
+                parts=[TextPart(f'got {run_code_return.content}')],
+                usage=RequestUsage(input_tokens=1, output_tokens=1),
+            )
+
+        agent: Agent[None, str] = Agent(
+            FunctionModel(model_fn),
+            tools=[Tool(add)],
+            capabilities=[CodeMode[None](), CodeModeDynamicCatalog[None]()],
+        )
+        result = await agent.run('add 3 and 4 via run_code')
+        assert result.output == 'got 7'
