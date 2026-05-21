@@ -101,6 +101,10 @@ def must_cite_sources(output: object) -> GuardResult:
 OutputGuard(guard=must_cite_sources)
 ```
 
+## Streaming
+
+`OutputGuard` inspects the **final** output only — during `run_stream()` partial chunks reach the caller before the guard runs, so a `block` or `replace` verdict cannot un-send content already streamed. Use `run()` / `run_sync()` when the output must be screened before any of it is exposed. `GuardResult.retry()` is **not** supported under `run_stream()` — pydantic-ai does not retry output during streaming, and a `retry` verdict there surfaces as `UnexpectedModelBehavior`. `InputGuard` (including `parallel=True`) works the same in streamed and non-streamed runs.
+
 ## Tracing
 
 `replace` and `block` are recorded as spans on the active OpenTelemetry tracer, so a redaction or refusal shows up in Logfire traces (`guardrail redacted input`, `guardrail blocked output`, etc.) with `guardrail.*` attributes. The original and replacement values are attached **only** when `RunContext.trace_include_content` is enabled — a redacted value is often the very content the guard exists to keep out of traces. `retry` needs no special tracing: the retried model request appears in the trace on its own.

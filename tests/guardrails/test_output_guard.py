@@ -11,6 +11,7 @@ from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanE
 from opentelemetry.trace import NoOpTracer, Tracer
 from pydantic import BaseModel
 from pydantic_ai import Agent
+from pydantic_ai.exceptions import UnexpectedModelBehavior
 from pydantic_ai.models.test import TestModel
 from pydantic_ai.output import OutputContext
 from pydantic_ai.tools import RunContext
@@ -201,6 +202,37 @@ class TestOutputGuardDirect:
         )
         assert out == 'partial'
         assert called == []
+
+
+class TestOutputGuardStreaming:
+    """`OutputGuard` under `run_stream()`."""
+
+    async def test_allows_under_run_stream(self):
+        agent = Agent(
+            TestModel(custom_output_text='clean reply'),
+            capabilities=[OutputGuard[None](guard=lambda out: 'SSN' not in str(out))],
+        )
+        async with agent.run_stream('hello') as result:
+            assert (await result.get_output()) == 'clean reply'
+
+    async def test_block_under_run_stream(self):
+        agent = Agent(
+            TestModel(custom_output_text='leaks SSN'),
+            capabilities=[OutputGuard[None](guard=lambda _: GuardResult.block('contains SSN'))],
+        )
+        with pytest.raises(OutputBlocked, match='contains SSN'):
+            async with agent.run_stream('hello') as result:
+                await result.get_output()
+
+    async def test_retry_under_run_stream_is_unsupported(self):
+        """pydantic-ai does not support output retries while streaming."""
+        agent = Agent(
+            TestModel(custom_output_text='answer'),
+            capabilities=[OutputGuard[None](guard=lambda _: GuardResult.retry('redo'))],
+        )
+        with pytest.raises(UnexpectedModelBehavior):
+            async with agent.run_stream('hello') as result:
+                await result.get_output()
 
 
 class TestOutputGuardTracing:

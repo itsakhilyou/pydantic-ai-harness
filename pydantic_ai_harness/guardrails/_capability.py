@@ -211,8 +211,11 @@ class InputGuard(AbstractCapability[AgentDepsT]):
     The `guard` callable receives the prompt text and returns one of the four
     outcomes (see the module docstring). `block` short-circuits the model call
     with a refusal message; `replace` rewrites the prompt sent to the model
-    (redaction); `retry` is not valid for an input guard. Raising an exception
-    from the guard propagates it as-is.
+    (redaction) — the rewrite also replaces the original in the run's message
+    history, so a redacted secret is not retained, and it targets text prompts
+    (a `str` replacement overwrites a multimodal prompt's other parts); `retry`
+    is not valid for an input guard. Raising an exception from the guard
+    propagates it as-is.
 
     ```python
     from pydantic_ai import Agent
@@ -367,8 +370,17 @@ class OutputGuard(AbstractCapability[AgentDepsT]):
     normal retry machinery and counts against the run's output-retry budget.
     Like `InputGuard`, the guard may take a
     [`RunContext`][pydantic_ai.tools.RunContext] as a first parameter; it is
-    detected from the signature. During streaming the guard runs only on the
-    final output, not on partial results.
+    detected from the signature.
+
+    Streaming caveats. `retry` is supported with
+    [`run()`][pydantic_ai.Agent.run] / `run_sync()` only — pydantic-ai does not
+    support output retries during [`run_stream()`][pydantic_ai.Agent.run_stream],
+    where a `retry` verdict surfaces as
+    [`UnexpectedModelBehavior`][pydantic_ai.exceptions.UnexpectedModelBehavior].
+    The guard inspects only the final output, not partial chunks, so during a
+    streamed run the caller may already have received partial output before a
+    `block` or `replace` verdict is reached — use `run()` when the output must
+    be screened before any of it is exposed.
     """
 
     guard: OutputGuardFunc[AgentDepsT]

@@ -521,6 +521,26 @@ class TestInputGuardTracing:
         assert dict(span.attributes or {}) == {'guardrail.direction': 'input', 'guardrail.action': 'replace'}
 
 
+class TestInputGuardStreaming:
+    """`InputGuard` behaves the same under `run_stream()` as under `run()`."""
+
+    async def test_parallel_guard_under_run_stream(self):
+        agent = Agent(
+            TestModel(custom_output_text='streamed'),
+            capabilities=[InputGuard[None](guard=lambda _: True, parallel=True)],
+        )
+        async with agent.run_stream('hello') as result:
+            assert (await result.get_output()) == 'streamed'
+
+    async def test_block_under_run_stream(self):
+        agent = Agent(
+            TestModel(custom_output_text='would be model output'),
+            capabilities=[InputGuard[None](guard=lambda _: GuardResult.block('nope'))],
+        )
+        async with agent.run_stream('hello') as result:
+            assert (await result.get_output()) == 'nope'
+
+
 class TestExtractPrompt:
     """Unit tests for the `_extract_prompt` helper."""
 
