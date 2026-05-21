@@ -36,9 +36,7 @@ def _build_ctx_and_req(
     prompt: str | None = 'hello world',
 ) -> tuple[RunContext[None], ModelRequestContext]:
     model = TestModel()
-    messages: list[ModelMessage] = (
-        [ModelRequest(parts=[UserPromptPart(content=prompt)])] if prompt is not None else []
-    )
+    messages: list[ModelMessage] = [ModelRequest(parts=[UserPromptPart(content=prompt)])] if prompt is not None else []
     req_ctx = ModelRequestContext(
         model=model,
         messages=messages,
@@ -99,19 +97,35 @@ class TestInputGuard:
         with pytest.raises(InputBlocked, match='policy violation'):
             await agent.run('anything')
 
-    async def test_sequential_wrap_model_request_is_passthrough(self):
+    async def test_block_message_callable_receives_prompt(self):
+        agent = Agent(
+            TestModel(custom_output_text='would be model output'),
+            capabilities=[InputGuard[None](guard=lambda _: False, block_message=lambda p: f'blocked: {p}')],
+        )
+        result = await agent.run('secret stuff')
+
+        assert result.output == 'blocked: secret stuff'
+
+    async def test_sequential_runs_guard_then_handler(self):
         run_ctx, req_ctx = _build_ctx_and_req()
         sentinel = ModelResponse(parts=[TextPart(content='direct')])
+        calls: list[str] = []
+
+        def guard(prompt: str) -> bool:
+            calls.append(prompt)
+            return True
 
         async def handler(_: Any) -> ModelResponse:
             return sentinel
 
-        ig = InputGuard[None](guard=lambda _: True, parallel=False)
+        ig = InputGuard[None](guard=guard, parallel=False)
         out = await ig.wrap_model_request(run_ctx, request_context=req_ctx, handler=handler)
         assert out is sentinel
+        assert calls == ['hello world']
 
-    async def test_sequential_before_request_returns_context_when_prompt_missing(self):
+    async def test_sequential_skipped_when_prompt_missing(self):
         run_ctx, req_ctx = _build_ctx_and_req(prompt=None)
+        sentinel = ModelResponse(parts=[TextPart(content='direct')])
 
         called: list[str] = []
 
@@ -119,23 +133,12 @@ class TestInputGuard:
             called.append(prompt)
             return True
 
+        async def handler(_: Any) -> ModelResponse:
+            return sentinel
+
         ig = InputGuard[None](guard=guard, parallel=False)
-        out = await ig.before_model_request(run_ctx, req_ctx)
-        assert out is req_ctx
-        assert called == []
-
-    async def test_parallel_before_request_is_noop(self):
-        run_ctx, req_ctx = _build_ctx_and_req()
-
-        called: list[str] = []
-
-        def guard(prompt: str) -> bool:  # pragma: no cover — should not run via before_model_request
-            called.append(prompt)
-            return False
-
-        ig = InputGuard[None](guard=guard, parallel=True)
-        out = await ig.before_model_request(run_ctx, req_ctx)
-        assert out is req_ctx
+        out = await ig.wrap_model_request(run_ctx, request_context=req_ctx, handler=handler)
+        assert out is sentinel
         assert called == []
 
     async def test_runs_once_across_tool_loop(self):
@@ -160,8 +163,9 @@ class TestInputGuard:
         assert calls == ['hello']
 
     async def test_sequential_skips_guard_on_subsequent_steps(self):
-        """After the first model request, `before_model_request` must not re-run the guard."""
+        """After the first model request, the guard must not re-run."""
         run_ctx, req_ctx = _build_ctx_and_req(run_step=2)
+        sentinel = ModelResponse(parts=[TextPart(content='direct')])
 
         called: list[str] = []
 
@@ -169,9 +173,12 @@ class TestInputGuard:
             called.append(prompt)
             return False
 
+        async def handler(_: Any) -> ModelResponse:
+            return sentinel
+
         ig = InputGuard[None](guard=guard, parallel=False)
-        out = await ig.before_model_request(run_ctx, req_ctx)
-        assert out is req_ctx
+        out = await ig.wrap_model_request(run_ctx, request_context=req_ctx, handler=handler)
+        assert out is sentinel
         assert called == []
 
 

@@ -20,7 +20,7 @@ import asyncio
 import inspect
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, TypeVar
 
 from pydantic_ai.capabilities import AbstractCapability, WrapModelRequestHandler
 from pydantic_ai.exceptions import SkipModelRequest
@@ -52,6 +52,9 @@ JSON text. Returning `True` marks the output safe.
 """
 
 
+_GuardValueT = TypeVar('_GuardValueT')
+
+
 async def _evaluate(
     guard: InputGuardFunc | OutputGuardFunc,
     value: object,
@@ -61,6 +64,16 @@ async def _evaluate(
     if inspect.isawaitable(result):
         return await result
     return result
+
+
+def _resolve_block_message(
+    block_message: str | Callable[[_GuardValueT], str],
+    value: _GuardValueT,
+) -> str:
+    """Return `block_message`, calling it with `value` when it is a callable."""
+    if callable(block_message):
+        return block_message(value)
+    return block_message
 
 
 def _extract_prompt(ctx: RunContext[AgentDepsT], messages: Sequence[ModelMessage]) -> str | None:
@@ -106,6 +119,10 @@ class InputGuard(AbstractCapability[AgentDepsT]):
     handler is cancelled as soon as the guard reports a violation, which saves
     tokens when the guard is slower than the provider round-trip.
 
+    `block_message` can be a plain string or a callable. A callable receives
+    the prompt that tripped the guard and returns the refusal text, so the
+    message can reflect what was actually submitted instead of a fixed string.
+
     Scope: the guard runs exactly once per run — on the first model request —
     and evaluates the original user prompt. Subsequent model requests in the
     same run (e.g. after tool calls) are not re-checked, since the user input
@@ -119,30 +136,19 @@ class InputGuard(AbstractCapability[AgentDepsT]):
     parallel: bool = False
     """Run the guard concurrently with the model request and cancel the model call on failure."""
 
-    block_message: str = 'Request blocked by input guardrail.'
-    """Text returned as the model response when the guard trips gracefully."""
+    block_message: str | Callable[[str], str] = 'Request blocked by input guardrail.'
+    """Refusal text returned as the model response when the guard trips gracefully.
 
-    def _blocked_response(self) -> ModelResponse:
-        return ModelResponse(parts=[TextPart(content=self.block_message)])
+    A callable receives the prompt that tripped the guard and returns the text.
+    """
+
+    def _blocked_response(self, prompt: str) -> ModelResponse:
+        return ModelResponse(parts=[TextPart(content=_resolve_block_message(self.block_message, prompt))])
 
     async def _run_guard(self, prompt: str) -> None:
         """Evaluate the guard and raise `SkipModelRequest` on failure."""
         if not await _evaluate(self.guard, prompt):
-            raise SkipModelRequest(self._blocked_response())
-
-    async def before_model_request(
-        self,
-        ctx: RunContext[AgentDepsT],
-        request_context: ModelRequestContext,
-    ) -> ModelRequestContext:
-        """Check the prompt before the model call in sequential mode."""
-        if self.parallel or ctx.run_step > 1:
-            return request_context
-        prompt = _extract_prompt(ctx, request_context.messages)
-        if prompt is None:
-            return request_context
-        await self._run_guard(prompt)
-        return request_context
+            raise SkipModelRequest(self._blocked_response(prompt))
 
     async def wrap_model_request(
         self,
@@ -151,12 +157,20 @@ class InputGuard(AbstractCapability[AgentDepsT]):
         request_context: ModelRequestContext,
         handler: WrapModelRequestHandler,
     ) -> ModelResponse:
-        """Run the guard alongside the model call when `parallel=True`."""
-        if not self.parallel or ctx.run_step > 1:
+        """Check the prompt before the first model call.
+
+        Sequential mode runs the guard then the model. `parallel=True` races
+        the guard against the model call and cancels it on a violation.
+        """
+        if ctx.run_step > 1:
             return await handler(request_context)
         prompt = _extract_prompt(ctx, request_context.messages)
         if prompt is None:
             return await handler(request_context)
+        if not self.parallel:
+            await self._run_guard(prompt)
+            return await handler(request_context)
+
         async def run_handler() -> ModelResponse:
             return await handler(request_context)
 
@@ -215,8 +229,11 @@ class OutputGuard(AbstractCapability[AgentDepsT]):
     guard: OutputGuardFunc
     """Callable that returns `True` when the output is safe."""
 
-    block_message: str = 'Output blocked by output guardrail.'
-    """Message attached to `OutputBlocked` when the guard trips."""
+    block_message: str | Callable[[object], str] = 'Output blocked by output guardrail.'
+    """Message attached to `OutputBlocked` when the guard trips.
+
+    A callable receives the output that tripped the guard and returns the text.
+    """
 
     async def after_run(
         self,
@@ -226,5 +243,5 @@ class OutputGuard(AbstractCapability[AgentDepsT]):
     ) -> AgentRunResult[Any]:
         """Validate `result.output` and raise `OutputBlocked` on failure."""
         if not await _evaluate(self.guard, result.output):
-            raise OutputBlocked(self.block_message)
+            raise OutputBlocked(_resolve_block_message(self.block_message, result.output))
         return result

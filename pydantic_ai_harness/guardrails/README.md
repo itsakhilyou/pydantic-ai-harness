@@ -99,6 +99,20 @@ InputGuard(
 
 The text is returned as the model response for that step, so the caller sees a normal completion rather than an exception. Multi-turn agents can continue the conversation from there.
 
+`block_message` also accepts a callable, so the message can reflect what was actually submitted instead of a fixed string. `InputGuard` passes the prompt that tripped the guard; `OutputGuard` passes the blocked output:
+
+```python
+InputGuard(
+    guard=no_secrets,
+    block_message=lambda prompt: f'Blocked — {len(prompt)} characters were not sent to the model.',
+)
+
+OutputGuard(
+    guard=no_pii,
+    block_message=lambda output: f'Output withheld: {type(output).__name__} failed the PII check.',
+)
+```
+
 ## Hard-fail path
 
 Returning `False` from a guard is the graceful path. If you want the caller to see an exception instead, raise from the guard:
@@ -121,12 +135,12 @@ Any exception raised by the guard propagates as-is — you can use `InputBlocked
 InputGuard(
     guard: Callable[[str], bool | Awaitable[bool]],
     parallel: bool = False,
-    block_message: str = 'Request blocked by input guardrail.',
+    block_message: str | Callable[[str], str] = 'Request blocked by input guardrail.',
 )
 
 OutputGuard(
-    guard: Callable[[str], bool | Awaitable[bool]],
-    block_message: str = 'Output blocked by output guardrail.',
+    guard: Callable[[object], bool | Awaitable[bool]],
+    block_message: str | Callable[[object], str] = 'Output blocked by output guardrail.',
 )
 ```
 

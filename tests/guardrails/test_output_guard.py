@@ -41,6 +41,16 @@ class TestOutputGuard:
         with pytest.raises(OutputBlocked, match='contains SSN'):
             await agent.run('hello')
 
+    async def test_block_message_callable_receives_output(self):
+        agent = Agent(
+            TestModel(custom_output_text='leaks SSN'),
+            capabilities=[
+                OutputGuard[None](guard=lambda _: False, block_message=lambda out: f'blocked output: {out}'),
+            ],
+        )
+        with pytest.raises(OutputBlocked, match='blocked output: leaks SSN'):
+            await agent.run('hello')
+
     async def test_async_guard_awaited(self):
         async def guard(output: object) -> bool:
             await asyncio.sleep(0)
