@@ -73,15 +73,6 @@ def _build_ctx_and_req(
     return run_ctx, req_ctx
 
 
-def _prompt_text(messages: list[ModelMessage]) -> str | None:
-    """Return the text of the first user prompt in `messages`."""
-    for message in messages:
-        for part in message.parts:
-            if isinstance(part, UserPromptPart) and isinstance(part.content, str):
-                return part.content
-    return None
-
-
 class TestInputGuard:
     """Integration tests for the `InputGuard` capability driven through `Agent.run`."""
 
@@ -193,10 +184,12 @@ class TestInputGuardRedaction:
     async def test_replace_rewrites_prompt_for_handler(self):
         run_ctx, req_ctx = _build_ctx_and_req()
         sentinel = ModelResponse(parts=[TextPart(content='direct')])
-        seen: list[str | None] = []
+        seen: list[object] = []
 
         async def handler(received: ModelRequestContext) -> ModelResponse:
-            seen.append(_prompt_text(received.messages))
+            part = received.messages[0].parts[0]
+            assert isinstance(part, UserPromptPart)
+            seen.append(part.content)
             return sentinel
 
         ig = InputGuard[None](guard=lambda _: GuardResult.replace('[redacted]'))
@@ -204,7 +197,9 @@ class TestInputGuardRedaction:
 
         assert out is sentinel
         assert seen == ['[redacted]']
-        assert _prompt_text(req_ctx.messages) == '[redacted]'
+        part = req_ctx.messages[0].parts[0]
+        assert isinstance(part, UserPromptPart)
+        assert part.content == '[redacted]'
 
     async def test_replace_via_agent_run(self):
         def guard(prompt: str) -> GuardResult:
@@ -214,7 +209,9 @@ class TestInputGuardRedaction:
         result = await agent.run('my secret value')
 
         assert result.output == 'ok'
-        assert _prompt_text(list(result.all_messages())) == 'my *** value'
+        part = list(result.all_messages())[0].parts[0]
+        assert isinstance(part, UserPromptPart)
+        assert part.content == 'my *** value'
 
     async def test_replace_with_non_str_is_a_usage_error(self):
         agent = Agent(
