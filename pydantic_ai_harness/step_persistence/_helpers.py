@@ -16,10 +16,12 @@ from pydantic_ai_harness.step_persistence._store import StepStore
 def is_provider_valid(messages: list[ModelMessage]) -> bool:
     """Return True when `messages` can be safely passed to `Agent.run(message_history=...)`.
 
-    A history is provider-valid when every `ToolCallPart` has a matching
-    `ToolReturnPart` or `RetryPromptPart` later in the conversation.
-    Unmatched calls are how providers reject "I asked for a tool result and
-    you skipped it" requests — they must be resolved before resume.
+    A history is provider-valid when (1) every `ToolCallPart` has a matching
+    `ToolReturnPart` / `RetryPromptPart` later in the conversation, and
+    (2) every tool return / retry resolves a currently-open tool call. The
+    second clause rejects orphan returns, duplicate returns for the same
+    `tool_call_id`, and returns that arrive before their call — any of
+    those would make the history provider-invalid on resume.
     """
     open_calls: set[str] = set()
     for msg in messages:
@@ -30,6 +32,8 @@ def is_provider_valid(messages: list[ModelMessage]) -> bool:
         else:
             for part in msg.parts:
                 if isinstance(part, (ToolReturnPart, RetryPromptPart)):
+                    if part.tool_call_id not in open_calls:
+                        return False
                     open_calls.discard(part.tool_call_id)
     return not open_calls
 

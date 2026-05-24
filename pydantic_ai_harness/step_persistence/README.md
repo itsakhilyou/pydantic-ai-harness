@@ -17,16 +17,16 @@ snapshots, and graph-node resume are out of scope and tracked separately
    mid-tool-call still leaves a usable event trail.
 2. **Continuable snapshots** — a `ContinuableSnapshot` is saved only at
    boundaries where the message history is **provider-valid**: every
-   `ToolCallPart` has a matching `ToolReturnPart` or `RetryPromptPart`. Pass
-   one back to `Agent.run(message_history=...)` to continue or fork.
+   `ToolCallPart` has a matching `ToolReturnPart` or `RetryPromptPart`, with
+   no orphan, duplicate, or out-of-order returns. Pass the snapshot's
+   `messages` back to `Agent.run(message_history=...)` to continue or fork.
 3. **Tool-effect ledger** — every tool call's lifecycle (`started`,
-   `completed`, `failed`) is recorded against its `tool_call_id`. After a
-   crash, a tool with a `started` record and no terminal update should be
-   treated as `unknown_after_crash`: the side effect may or may not have
-   happened.
-4. **Lineage metadata** — `parent_run_id` ties delegate runs back to the
-   orchestrator; `agent_name` distinguishes multiple runs of the same logical
-   delegate type.
+   `completed`, `failed`) is recorded against `(run_id, tool_call_id)`.
+   After a crash, a tool with a `started` record and no terminal update
+   should be treated as `unknown_after_crash`: the side effect may or may
+   not have happened.
+4. **Lineage metadata** — `conversation_id` (sequence) and `parent_run_id`
+   (hierarchy) are independent axes. See [Three-level identity](#three-level-identity).
 
 ## Quick start
 
@@ -35,81 +35,192 @@ from pydantic_ai import Agent
 from pydantic_ai_harness import StepPersistence, InMemoryStepStore
 
 store = InMemoryStepStore()
-orchestrator = Agent(
-    'openai:gpt-5',
-    capabilities=[
-        StepPersistence(store=store, agent_name='orchestrator', run_id='orch-1'),
-    ],
-)
-
-# Delegate, tied to the orchestrator via parent_run_id
 librarian = Agent(
     'openai:gpt-5',
-    capabilities=[
-        StepPersistence(
-            store=store,
-            agent_name='code_librarian',
-            run_id='libr-1',
-            parent_run_id='orch-1',
-        ),
-    ],
+    capabilities=[StepPersistence(store=store, agent_name='code_librarian')],
 )
+
+await librarian.run('Find ThinkingPartDelta and confirm the callable allowance')
+```
+
+That is the whole setup. The capability materialises a `run_id` per
+`Agent.run` automatically:
+
+- explicit `run_id='libr-1'` → used as-is (deterministic identity).
+- `agent_name` set, `run_id` unset → `'{agent_name}-{8-char-hex}'`
+  (e.g. `code_librarian-a3b2`).
+- neither set → pydantic_ai's `ctx.run_id` (falling back to UUID4).
+
+Reusing one `StepPersistence` instance across multiple `Agent.run` calls
+does **not** silently merge them — each call materialises a fresh id.
+
+## Three-level identity
+
+The capability mirrors pydantic_ai's identity stack:
+
+| Concept | Definition | Granularity |
+| --- | --- | --- |
+| `conversation_id` | The dialogue. Resolved by pydantic_ai from the `conversation_id=` argument to `Agent.run`, or the most recent `conversation_id` on `message_history`, or a fresh UUID7. | sequence of runs |
+| `run_id` | One `Agent.run` invocation. | one step in the sequence |
+| `step_index` | Graph-node count *within* a run (`ctx.run_step`). | one node within one run |
+
+`StepEvent.conversation_id` and `RunRecord.conversation_id` are populated
+from `ctx.conversation_id`. So three `.run()` calls sharing one
+`conversation_id` produce three distinct `run_id`s, all queryable as a
+group:
+
+```python
+runs = await store.list_runs(conversation_id='conv-abc')  # 3 records, chronological
 ```
 
 ## Continuing a delegate's investigation
 
+pydantic_ai already has `message_history=` for "carry on with this prior
+context". `StepPersistence` does not introduce a parallel mechanism — it
+exposes one helper that loads the most recent provider-valid snapshot:
+
 ```python
 from pydantic_ai_harness import continue_run
 
-# First delegate run records investigation
+# Earlier:
 await librarian.run('Find ThinkingPartDelta and confirm the callable allowance')
 
-# Follow-up uses the prior snapshot instead of restarting
-history = await continue_run(store, run_id='libr-1')
+# Later (possibly a different process):
+prior_run = (await store.list_runs(conversation_id='conv-abc'))[-1].run_id
+history = await continue_run(store, run_id=prior_run)
 await librarian.run(
     'Read _apply_provider_details_delta and check the path',
     message_history=history,
+    conversation_id='conv-abc',   # preserve the conversation grouping
 )
 ```
 
-`fork_run(store, run_id=...)` returns the same shape but is intended when the
-caller wants a branched, new logical run rather than a continuation.
+`fork_run(store, run_id=...)` returns the same shape but is intended when
+the caller wants a branched logical run from that snapshot point (the new
+run gets a fresh `run_id` and probably a fresh `conversation_id`).
+
+### What "safe to continue from" means
+
+`continue_run` only returns the messages of the **latest provider-valid
+snapshot** for that `run_id`. Snapshots are written at two boundaries:
+
+- after every `CallToolsNode` completes (all tool calls returned), and
+- at `after_run`.
+
+A run that crashed mid-tool-call has events (`tool_call_started`) but no
+snapshot for that point. `continue_run` returns the snapshot from the
+**previous** safe boundary, not the failed step.
+
+## Run lineage — `parent_run_id`
+
+`parent_run_id` is a lineage label, not a functional dependency. It does
+two things:
+
+- Every `StepEvent` and `RunRecord` carries it, so you can filter / group.
+- `store.list_runs(parent_run_id='orch-1')` returns every delegate run
+  pointing at that orchestrator.
+
+It is **auto-inferred for in-process delegation**: when an orchestrator's
+tool synchronously calls a delegate's `Agent.run(...)`, the delegate's
+`StepPersistence` picks up the orchestrator's `run_id` via a `ContextVar`
+that the orchestrator's `wrap_run` set. No threading required:
+
+```python
+orchestrator = Agent(
+    'openai:gpt-5',
+    capabilities=[StepPersistence(store=store, agent_name='orchestrator')],
+)
+librarian = Agent(
+    'openai:gpt-5',
+    capabilities=[StepPersistence(store=store, agent_name='code_librarian')],
+)
+
+@orchestrator.tool_plain
+async def ask_librarian(question: str) -> str:
+    result = await librarian.run(question)   # parent_run_id auto-filled
+    return result.output
+
+await orchestrator.run('Where is ThinkingPartDelta defined?')
+
+# All librarian runs now point at the orchestrator's run_id:
+orch_run_id = (await store.list_runs(agent_name=None))[0].run_id  # or filter however
+delegates = await store.list_runs(parent_run_id=orch_run_id)
+```
+
+Set `parent_run_id=` explicitly to override (e.g. cross-process delegation
+where `ContextVar`s do not propagate).
+
+`parent_run_id` is **distinct from `conversation_id`**. The orchestrator
+and delegate usually live in *different* conversations (the orchestrator
+talks to a user; the delegate talks to itself). But they share a
+parent-child link.
+
+## Inspecting a run tree
+
+```python
+# Every delegate of one orchestrator run
+delegates = await store.list_runs(parent_run_id='orch-3f2a')
+
+# Every run in one dialogue (multi-turn conversation across many .run() calls)
+turns = await store.list_runs(conversation_id='conv-abc')
+
+# Filters combine (AND):
+focused = await store.list_runs(
+    parent_run_id='orch-3f2a',
+    conversation_id='libr-conv',
+)
+
+# Detail per run:
+events = await store.list_events(run_id=delegates[0].run_id)
+snapshot = await store.latest_snapshot(run_id=delegates[0].run_id)
+unresolved = await store.list_unresolved_tool_effects(run_id=delegates[0].run_id)
+```
+
+## Failure recovery
+
+```python
+# An earlier delegate run died mid-investigation.
+events = await store.list_events(run_id='libr-3f2a')
+unresolved = await store.list_unresolved_tool_effects(run_id='libr-3f2a')
+for record in unresolved:
+    # status == 'started' with no terminal update — unknown_after_crash.
+    print(f'tool {record.tool_name} ({record.tool_call_id}) may or may not have run')
+    print(f'  idempotency_key={record.idempotency_key}  '
+          f'effect_summary={record.effect_summary}')
+
+# Decide whether to resume or branch:
+history = await continue_run(store, run_id='libr-3f2a')
+# If the unresolved tools were read-only and safe to redo:
+await librarian.run('continue investigating', message_history=history,
+                    conversation_id='libr-conv')
+# If side effects might have happened and the orchestrator wants a fresh attempt:
+history = await fork_run(store, run_id='libr-3f2a')
+# ... pass to a new delegate run with a different agent_name / conversation_id.
+```
+
+Side-effect deduplication is the orchestrator's responsibility — populate
+`idempotency_key` and `effect_summary` on the `ToolEffectRecord` from inside
+the tool (or a thin wrapper) when the tool writes external state.
 
 ## Backends
 
 - `InMemoryStepStore` — process-local; great for tests.
-- `FileStepStore(directory)` — JSON/JSONL layout under
-  `<directory>/<run_id>/`:
+- `FileStepStore(directory)` — directory layout under `<directory>/<run_id>/`:
     - `run.json` — `RunRecord` (lineage)
     - `events.jsonl` — append-only `StepEvent`s
-    - `tool_effects.jsonl` — append-only `ToolEffectRecord`s
-    - `snapshots/<step_index>.json` — `ContinuableSnapshot`s
-- Both implement the same async `StepStore` protocol, so capability hooks
-  never block the event loop on the file backend (I/O is dispatched via
-  `anyio.to_thread`).
+    - `tool_effects.jsonl` — append-only `ToolEffectRecord`s, scoped to this run
+    - `snapshots/{seq}.json` — `ContinuableSnapshot`s, named by a per-run
+      monotonic counter (NOT `step_index`, which would collide when the
+      same `run_id` is reused across `Agent.run` calls — `ctx.run_step`
+      resets to 0 each call).
 
-`FileStepStore` validates `run_id` against `[A-Za-z0-9_.-]{1,200}` and rejects
-`..` to prevent path traversal — callers passing user-controlled IDs should
-still sanitise first.
+Both implement the same async `StepStore` protocol, so capability hooks
+never block the event loop on the file backend (I/O is dispatched via
+`anyio.to_thread`).
 
-## Inspecting a crashed run
-
-```python
-events = await store.list_events(run_id='libr-1')
-unresolved = await store.list_unresolved_tool_effects(run_id='libr-1')
-latest = await store.latest_snapshot(run_id='libr-1')
-```
-
-A run that died after `tool_call_started` but before `tool_call_completed`
-fired will show:
-
-- a `tool_call_started` event with no matching `tool_call_completed` /
-  `tool_call_failed`,
-- a `ToolEffectRecord` whose `status == 'started'`,
-- a `latest_snapshot()` that is **older** than the failed tool call (the
-  history at that point is not provider-valid).
-
-That is the contract: visible event trail, no false-continuable snapshot.
+`FileStepStore` validates `run_id` against `[A-Za-z0-9_.-]{1,200}` (and
+rejects `..`) to prevent path traversal — callers passing user-controlled
+IDs should still sanitise first.
 
 ## What this capability does **not** do
 
@@ -117,8 +228,14 @@ That is the contract: visible event trail, no false-continuable snapshot.
   counters, or in-flight streaming responses.
 - It does not deduplicate replayed side effects automatically. Tools that
   write artifacts, labels, PRs, or external state should populate
-  `idempotency_key` and `effect_summary` on their own `ToolEffectRecord`
-  entries (or wrap the tool to do so) so the orchestrator can decide whether
-  replay is safe.
+  `idempotency_key` and `effect_summary` on the `ToolEffectRecord` from
+  inside the tool (or a thin wrapper) so the orchestrator can decide
+  whether replay is safe.
 - It does not clean up old snapshots/events. Retention is the caller's
   responsibility.
+- It does not emit OpenTelemetry spans. pydantic_ai's `Instrumentation`
+  capability already spans `agent run` / `chat` / `running tool` and
+  populates `gen_ai.agent.name`, `gen_ai.agent.call.id`,
+  `gen_ai.conversation.id` via baggage. A future change may add
+  step-persistence attributes to the active span; that is tracked as a
+  follow-up issue.

@@ -65,7 +65,12 @@ class StepStore(Protocol):
 
     async def get_run(self, *, run_id: str) -> RunRecord | None: ...  # pragma: no cover
 
-    async def list_runs(self, *, parent_run_id: str | None = None) -> list[RunRecord]: ...  # pragma: no cover
+    async def list_runs(
+        self,
+        *,
+        parent_run_id: str | None = None,
+        conversation_id: str | None = None,
+    ) -> list[RunRecord]: ...  # pragma: no cover
 
     async def append_event(self, event: StepEvent) -> None: ...  # pragma: no cover
 
@@ -77,7 +82,9 @@ class StepStore(Protocol):
 
     async def record_tool_effect(self, record: ToolEffectRecord) -> None: ...  # pragma: no cover
 
-    async def get_tool_effect(self, *, tool_call_id: str) -> ToolEffectRecord | None: ...  # pragma: no cover
+    async def get_tool_effect(
+        self, *, run_id: str, tool_call_id: str
+    ) -> ToolEffectRecord | None: ...  # pragma: no cover
 
     async def list_unresolved_tool_effects(self, *, run_id: str) -> list[ToolEffectRecord]: ...  # pragma: no cover
 
@@ -89,7 +96,7 @@ class InMemoryStepStore:
         self._runs: dict[str, RunRecord] = {}
         self._events: dict[str, list[StepEvent]] = defaultdict(list)
         self._snapshots: dict[str, list[ContinuableSnapshot]] = defaultdict(list)
-        self._tool_effects: dict[str, ToolEffectRecord] = {}
+        self._tool_effects: dict[tuple[str, str], ToolEffectRecord] = {}
 
     async def register_run(self, record: RunRecord) -> None:
         self._runs[record.run_id] = record
@@ -97,10 +104,18 @@ class InMemoryStepStore:
     async def get_run(self, *, run_id: str) -> RunRecord | None:
         return self._runs.get(run_id)
 
-    async def list_runs(self, *, parent_run_id: str | None = None) -> list[RunRecord]:
-        if parent_run_id is None:
-            return list(self._runs.values())
-        return [r for r in self._runs.values() if r.parent_run_id == parent_run_id]
+    async def list_runs(
+        self,
+        *,
+        parent_run_id: str | None = None,
+        conversation_id: str | None = None,
+    ) -> list[RunRecord]:
+        return [
+            r
+            for r in self._runs.values()
+            if (parent_run_id is None or r.parent_run_id == parent_run_id)
+            and (conversation_id is None or r.conversation_id == conversation_id)
+        ]
 
     async def append_event(self, event: StepEvent) -> None:
         self._events[event.run_id].append(event)
@@ -118,10 +133,10 @@ class InMemoryStepStore:
         return snaps[-1]
 
     async def record_tool_effect(self, record: ToolEffectRecord) -> None:
-        self._tool_effects[record.tool_call_id] = record
+        self._tool_effects[(record.run_id, record.tool_call_id)] = record
 
-    async def get_tool_effect(self, *, tool_call_id: str) -> ToolEffectRecord | None:
-        return self._tool_effects.get(tool_call_id)
+    async def get_tool_effect(self, *, run_id: str, tool_call_id: str) -> ToolEffectRecord | None:
+        return self._tool_effects.get((run_id, tool_call_id))
 
     async def list_unresolved_tool_effects(self, *, run_id: str) -> list[ToolEffectRecord]:
         return [r for r in self._tool_effects.values() if r.run_id == run_id and r.status == 'started']
@@ -155,6 +170,7 @@ def _event_to_dict(event: StepEvent) -> dict[str, object]:
         'kind': event.kind,
         'step_index': event.step_index,
         'timestamp': event.timestamp.isoformat(),
+        'conversation_id': event.conversation_id,
         'parent_run_id': event.parent_run_id,
         'agent_name': event.agent_name,
         'tool_call_id': event.tool_call_id,
@@ -184,6 +200,7 @@ def _event_from_dict(data: dict[str, object]) -> StepEvent:
         kind=kind,
         step_index=step_raw,
         timestamp=datetime.fromisoformat(timestamp_raw),
+        conversation_id=_opt_str(data.get('conversation_id')),
         parent_run_id=_opt_str(data.get('parent_run_id')),
         agent_name=_opt_str(data.get('agent_name')),
         tool_call_id=_opt_str(data.get('tool_call_id')),
@@ -196,6 +213,7 @@ def _event_from_dict(data: dict[str, object]) -> StepEvent:
 def _run_to_dict(record: RunRecord) -> dict[str, object]:
     return {
         'run_id': record.run_id,
+        'conversation_id': record.conversation_id,
         'parent_run_id': record.parent_run_id,
         'agent_name': record.agent_name,
         'metadata': dict(record.metadata),
@@ -210,6 +228,7 @@ def _run_from_dict(data: dict[str, object]) -> RunRecord:
         raise ValueError('run record has wrong types')
     return RunRecord(
         run_id=run_id,
+        conversation_id=_opt_str(data.get('conversation_id')),
         parent_run_id=_opt_str(data.get('parent_run_id')),
         agent_name=_opt_str(data.get('agent_name')),
         metadata=_str_str_dict(data.get('metadata')),
@@ -306,10 +325,19 @@ class FileStepStore:
             return None
         return _run_from_dict(_load_json_object(path.read_text(encoding='utf-8')))
 
-    async def list_runs(self, *, parent_run_id: str | None = None) -> list[RunRecord]:
-        return await anyio.to_thread.run_sync(self._sync_list_runs, parent_run_id)
+    async def list_runs(
+        self,
+        *,
+        parent_run_id: str | None = None,
+        conversation_id: str | None = None,
+    ) -> list[RunRecord]:
+        return await anyio.to_thread.run_sync(self._sync_list_runs, parent_run_id, conversation_id)
 
-    def _sync_list_runs(self, parent_run_id: str | None) -> list[RunRecord]:
+    def _sync_list_runs(
+        self,
+        parent_run_id: str | None,
+        conversation_id: str | None,
+    ) -> list[RunRecord]:
         if not self._root.exists():
             return []
         records: list[RunRecord] = []
@@ -318,8 +346,11 @@ class FileStepStore:
             if not run_file.exists():
                 continue
             record = _run_from_dict(_load_json_object(run_file.read_text(encoding='utf-8')))
-            if parent_run_id is None or record.parent_run_id == parent_run_id:
-                records.append(record)
+            if parent_run_id is not None and record.parent_run_id != parent_run_id:
+                continue
+            if conversation_id is not None and record.conversation_id != conversation_id:
+                continue
+            records.append(record)
         return records
 
     async def append_event(self, event: StepEvent) -> None:
@@ -362,7 +393,27 @@ class FileStepStore:
             'timestamp': snapshot.timestamp.isoformat(),
             'messages': messages_json,
         }
-        (snap_dir / f'{snapshot.step_index}.json').write_text(json.dumps(payload), encoding='utf-8')
+        seq = self._next_snapshot_seq(snap_dir)
+        (snap_dir / f'{seq}.json').write_text(json.dumps(payload), encoding='utf-8')
+
+    @staticmethod
+    def _next_snapshot_seq(snap_dir: Path) -> int:
+        """Append-only monotonic counter per run directory.
+
+        Using the snapshot's `step_index` as the filename would collide when
+        the same `run_id` is reused across `Agent.run` calls — `ctx.run_step`
+        resets to 0 each call. The physical sequence is independent of
+        `step_index`, which lives inside the JSON payload.
+        """
+        max_seq = -1
+        for path in snap_dir.glob('*.json'):
+            try:
+                seq = int(path.stem)
+            except ValueError:
+                continue
+            if seq > max_seq:
+                max_seq = seq
+        return max_seq + 1
 
     async def latest_snapshot(self, *, run_id: str) -> ContinuableSnapshot | None:
         return await anyio.to_thread.run_sync(self._sync_latest_snapshot, run_id)
@@ -406,23 +457,20 @@ class FileStepStore:
         with (run_dir / 'tool_effects.jsonl').open('a', encoding='utf-8') as fp:
             fp.write(line + '\n')
 
-    async def get_tool_effect(self, *, tool_call_id: str) -> ToolEffectRecord | None:
-        return await anyio.to_thread.run_sync(self._sync_get_tool_effect, tool_call_id)
+    async def get_tool_effect(self, *, run_id: str, tool_call_id: str) -> ToolEffectRecord | None:
+        return await anyio.to_thread.run_sync(self._sync_get_tool_effect, run_id, tool_call_id)
 
-    def _sync_get_tool_effect(self, tool_call_id: str) -> ToolEffectRecord | None:
-        if not self._root.exists():
+    def _sync_get_tool_effect(self, run_id: str, tool_call_id: str) -> ToolEffectRecord | None:
+        path = self._run_dir(run_id) / 'tool_effects.jsonl'
+        if not path.exists():
             return None
         latest: ToolEffectRecord | None = None
-        for sub in self._root.iterdir():
-            path = sub / 'tool_effects.jsonl'
-            if not path.exists():
+        for raw in path.read_text(encoding='utf-8').splitlines():
+            if not raw.strip():
                 continue
-            for raw in path.read_text(encoding='utf-8').splitlines():
-                if not raw.strip():
-                    continue
-                record = _tool_effect_from_dict(_load_json_object(raw))
-                if record.tool_call_id == tool_call_id:
-                    latest = record
+            record = _tool_effect_from_dict(_load_json_object(raw))
+            if record.tool_call_id == tool_call_id:
+                latest = record
         return latest
 
     async def list_unresolved_tool_effects(self, *, run_id: str) -> list[ToolEffectRecord]:

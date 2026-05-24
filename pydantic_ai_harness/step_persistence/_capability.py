@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from typing import Any
@@ -9,7 +10,7 @@ from uuid import uuid4
 
 from pydantic_ai import CallToolsNode
 from pydantic_ai.capabilities import AbstractCapability
-from pydantic_ai.capabilities.abstract import AgentNode, NodeResult
+from pydantic_ai.capabilities.abstract import AgentNode, NodeResult, WrapRunHandler
 from pydantic_ai.messages import ModelResponse, ToolCallPart
 from pydantic_ai.models import ModelRequestContext
 from pydantic_ai.run import AgentRunResult
@@ -30,15 +31,28 @@ def _empty_metadata() -> dict[str, str]:
     return {}
 
 
+_current_run_id: ContextVar[str | None] = ContextVar(
+    'pydantic_ai_harness.step_persistence.current_run_id', default=None
+)
+"""Async-context-local pointer to the currently-active StepPersistence `run_id`.
+
+Set in `wrap_run` and read in `for_run` of a nested capability so an
+orchestrator's tool that synchronously invokes `Agent.run(...)` on a
+delegate auto-fills the delegate's `parent_run_id` — no manual threading
+required for in-process delegation.
+"""
+
+
 @dataclass
 class StepPersistence(AbstractCapability[AgentDepsT]):
     """Append-only step log + continuable snapshots + tool-effect ledger.
 
     The capability emits a `StepEvent` at every interesting boundary
     (run/model-request/tool-call start, completion, failure), records a
-    `ToolEffectRecord` for every tool call so the orchestrator can decide
-    whether replay is safe, and saves a `ContinuableSnapshot` only at
-    boundaries where the message history is provider-valid.
+    `ToolEffectRecord` per tool call so the orchestrator can decide whether
+    replay is safe, and saves a `ContinuableSnapshot` only at boundaries
+    where the message history is provider-valid (after a `CallToolsNode`
+    and at `after_run`).
 
     A run that crashes between `before_tool_execute` and `after_tool_execute`
     leaves a visible event trail and a `started` tool-effect record, but no
@@ -50,47 +64,54 @@ class StepPersistence(AbstractCapability[AgentDepsT]):
     from pydantic_ai_harness import StepPersistence, InMemoryStepStore
 
     store = InMemoryStepStore()
-    agent = Agent(
+    librarian = Agent(
         'openai:gpt-5',
-        capabilities=[StepPersistence(store=store, agent_name='code-librarian')],
+        capabilities=[StepPersistence(store=store, agent_name='code_librarian')],
     )
+    await librarian.run('Find ThinkingPartDelta and confirm the callable allowance')
     ```
 
-    To continue a prior run's history, pass `continue_from=<prior_run_id>` or
-    use the `continue_run` / `fork_run` helpers and pass the result to
-    `Agent.run(message_history=...)`.
+    Use `continue_run(store, run_id=...)` / `fork_run(store, run_id=...)`
+    to load a prior snapshot, then pass the result to
+    `Agent.run(..., message_history=...)`.
     """
 
     store: StepStore = field(default_factory=InMemoryStepStore)
     """Backend that records events, snapshots, and tool effects."""
 
+    agent_name: str | None = None
+    """Logical agent name (e.g. `code_librarian`, `reproducer`).
+
+    Used as a stable prefix for the auto-derived `run_id` so store
+    inspection shows readable IDs like `code_librarian-a3b2`.
+    """
+
     run_id: str | None = None
     """Identifier for this run.
 
-    Set explicitly to give the orchestrator a deterministic name (e.g.
-    `'code-librarian-001'`), then later resume with
-    `continue_run(store, run_id='code-librarian-001')`. Leave as `None` and
-    `for_run` resolves it from `ctx.run_id` (or a fresh UUID4) once per
-    `Agent.run`, so reusing the same capability instance across runs does
-    not silently merge them.
+    Resolution order (materialised once per `Agent.run` via `for_run`):
+
+    1. Explicit value → used as-is.
+    2. `agent_name` set, `run_id` unset → `{agent_name}-{short-uuid}`.
+    3. Neither set → `ctx.run_id` (pydantic_ai's auto-generated id),
+       falling back to a fresh UUID4.
+
+    Reusing the same capability instance across `Agent.run` calls does NOT
+    silently share the id — each call materialises a fresh one.
     """
 
     parent_run_id: str | None = None
-    """Run that spawned this one (e.g. orchestrator → delegate)."""
+    """Run that spawned this one.
 
-    agent_name: str | None = None
-    """Logical agent name (e.g. `code_librarian`, `reproducer`)."""
+    Auto-inferred from the enclosing `StepPersistence` `wrap_run` scope —
+    when an orchestrator's tool synchronously calls a delegate's
+    `Agent.run(...)`, the delegate picks up the orchestrator's `run_id`
+    here without manual threading. Set explicitly to override (e.g. for
+    cross-process delegation where `ContextVar`s do not propagate).
+    """
 
     metadata: dict[str, str] = field(default_factory=_empty_metadata)
-    """Free-form metadata recorded with the `RunRecord` and on each event."""
-
-    continue_from: str | None = None
-    """Run ID whose latest continuable snapshot should preload `ctx.messages`.
-
-    When set, `before_run` looks up the snapshot and prepends its messages
-    so the delegate sees its prior investigation. Skipped silently if no
-    snapshot exists yet.
-    """
+    """Free-form metadata stored on the `RunRecord` and on each event."""
 
     @classmethod
     def from_spec(cls, *args: Any, **kwargs: Any) -> StepPersistence[Any]:
@@ -107,16 +128,22 @@ class StepPersistence(AbstractCapability[AgentDepsT]):
         return cls(store=InMemoryStepStore(), **kwargs)
 
     async def for_run(self, ctx: RunContext[AgentDepsT]) -> AbstractCapability[AgentDepsT]:
-        """Materialise `run_id` per run when not supplied explicitly.
+        """Materialise `run_id` and `parent_run_id` for this `Agent.run` call.
 
-        Sharing one capability instance across multiple `Agent.run` calls
-        without setting `run_id` would otherwise merge their events under a
-        single auto-generated ID — almost never what the caller wants.
+        Reads the contextvar set by any enclosing `StepPersistence.wrap_run`
+        before the local run overwrites it, so a delegate's `parent_run_id`
+        ends up pointing at its orchestrator's `run_id`.
         """
-        if self.run_id is not None:
+        inferred_parent = self.parent_run_id if self.parent_run_id is not None else _current_run_id.get()
+        resolved_run_id = self.run_id or self._derive_run_id(ctx)
+        if resolved_run_id == self.run_id and inferred_parent == self.parent_run_id:
             return self
-        resolved = ctx.run_id or str(uuid4())
-        return replace(self, run_id=resolved)
+        return replace(self, run_id=resolved_run_id, parent_run_id=inferred_parent)
+
+    def _derive_run_id(self, ctx: RunContext[AgentDepsT]) -> str:
+        if self.agent_name is not None:
+            return f'{self.agent_name}-{uuid4().hex[:8]}'
+        return ctx.run_id or str(uuid4())
 
     def _effective_run_id(self, ctx: RunContext[AgentDepsT]) -> str:
         if self.run_id is not None:
@@ -136,6 +163,7 @@ class StepPersistence(AbstractCapability[AgentDepsT]):
             run_id=self._effective_run_id(ctx),
             kind=kind,
             step_index=ctx.run_step,
+            conversation_id=ctx.conversation_id,
             parent_run_id=self.parent_run_id,
             agent_name=self.agent_name,
             tool_call_id=tool_call_id,
@@ -144,20 +172,30 @@ class StepPersistence(AbstractCapability[AgentDepsT]):
             metadata=dict(self.metadata),
         )
 
+    async def wrap_run(
+        self,
+        ctx: RunContext[AgentDepsT],
+        *,
+        handler: WrapRunHandler,
+    ) -> AgentRunResult[Any]:
+        """Push this run's id onto the contextvar so nested delegates can read it."""
+        token = _current_run_id.set(self._effective_run_id(ctx))
+        try:
+            return await handler()
+        finally:
+            _current_run_id.reset(token)
+
     async def before_run(self, ctx: RunContext[AgentDepsT]) -> None:
-        """Register run lineage, load prior snapshot, and emit `run_started`."""
+        """Register run lineage and emit `run_started`."""
         await self.store.register_run(
             RunRecord(
                 run_id=self._effective_run_id(ctx),
+                conversation_id=ctx.conversation_id,
                 parent_run_id=self.parent_run_id,
                 agent_name=self.agent_name,
                 metadata=dict(self.metadata),
             )
         )
-        if self.continue_from is not None:
-            snapshot = await self.store.latest_snapshot(run_id=self.continue_from)
-            if snapshot is not None:
-                ctx.messages[:0] = list(snapshot.messages)
         await self.store.append_event(self._make_event(ctx, kind='run_started'))
 
     async def after_run(
@@ -257,7 +295,7 @@ class StepPersistence(AbstractCapability[AgentDepsT]):
         result: Any,
     ) -> Any:
         run_id = self._effective_run_id(ctx)
-        prior = await self.store.get_tool_effect(tool_call_id=call.tool_call_id)
+        prior = await self.store.get_tool_effect(run_id=run_id, tool_call_id=call.tool_call_id)
         started_at = prior.started_at if prior is not None else None
         await self.store.record_tool_effect(
             ToolEffectRecord(
@@ -289,7 +327,7 @@ class StepPersistence(AbstractCapability[AgentDepsT]):
         error: Exception,
     ) -> Any:
         run_id = self._effective_run_id(ctx)
-        prior = await self.store.get_tool_effect(tool_call_id=call.tool_call_id)
+        prior = await self.store.get_tool_effect(run_id=run_id, tool_call_id=call.tool_call_id)
         started_at = prior.started_at if prior is not None else datetime.now(timezone.utc)
         await self.store.record_tool_effect(
             ToolEffectRecord(

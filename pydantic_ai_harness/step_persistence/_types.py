@@ -51,12 +51,18 @@ class StepEvent:
     failure) but never carry recoverable state on their own. Pair with a
     `ContinuableSnapshot` for resume; pair with `ToolEffectRecord` for
     side-effect status.
+
+    `conversation_id` mirrors pydantic_ai's three-level identity stack —
+    conversation (the dialogue) → run (one `Agent.run` call) → step
+    (one graph node). Two `Agent.run` calls that share a
+    `conversation_id` produce two separate `run_id`s.
     """
 
     run_id: str
     kind: EventKind
     step_index: int
     timestamp: datetime = field(default_factory=_utcnow)
+    conversation_id: str | None = None
     parent_run_id: str | None = None
     agent_name: str | None = None
     tool_call_id: str | None = None
@@ -108,11 +114,15 @@ class ToolEffectRecord:
 class RunRecord:
     """Lineage metadata for an agent run.
 
-    `parent_run_id` ties delegate runs back to the orchestrator; `agent_name`
-    distinguishes multiple delegate runs of the same logical agent type.
+    `conversation_id` groups runs of the same dialogue (the user-visible
+    sequence). `parent_run_id` is the hierarchical link: which run spawned
+    this one. The two are independent axes — a delegate may share a
+    conversation across attempts (different `run_id`s, same `conversation_id`)
+    while pointing at a different orchestrator run via `parent_run_id`.
     """
 
     run_id: str
+    conversation_id: str | None = None
     parent_run_id: str | None = None
     agent_name: str | None = None
     metadata: dict[str, str] = field(default_factory=_empty_str_dict)

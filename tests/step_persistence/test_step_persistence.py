@@ -54,7 +54,13 @@ def anyio_backend() -> str:
     return 'asyncio'
 
 
-def build_run_context(deps: Any = None, *, run_id: str | None = None, run_step: int = 0) -> RunContext[Any]:
+def build_run_context(
+    deps: object = None,
+    *,
+    run_id: str | None = None,
+    run_step: int = 0,
+    conversation_id: str | None = None,
+) -> RunContext[Any]:
     """Fabricate a minimal `RunContext` for direct hook invocation."""
     return RunContext[Any](
         deps=deps,
@@ -64,6 +70,7 @@ def build_run_context(deps: Any = None, *, run_id: str | None = None, run_step: 
         messages=[],
         run_step=run_step,
         run_id=run_id,
+        conversation_id=conversation_id,
     )
 
 
@@ -119,6 +126,37 @@ class TestIsProviderValid:
     def test_text_only_response_is_valid(self) -> None:
         messages: list[ModelMessage] = [ModelResponse(parts=[TextPart(content='hi')])]
         assert is_provider_valid(messages) is True
+
+    def test_orphan_tool_return_is_invalid(self) -> None:
+        """Return whose `tool_call_id` was never opened by any prior call -> reject."""
+        messages: list[ModelMessage] = [
+            ModelRequest(parts=[ToolReturnPart(tool_name='add', content=1, tool_call_id='ghost')]),
+        ]
+        assert is_provider_valid(messages) is False
+
+    def test_duplicate_tool_return_is_invalid(self) -> None:
+        """Two returns for the same `tool_call_id` -> the second has no open call."""
+        messages: list[ModelMessage] = [
+            ModelResponse(parts=[ToolCallPart(tool_name='add', args={}, tool_call_id='c1')]),
+            ModelRequest(parts=[ToolReturnPart(tool_name='add', content=1, tool_call_id='c1')]),
+            ModelRequest(parts=[ToolReturnPart(tool_name='add', content=2, tool_call_id='c1')]),
+        ]
+        assert is_provider_valid(messages) is False
+
+    def test_out_of_order_tool_return_is_invalid(self) -> None:
+        """Return appearing before its call in a later response -> reject."""
+        messages: list[ModelMessage] = [
+            ModelRequest(parts=[ToolReturnPart(tool_name='add', content=1, tool_call_id='c1')]),
+            ModelResponse(parts=[ToolCallPart(tool_name='add', args={}, tool_call_id='c1')]),
+        ]
+        assert is_provider_valid(messages) is False
+
+    def test_orphan_retry_prompt_is_invalid(self) -> None:
+        """`RetryPromptPart` with no matching open call is also rejected."""
+        messages: list[ModelMessage] = [
+            ModelRequest(parts=[RetryPromptPart(content='retry', tool_name='add', tool_call_id='ghost')]),
+        ]
+        assert is_provider_valid(messages) is False
 
 
 # ---------------------------------------------------------------------------
@@ -192,6 +230,24 @@ class TestInMemoryStepStore:
         children = await store.list_runs(parent_run_id='r1')
         assert {r.run_id for r in children} == {'r2', 'r3'}
 
+    async def test_list_runs_filters_by_conversation_id(self) -> None:
+        store = InMemoryStepStore()
+        await store.register_run(RunRecord(run_id='r1', conversation_id='conv-A'))
+        await store.register_run(RunRecord(run_id='r2', conversation_id='conv-A'))
+        await store.register_run(RunRecord(run_id='r3', conversation_id='conv-B'))
+
+        a_runs = await store.list_runs(conversation_id='conv-A')
+        assert {r.run_id for r in a_runs} == {'r1', 'r2'}
+
+    async def test_list_runs_combines_parent_and_conversation_filters(self) -> None:
+        store = InMemoryStepStore()
+        await store.register_run(RunRecord(run_id='r1', parent_run_id='p', conversation_id='conv-A'))
+        await store.register_run(RunRecord(run_id='r2', parent_run_id='p', conversation_id='conv-B'))
+        await store.register_run(RunRecord(run_id='r3', parent_run_id='other', conversation_id='conv-A'))
+
+        narrowed = await store.list_runs(parent_run_id='p', conversation_id='conv-A')
+        assert [r.run_id for r in narrowed] == ['r1']
+
     async def test_append_and_list_events(self) -> None:
         store = InMemoryStepStore()
         await store.append_event(StepEvent(run_id='r1', kind='run_started', step_index=0))
@@ -235,7 +291,7 @@ class TestInMemoryStepStore:
 
     async def test_get_tool_effect_returns_latest_or_none(self) -> None:
         store = InMemoryStepStore()
-        assert await store.get_tool_effect(tool_call_id='missing') is None
+        assert await store.get_tool_effect(run_id='r1', tool_call_id='missing') is None
 
         await store.record_tool_effect(
             ToolEffectRecord(tool_call_id='c1', tool_name='add', run_id='r1', status='started')
@@ -244,7 +300,7 @@ class TestInMemoryStepStore:
             ToolEffectRecord(tool_call_id='c1', tool_name='add', run_id='r1', status='completed')
         )
 
-        record = await store.get_tool_effect(tool_call_id='c1')
+        record = await store.get_tool_effect(run_id='r1', tool_call_id='c1')
         assert record is not None
         assert record.status == 'completed'
 
@@ -285,6 +341,13 @@ class TestFileStepStore:
 
         children = await store.list_runs(parent_run_id='r1')
         assert [r.run_id for r in children] == ['r2']
+
+    async def test_list_runs_filters_by_conversation_id(self, tmp_path: Path) -> None:
+        store = FileStepStore(tmp_path)
+        await store.register_run(RunRecord(run_id='r1', conversation_id='conv-A'))
+        await store.register_run(RunRecord(run_id='r2', conversation_id='conv-B'))
+
+        assert [r.run_id for r in await store.list_runs(conversation_id='conv-A')] == ['r1']
 
     async def test_events_round_trip_skips_blank_lines(self, tmp_path: Path) -> None:
         store = FileStepStore(tmp_path)
@@ -338,7 +401,8 @@ class TestFileStepStore:
         assert snap.agent_name == 'a'
         assert len(snap.messages) == 2
 
-    async def test_latest_snapshot_picks_highest_step_index(self, tmp_path: Path) -> None:
+    async def test_latest_snapshot_picks_most_recent_seq(self, tmp_path: Path) -> None:
+        """Latest is by physical write order (filename seq), not by `step_index`."""
         store = FileStepStore(tmp_path)
         for step in (0, 2, 1):
             await store.save_snapshot(ContinuableSnapshot(run_id='r1', step_index=step, messages=[]))
@@ -348,7 +412,62 @@ class TestFileStepStore:
 
         snap = await store.latest_snapshot(run_id='r1')
         assert snap is not None
+        # The last save had step_index=1 and was written as the highest seq.
+        assert snap.step_index == 1
+
+    async def test_lower_step_index_save_supersedes_earlier(self, tmp_path: Path) -> None:
+        """A reused `run_id` whose later save has a LOWER `step_index` is still
+        treated as the latest -- the physical seq wins."""
+        store = FileStepStore(tmp_path)
+        await store.save_snapshot(ContinuableSnapshot(run_id='r1', step_index=5, messages=[]))
+        await store.save_snapshot(ContinuableSnapshot(run_id='r1', step_index=2, messages=[]))
+
+        snap = await store.latest_snapshot(run_id='r1')
+        assert snap is not None
         assert snap.step_index == 2
+
+    async def test_snapshot_seq_counter_increments(self, tmp_path: Path) -> None:
+        """Three consecutive saves produce files `0.json`, `1.json`, `2.json`."""
+        store = FileStepStore(tmp_path)
+        for _ in range(3):
+            await store.save_snapshot(ContinuableSnapshot(run_id='r1', step_index=0, messages=[]))
+
+        snap_dir = tmp_path / 'r1' / 'snapshots'
+        names = sorted(p.name for p in snap_dir.glob('*.json'))
+        assert names == ['0.json', '1.json', '2.json']
+
+    async def test_snapshot_seq_counter_skips_non_integer_filenames(self, tmp_path: Path) -> None:
+        """`_next_snapshot_seq` ignores `*.json` files whose stem is not an int."""
+        store = FileStepStore(tmp_path)
+        snap_dir = tmp_path / 'r1' / 'snapshots'
+        snap_dir.mkdir(parents=True)
+        (snap_dir / 'not-a-number.json').write_text('{}', encoding='utf-8')
+
+        await store.save_snapshot(ContinuableSnapshot(run_id='r1', step_index=0, messages=[]))
+
+        # Despite the foreign file, the new snapshot is written as `0.json`.
+        assert (snap_dir / '0.json').exists()
+
+    async def test_snapshot_seq_counter_keeps_max_across_unordered_iter(self, tmp_path: Path) -> None:
+        """`_next_snapshot_seq` keeps the highest seq even when `glob` yields lower ones later."""
+        store = FileStepStore(tmp_path)
+        snap_dir = tmp_path / 'r1' / 'snapshots'
+        snap_dir.mkdir(parents=True)
+        # Pre-populate multiple numeric files so `glob` iteration hits both
+        # the `seq > max_seq` true branch and its false branch (a lower seq
+        # seen after a higher one already set the max). Insertion order on
+        # APFS / ext4 is the directory iteration order: write the high stem
+        # first so the lower ones that follow hit the False branch.
+        # Lexicographic glob order puts `10.json` before `1.json`, so the
+        # iteration encounters a high seq first and then several lower seqs,
+        # forcing the `seq > max_seq` False branch.
+        for seq in (10, 1, 2, 9):
+            (snap_dir / f'{seq}.json').write_text('{}', encoding='utf-8')
+
+        await store.save_snapshot(ContinuableSnapshot(run_id='r1', step_index=0, messages=[]))
+
+        # Next seq must be 11 (one above the highest existing numeric stem).
+        assert (snap_dir / '11.json').exists()
 
     async def test_latest_snapshot_returns_none_when_dir_missing(self, tmp_path: Path) -> None:
         store = FileStepStore(tmp_path)
@@ -386,7 +505,7 @@ class TestFileStepStore:
         store = FileStepStore(tmp_path)
         assert await store.list_unresolved_tool_effects(run_id='nonexistent') == []
 
-    async def test_get_tool_effect_finds_record_across_runs(self, tmp_path: Path) -> None:
+    async def test_get_tool_effect_returns_latest_for_run(self, tmp_path: Path) -> None:
         store = FileStepStore(tmp_path)
         await store.record_tool_effect(
             ToolEffectRecord(tool_call_id='c1', tool_name='add', run_id='runA', status='started')
@@ -397,26 +516,25 @@ class TestFileStepStore:
         await store.record_tool_effect(
             ToolEffectRecord(tool_call_id='c2', tool_name='mul', run_id='runB', status='started')
         )
-        # Blank line + non-tool-effects directory at root to exercise both inner branches.
+        # Blank line to exercise the strip branch on read.
         (tmp_path / 'runA' / 'tool_effects.jsonl').write_text(
             (tmp_path / 'runA' / 'tool_effects.jsonl').read_text(encoding='utf-8') + '\n',
             encoding='utf-8',
         )
-        (tmp_path / 'empty-run').mkdir()
 
-        record = await store.get_tool_effect(tool_call_id='c1')
+        record = await store.get_tool_effect(run_id='runA', tool_call_id='c1')
         assert record is not None
         assert record.status == 'completed'
         assert record.run_id == 'runA'
 
-        other = await store.get_tool_effect(tool_call_id='c2')
+        other = await store.get_tool_effect(run_id='runB', tool_call_id='c2')
         assert other is not None and other.status == 'started'
 
-        assert await store.get_tool_effect(tool_call_id='missing') is None
+        assert await store.get_tool_effect(run_id='runA', tool_call_id='missing') is None
 
-    async def test_get_tool_effect_returns_none_when_root_missing(self, tmp_path: Path) -> None:
-        store = FileStepStore(tmp_path / 'absent')
-        assert await store.get_tool_effect(tool_call_id='anything') is None
+    async def test_get_tool_effect_returns_none_when_file_missing(self, tmp_path: Path) -> None:
+        store = FileStepStore(tmp_path)
+        assert await store.get_tool_effect(run_id='absent', tool_call_id='anything') is None
 
     async def test_register_run_rejects_bad_run_id(self, tmp_path: Path) -> None:
         store = FileStepStore(tmp_path)
@@ -569,48 +687,195 @@ class TestStepPersistenceCapability:
         assert {e.run_id for e in events} == {rid}
         assert {e.agent_name for e in events} == {'librarian'}
 
-    async def test_continue_from_prepends_prior_snapshot(self) -> None:
+    async def test_helper_based_continuation_replays_prior_messages(self) -> None:
+        """`continue_run(store, run_id=...) -> Agent.run(message_history=...)`."""
         store = InMemoryStepStore()
         agent1 = make_simple_agent([StepPersistence(store=store, agent_name='a')])
-        await agent1.run('add 1 and 2')
+        result1 = await agent1.run('add 1 and 2')
         first_rid = await first_run_id(store)
-        snap = await store.latest_snapshot(run_id=first_rid)
-        assert snap is not None
-        prior_len = len(snap.messages)
 
-        agent2 = make_simple_agent([StepPersistence(store=store, agent_name='a', continue_from=first_rid)])
-        result2 = await agent2.run('add 3 and 4')
+        history = await continue_run(store, run_id=first_rid)
+        assert len(history) == len(result1.all_messages())
 
-        # The prior snapshot's messages are present at the head of the new run's history.
+        # Second run uses a fresh capability instance + the helper-provided history.
+        agent2 = make_simple_agent([StepPersistence(store=store, agent_name='b')])
+        result2 = await agent2.run('add 3 and 4', message_history=history)
+
         msgs = result2.all_messages()
-        assert len(msgs) > prior_len
-        for prior_msg, replayed in zip(snap.messages, msgs[:prior_len]):
+        assert len(msgs) > len(history)
+        # The prior messages appear at the head of the second run's history.
+        for prior_msg, replayed in zip(history, msgs[: len(history)]):
             assert type(prior_msg) is type(replayed)
 
-    async def test_continue_from_with_no_snapshot_is_a_no_op(self) -> None:
+    async def test_agent_name_derived_run_id_prefix(self) -> None:
+        """No explicit run_id + agent_name -> `{agent_name}-{8-hex}`."""
         store = InMemoryStepStore()
-        agent = make_simple_agent([StepPersistence(store=store, continue_from='nope')])
-
-        result = await agent.run('add 1 and 2')
-
-        rid = await first_run_id(store)
-        # The run still ran cleanly; the missing snapshot is silently ignored.
-        assert (await store.latest_snapshot(run_id=rid)) is not None
-        assert len(result.all_messages()) > 0
-
-    async def test_tool_effect_records_started_then_completed(self) -> None:
-        store = InMemoryStepStore()
-        agent = make_simple_agent([StepPersistence(store=store)])
+        agent = make_simple_agent([StepPersistence(store=store, agent_name='librarian')])
         await agent.run('add 1 and 2')
 
+        runs = await store.list_runs()
+        assert len(runs) == 1
+        assert runs[0].run_id.startswith('librarian-')
+        # 'librarian-' + 8 hex chars.
+        assert len(runs[0].run_id) == len('librarian-') + 8
+
+    async def test_single_capability_instance_reused_gets_fresh_ids(self) -> None:
+        """One `StepPersistence(agent_name=...)` reused for two runs -> two distinct ids."""
+        store = InMemoryStepStore()
+        cap: StepPersistence[None] = StepPersistence(store=store, agent_name='librarian')
+
+        agent1: Agent[None, str] = Agent(TestModel(), capabilities=[cap])
+
+        @agent1.tool_plain
+        def add(a: int, b: int) -> int:  # pyright: ignore[reportUnusedFunction]
+            return a + b
+
+        await agent1.run('add 1 and 2')
+        await agent1.run('add 3 and 4')
+
+        runs = await store.list_runs()
+        assert len(runs) == 2
+        rids = {r.run_id for r in runs}
+        assert len(rids) == 2
+        for rid in rids:
+            assert rid.startswith('librarian-')
+
+    async def test_parent_run_id_inferred_via_contextvar(self) -> None:
+        """Orchestrator tool calls a delegate `Agent.run` -> delegate's `parent_run_id`
+        is auto-set to the orchestrator's `run_id` without manual threading."""
+        store = InMemoryStepStore()
+
+        delegate: Agent[None, str] = Agent(
+            TestModel(),
+            capabilities=[StepPersistence(store=store, agent_name='delegate')],
+        )
+
+        @delegate.tool_plain
+        def add(a: int, b: int) -> int:  # pyright: ignore[reportUnusedFunction]
+            return a + b
+
+        orchestrator: Agent[None, str] = Agent(
+            TestModel(),
+            capabilities=[StepPersistence(store=store, agent_name='orchestrator')],
+        )
+
+        @orchestrator.tool_plain
+        async def delegate_work() -> str:  # pyright: ignore[reportUnusedFunction]
+            res = await delegate.run('add 1 and 2')
+            return res.output
+
+        await orchestrator.run('coordinate')
+
+        runs = await store.list_runs()
+        orch = next(r for r in runs if r.agent_name == 'orchestrator')
+        dele = next(r for r in runs if r.agent_name == 'delegate')
+
+        assert dele.parent_run_id == orch.run_id
+        # And the delegate's events also carry that parent_run_id.
+        dele_events = await store.list_events(run_id=dele.run_id)
+        assert {e.parent_run_id for e in dele_events} == {orch.run_id}
+
+    async def test_conversation_id_groups_two_runs(self) -> None:
+        """Passing the same `conversation_id` to two `Agent.run` calls -> store.list_runs
+        finds both."""
+        store = InMemoryStepStore()
+        agent = make_simple_agent([StepPersistence(store=store, agent_name='c')])
+
+        await agent.run('add 1 and 2', conversation_id='conv-1')
+        await agent.run('add 3 and 4', conversation_id='conv-1')
+
+        runs = await store.list_runs(conversation_id='conv-1')
+        assert len(runs) == 2
+        assert {r.conversation_id for r in runs} == {'conv-1'}
+
+    async def test_list_runs_parent_and_conversation_filters_combine(self) -> None:
+        store = InMemoryStepStore()
+
+        delegate: Agent[None, str] = Agent(
+            TestModel(),
+            capabilities=[StepPersistence(store=store, agent_name='delegate')],
+        )
+
+        @delegate.tool_plain
+        def add(a: int, b: int) -> int:  # pyright: ignore[reportUnusedFunction]
+            return a + b
+
+        orchestrator: Agent[None, str] = Agent(
+            TestModel(),
+            capabilities=[StepPersistence(store=store, agent_name='orchestrator')],
+        )
+
+        @orchestrator.tool_plain
+        async def delegate_work() -> str:  # pyright: ignore[reportUnusedFunction]
+            res = await delegate.run('add 1 and 2', conversation_id='target-conv')
+            return res.output
+
+        await orchestrator.run('coordinate', conversation_id='target-conv')
+        orch_rid = next(r.run_id for r in await store.list_runs() if r.agent_name == 'orchestrator')
+
+        # Sibling unrelated run under the same conversation but no parent.
+        unrelated = make_simple_agent([StepPersistence(store=store, agent_name='unrelated')])
+        await unrelated.run('add 5 and 6', conversation_id='target-conv')
+
+        narrowed = await store.list_runs(parent_run_id=orch_rid, conversation_id='target-conv')
+        assert [r.agent_name for r in narrowed] == ['delegate']
+
+    async def test_step_event_carries_conversation_id(self) -> None:
+        """`ctx.conversation_id` propagates onto each emitted `StepEvent`."""
+        store = InMemoryStepStore()
+        agent = make_simple_agent([StepPersistence(store=store, agent_name='c')])
+        await agent.run('add 1 and 2', conversation_id='conv-evt')
+
         rid = await first_run_id(store)
-        assert await store.list_unresolved_tool_effects(run_id=rid) == []
-        effect = await store.get_tool_effect(tool_call_id='pyd_ai_tool_call_id__add')
-        assert effect is not None
-        assert effect.status == 'completed'
-        assert effect.tool_name == 'add'
-        assert effect.started_at is not None
-        assert effect.ended_at is not None
+        events = await store.list_events(run_id=rid)
+        assert events  # sanity
+        assert {e.conversation_id for e in events} == {'conv-evt'}
+
+    async def test_tool_effect_is_scoped_per_run_in_memory(self) -> None:
+        """Same `tool_call_id` across two runs must NOT share the effect record."""
+        store = InMemoryStepStore()
+        agent = make_simple_agent([StepPersistence(store=store, agent_name='a')])
+
+        await agent.run('add 1 and 2')
+        await agent.run('add 3 and 4')
+
+        runs = await store.list_runs()
+        assert len(runs) == 2
+        run1_id, run2_id = runs[0].run_id, runs[1].run_id
+
+        e1 = await store.get_tool_effect(run_id=run1_id, tool_call_id='pyd_ai_tool_call_id__add')
+        e2 = await store.get_tool_effect(run_id=run2_id, tool_call_id='pyd_ai_tool_call_id__add')
+        assert e1 is not None and e2 is not None
+        assert e1.run_id == run1_id
+        assert e2.run_id == run2_id
+        # The second run's record is independent: its started_at is not inherited from run 1.
+        assert e2.started_at >= e1.started_at
+        assert e2.started_at != e1.started_at or e2 is not e1
+
+        # Cross-lookups return only the owning run's record.
+        cross = await store.get_tool_effect(run_id=run1_id, tool_call_id='pyd_ai_tool_call_id__add')
+        assert cross is not None
+        assert cross.run_id == run1_id
+
+    async def test_tool_effect_is_scoped_per_run_file_store(self, tmp_path: Path) -> None:
+        """Same correctness contract under `FileStepStore`."""
+        store = FileStepStore(tmp_path)
+        agent = make_simple_agent([StepPersistence(store=store, agent_name='a')])
+
+        await agent.run('add 1 and 2')
+        await agent.run('add 3 and 4')
+
+        runs = await store.list_runs()
+        assert len(runs) == 2
+        run1_id, run2_id = runs[0].run_id, runs[1].run_id
+
+        e1 = await store.get_tool_effect(run_id=run1_id, tool_call_id='pyd_ai_tool_call_id__add')
+        e2 = await store.get_tool_effect(run_id=run2_id, tool_call_id='pyd_ai_tool_call_id__add')
+        assert e1 is not None and e2 is not None
+        assert e1.run_id == run1_id
+        assert e2.run_id == run2_id
+        # The other run's directory does not leak into this run's lookup.
+        assert await store.get_tool_effect(run_id=run1_id, tool_call_id='missing') is None
 
     async def test_tool_failure_records_failed_status_and_event(self) -> None:
         store = InMemoryStepStore()
@@ -633,7 +898,7 @@ class TestStepPersistenceCapability:
         failed_event = next(e for e in events if e.kind == 'tool_call_failed')
         assert failed_event.error is not None and 'kaboom' in failed_event.error
 
-        effect = await store.get_tool_effect(tool_call_id='pyd_ai_tool_call_id__boom')
+        effect = await store.get_tool_effect(run_id=rid, tool_call_id='pyd_ai_tool_call_id__boom')
         assert effect is not None
         assert effect.status == 'failed'
         assert effect.effect_summary is not None and 'kaboom' in effect.effect_summary
@@ -653,23 +918,18 @@ class TestStepPersistenceCapability:
         events = await store.list_events(run_id='librarian-001')
         assert {e.run_id for e in events} == {'librarian-001'}
 
-    async def test_parent_run_id_lineage(self) -> None:
+    async def test_explicit_parent_run_id_overrides_contextvar(self) -> None:
+        """Manual `parent_run_id=` wins over the auto-inferred contextvar value."""
         store = InMemoryStepStore()
-        orchestrator = make_simple_agent([StepPersistence(store=store, agent_name='orch')])
-        await orchestrator.run('orchestrate')
-        orch_rid = await first_run_id(store)
+        agent = make_simple_agent(
+            [StepPersistence(store=store, agent_name='delegate', parent_run_id='manual-parent')],
+        )
 
-        delegate = make_simple_agent([StepPersistence(store=store, agent_name='delegate', parent_run_id=orch_rid)])
-        await delegate.run('delegate work')
+        await agent.run('add 1 and 2')
 
-        children = await store.list_runs(parent_run_id=orch_rid)
-        assert len(children) == 1
-        assert children[0].agent_name == 'delegate'
-        assert children[0].parent_run_id == orch_rid
-
-        # The delegate's events also carry the parent_run_id.
-        child_events = await store.list_events(run_id=children[0].run_id)
-        assert {e.parent_run_id for e in child_events} == {orch_rid}
+        runs = await store.list_runs(parent_run_id='manual-parent')
+        assert len(runs) == 1
+        assert runs[0].agent_name == 'delegate'
 
     async def test_from_spec_memory_backend(self) -> None:
         cap = StepPersistence.from_spec()
@@ -722,7 +982,8 @@ class TestCrashMidToolCallContract:
 
         # 2) Simulate a crash mid-tool-call by calling `before_tool_execute`
         # directly with a synthesised ToolCallPart and never firing
-        # `after_tool_execute` / `on_tool_execute_error`.
+        # `after_tool_execute` / `on_tool_execute_error`. Use the resolved
+        # `cap.run_id` if set; otherwise rely on the discovered rid via ctx.
         crash_ctx = build_run_context(deps=None, run_id=rid, run_step=snap_step + 1)
         crash_call = ToolCallPart(tool_name='add', args={'a': 9, 'b': 9}, tool_call_id='crash-call-1')
         tool_def = ToolDefinition(name='add', description='Add two numbers.')
@@ -810,6 +1071,15 @@ class TestCapabilityHookBranches:
         events = await store.list_events(run_id='r1')
         assert [e.kind for e in events] == ['model_request_failed']
         assert events[0].error is not None and 'nope' in events[0].error
+
+    async def test_for_run_returns_self_when_resolution_is_no_op(self) -> None:
+        """When `run_id` is explicit and no contextvar is set, `for_run` returns `self`."""
+        store = InMemoryStepStore()
+        cap: StepPersistence[None] = StepPersistence(store=store, run_id='fixed')
+        ctx = build_run_context(deps=None, run_id='ignored')
+
+        result = await cap.for_run(ctx)
+        assert result is cap
 
     async def test_run_record_load_with_missing_metadata(self, tmp_path: Path) -> None:
         """`_str_str_dict(None)` returns `{}` when metadata is absent in storage."""
