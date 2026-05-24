@@ -75,21 +75,25 @@ class StepPersistence(AbstractCapability[AgentDepsT]):
     """
 
     run_id: str | None = None
-    """Identifier for this run.
+    """Identifier for this one `Agent.run` call.
 
-    Resolution order (materialised once per `Agent.run` via `for_run`):
+    `run_id` is per-call, matching `pydantic_ai.RunContext.run_id`. For
+    multi-turn logical grouping use `conversation_id` on `Agent.run(...)` —
+    that is the pyai-native primitive for it.
 
-    1. **Explicit value** → used as-is. *Shared across every `.run()` call*
-       on this capability instance — caller owns uniqueness. This is the
-       orchestrator pattern where one logical identity spans many turns.
+    Resolution order (materialised in `for_run`):
+
+    1. **Explicit value** → used as-is. Single-shot use cases:
+       deterministic id for testing, replay, debugging. Reusing one
+       capability instance with an explicit `run_id` across multiple
+       `.run()` calls causes `ToolEffectRecord` collisions because the
+       ledger keys on `(run_id, tool_call_id)` and providers reuse
+       deterministic tool-call ids. The implementation does not enforce
+       this; it is the caller's contract.
     2. **`agent_name` set, `run_id` unset** → `{agent_name}-{short-uuid}`,
-       freshly materialised in `for_run` per `.run()`. Reusing the
-       capability instance yields distinct ids.
-    3. **Neither set** → `ctx.run_id` (pydantic_ai's auto-generated id)
-       per `.run()`, falling back to a fresh UUID4.
-
-    Pick (1) when you want deterministic per-orchestrator identity; pick
-    (2) for per-call uniqueness with readable ids; (3) is the bare default.
+       freshly materialised per `.run()`. Reusing the capability instance
+       yields distinct ids. Recommended default for delegate capabilities.
+    3. **Neither set** → `ctx.run_id` per `.run()`, falling back to UUID4.
     """
 
     parent_run_id: str | None = None

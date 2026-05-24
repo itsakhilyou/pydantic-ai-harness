@@ -43,22 +43,44 @@ librarian = Agent(
 await librarian.run('Find ThinkingPartDelta and confirm the callable allowance')
 ```
 
-That is the whole setup. `run_id` resolution per `Agent.run`:
+That is the whole setup. **`run_id` is always per-`Agent.run` call**,
+matching pydantic_ai's `RunContext.run_id`. For multi-turn logical
+grouping use `conversation_id=` — that is the pydantic_ai-native
+primitive for it (see [Three-level identity](#three-level-identity)).
 
-- **Explicit `run_id='libr-1'`** → used as-is. *Shared across every `.run()`
-  call on this capability instance* — that is the orchestrator pattern,
-  where the caller owns one logical identity across many turns. Pick a
-  unique value yourself when you want per-turn separation.
+`run_id` resolution per call:
+
+- **Explicit `run_id='libr-1'`** → used as-is for this one call.
+  Single-shot use cases (deterministic id for testing, replay, debugging,
+  a one-off scripted run). **Do not reuse one capability instance with an
+  explicit `run_id` across multiple `.run()` calls** — the tool-effect
+  ledger is keyed by `(run_id, tool_call_id)` and providers reuse
+  deterministic tool-call ids, so the second call's records collide with
+  the first's. The implementation does not enforce this; it is the
+  caller's contract.
 - **`agent_name` set, `run_id` unset** → `'{agent_name}-{8-char-hex}'`,
-  freshly materialised in `for_run` per `.run()` call. Reusing the
+  freshly materialised in `for_run` per `.run()` call. Reusing one
   capability instance across runs yields distinct ids
-  (`code_librarian-a3b2`, `code_librarian-c9d1`, …).
+  (`code_librarian-a3b2`, `code_librarian-c9d1`, …). This is the
+  recommended default for delegate capabilities.
 - **Neither set** → `ctx.run_id` (pydantic_ai's auto-generated id) per
   `.run()` call, falling back to a UUID4.
 
-Use the auto-derived form for one-shot or fan-out delegate runs. Use the
-explicit form when an orchestrator continues a single logical run across
-multiple `.run()` calls.
+The orchestrator pattern — one logical agent serving many turns — uses
+`conversation_id`, not a shared `run_id`:
+
+```python
+orchestrator = Agent(
+    'openai:gpt-5',
+    capabilities=[StepPersistence(store=store, agent_name='orchestrator')],
+)
+
+for turn in turns:
+    await orchestrator.run(turn, conversation_id='orch-conv')
+
+# All turns of this orchestrator, chronological:
+records = await store.list_runs(conversation_id='orch-conv')
+```
 
 ## Three-level identity
 
