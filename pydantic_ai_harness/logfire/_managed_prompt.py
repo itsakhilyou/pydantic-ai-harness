@@ -44,7 +44,7 @@ class ManagedPrompt(AbstractCapability[AgentDepsT]):
     out -- without redeploying, while the code default keeps the agent working when no remote
     value is available.
 
-    ```python {test="skip"}
+    ```python
     import logfire
     from pydantic_ai import Agent
 

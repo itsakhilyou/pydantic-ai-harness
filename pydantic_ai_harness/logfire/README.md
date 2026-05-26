@@ -37,7 +37,7 @@ Pass the prompt slug and a code default. The slug `support_agent` is declared as
 variable `prompt__support_agent` -- the naming Logfire's Prompt management uses (hyphens in a
 slug become underscores). The default keeps the agent working until a remote value is published.
 
-```python {test="skip"}
+```python
 import logfire
 from pydantic_ai import Agent
 
@@ -67,7 +67,7 @@ For deterministic A/B assignment (the same user always sees the same label), pas
 [`RunContext`](https://ai.pydantic.dev/api/tools/#pydantic_ai.tools.RunContext) -- handy
 when the key lives in your agent's `deps`:
 
-```python {test="skip"}
+```python
 from dataclasses import dataclass
 
 from pydantic_ai import Agent
@@ -105,7 +105,7 @@ Handlebars template against the agent's `deps` — the same mechanism as
 [`TemplateStr`](https://ai.pydantic.dev/api/#pydantic_ai.TemplateStr) — so `{{field}}` is filled
 from `deps`:
 
-```python {test="skip"}
+```python
 from dataclasses import dataclass
 
 from pydantic_ai import Agent
@@ -141,7 +141,7 @@ variable, so sharing a prompt across several agents just works. Pass an existing
 as the first argument instead of a slug when you want to declare the variable yourself --
 for example a `template_var`, or one registered for `variables_push`:
 
-```python {test="skip"}
+```python
 import logfire
 from pydantic_ai import Agent
 
