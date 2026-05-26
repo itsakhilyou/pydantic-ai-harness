@@ -36,9 +36,9 @@ def _new_resolved_var() -> ContextVar[ResolvedVariable[str] | None]:
 class ManagedPrompt(AbstractCapability[AgentDepsT]):
     """Back an agent's instructions with a Logfire-managed prompt.
 
-    Pass a prompt slug and a code default and the capability declares the backing
+    Pass the managed prompt name and a default value and the capability declares the backing
     [managed variable](https://logfire.pydantic.dev/docs/reference/advanced/managed-variables/)
-    for you -- a slug of `support_agent` resolves the variable `prompt__support_agent`, matching
+    for you -- a name of `support_agent` resolves the variable `prompt__support_agent`, matching
     the naming Logfire's [Prompt management](https://logfire.pydantic.dev/docs/reference/advanced/prompt-management/)
     uses. You can iterate on the prompt from the Logfire UI -- versioned, labelled, and rolled
     out -- without redeploying, while the code default keeps the agent working when no remote
@@ -71,27 +71,29 @@ class ManagedPrompt(AbstractCapability[AgentDepsT]):
     whole run -- so the selected label and version are attached as baggage to every child span
     of the agent run.
 
-    Declaring the same slug more than once is fine -- each `ManagedPrompt` constructs its own
+    Declaring the same name more than once is fine -- each `ManagedPrompt` constructs its own
     backing variable, so sharing a prompt across several agents just works. Pass an existing
-    [`logfire.Variable`][logfire.Variable] as `prompt` instead of a slug when you want to use a
-    variable you defined yourself (for example a `template_var`, or one registered for
+    [`logfire.Variable`][logfire.Variable] as `name` instead of a prompt name when you want to
+    use a variable you defined yourself (for example a `template_var`, or one registered for
     [`variables_push`][logfire.Logfire.variables_push]).
     """
 
-    prompt: str | Variable[str]
-    """The prompt slug (declared as the variable `prompt__<slug>`), or a pre-built `logfire.Variable`."""
+    name: str | Variable[str]
+    """The managed prompt name (declared as the variable `prompt__<name>`), or a pre-built `logfire.Variable`."""
 
     default: str | None = None
-    """Code-default prompt text. Required when `prompt` is a slug; ignored when `prompt` is a `Variable`."""
+    """Code-default prompt text. Required when `name` is a prompt name; ignored when `name` is a `Variable`."""
 
     label: str | None = None
-    """Explicit label to resolve (e.g. `'production'`). When `None`, the variable's
-    rollout and targeting rules select the label."""
+    """Explicit targeting label on the Logfire managed prompt to resolve (e.g. `'production'`).
+    When `None`, the targeting rules on the managed variable select the label."""
 
     targeting_key: str | Callable[[RunContext[AgentDepsT]], str | None] | None = None
-    """Key for deterministic label selection, or a callable that derives it from the
-    [`RunContext`][pydantic_ai.tools.RunContext]. When `None`, Logfire falls back to its
-    own targeting context and then the active trace id."""
+    """Stable key that seeds Logfire's deterministic rollout assignment -- the same key always
+    lands in the same percentage bucket, so a given user keeps the same label across runs.
+    Accepts a static value or a callable that derives it from the
+    [`RunContext`][pydantic_ai.tools.RunContext]. When `None`, Logfire falls back to its own
+    targeting context and then the active trace id."""
 
     attributes: Mapping[str, Any] | Callable[[RunContext[AgentDepsT]], Mapping[str, Any] | None] | None = None
     """Attributes for condition-based targeting rules, or a callable that derives them
@@ -106,7 +108,7 @@ class ManagedPrompt(AbstractCapability[AgentDepsT]):
     logfire_instance: Logfire | None = None
     """Logfire instance to resolve the variable on. When `None`, the global default instance
     (the one backing the module-level [`logfire.var`][logfire.var]) is used. Ignored when
-    `prompt` is a `Variable`."""
+    `name` is a `Variable`."""
 
     _variable: Variable[str] = field(init=False, repr=False, compare=False)
     """The managed variable backing the prompt (declared from the slug, or the one passed in)."""
@@ -117,34 +119,34 @@ class ManagedPrompt(AbstractCapability[AgentDepsT]):
     """Per-run resolution, isolated across concurrent runs via the context variable."""
 
     def __post_init__(self) -> None:
-        if not isinstance(self.prompt, str):
-            self._variable = self.prompt
+        if not isinstance(self.name, str):
+            self._variable = self.name
             return
 
         if self.default is None:
-            raise TypeError('`default` is required when `prompt` is a slug.')
+            raise TypeError('`default` is required when `name` is a prompt name rather than a `Variable`.')
 
-        slug = self.prompt
-        if slug.startswith(_PROMPT_VARIABLE_PREFIX):
+        name = self.name
+        if name.startswith(_PROMPT_VARIABLE_PREFIX):
             warnings.warn(
                 f'The {_PROMPT_VARIABLE_PREFIX!r} prefix is added automatically; '
-                f'pass the bare prompt slug rather than {slug!r}.',
+                f'pass the bare prompt name rather than {name!r}.',
                 stacklevel=2,
             )
-            slug = slug[len(_PROMPT_VARIABLE_PREFIX) :]
+            name = name[len(_PROMPT_VARIABLE_PREFIX) :]
 
-        name = f'{_PROMPT_VARIABLE_PREFIX}{slug.replace("-", "_")}'
-        if not name.isidentifier():
+        variable_name = f'{_PROMPT_VARIABLE_PREFIX}{name.replace("-", "_")}'
+        if not variable_name.isidentifier():
             raise ValueError(
-                f'Prompt slug {self.prompt!r} produces an invalid variable name {name!r}; '
-                'slugs may only contain letters, digits, hyphens, and underscores.'
+                f'Prompt name {self.name!r} produces an invalid variable name {variable_name!r}; '
+                'names may only contain letters, digits, hyphens, and underscores.'
             )
 
         # Construct the variable directly (rather than via `logfire.var`) so redeclaring the
-        # same slug is idempotent: `logfire.var` registers in a per-instance registry and raises
+        # same name is idempotent: `logfire.var` registers in a per-instance registry and raises
         # on a duplicate name, which would break sharing one prompt across agents.
         instance = self.logfire_instance if self.logfire_instance is not None else logfire.DEFAULT_LOGFIRE_INSTANCE
-        self._variable = Variable(name, type=str, default=self.default, logfire_instance=instance)
+        self._variable = Variable(variable_name, type=str, default=self.default, logfire_instance=instance)
 
     @property
     def resolved(self) -> ResolvedVariable[str] | None:

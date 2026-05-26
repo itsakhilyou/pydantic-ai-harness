@@ -33,9 +33,9 @@ iteration and rollback from the Logfire UI.
 
 ### Usage
 
-Pass the prompt slug and a code default. The slug `support_agent` is declared as the managed
+Pass the prompt name and a default value. The name `support_agent` is declared as the managed
 variable `prompt__support_agent` -- the naming Logfire's Prompt management uses (hyphens in a
-slug become underscores). The default keeps the agent working until a remote value is published.
+name become underscores). The default keeps the agent working until a remote value is published.
 
 ```python
 import logfire
@@ -135,10 +135,10 @@ Rendering requires `pydantic-handlebars` (install `pydantic-ai-slim[spec]`). It 
 
 ### Using your own variable
 
-Declaring the same slug more than once is fine -- each `ManagedPrompt` builds its own backing
+Declaring the same name more than once is fine -- each `ManagedPrompt` builds its own backing
 variable, so sharing a prompt across several agents just works. Pass an existing
 [`logfire.Variable`](https://logfire.pydantic.dev/docs/reference/advanced/managed-variables/)
-as the first argument instead of a slug when you want to declare the variable yourself --
+as the first argument instead of a name when you want to declare the variable yourself --
 for example a `template_var`, or one registered for `variables_push`:
 
 ```python
@@ -158,7 +158,7 @@ support_prompt = logfire.var(
 agent = Agent('openai:gpt-5', capabilities=[ManagedPrompt(support_prompt, label='production')])
 ```
 
-When `prompt` is a slug, pass `logfire_instance=` to declare the variable on a specific
+When `name` is a prompt name, pass `logfire_instance=` to declare the variable on a specific
 Logfire instance instead of the module-level default.
 
 ### Notes
