@@ -25,4 +25,3 @@ wheels/
 # Hypothesis
 .hypothesis/
 .vscode/
-mutants/
