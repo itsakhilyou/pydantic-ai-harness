@@ -132,3 +132,70 @@ async def test_non_utf8_file_becomes_model_retry() -> None:
 async def test_toolset_decodes_and_returns_text() -> None:
     result = await _call_read_file(_BytesEnvironment(root='/x', data=b'hello'))
     assert result == 'hello'
+
+
+# --- offset/limit + truncation formatting -----------------------------------
+#
+# These drive read_file directly with preset bytes so we test the windowing and
+# the four continuation-note shapes, independent of any real filesystem.
+
+
+async def _read(data: bytes, *, offset: int | None = None, limit: int | None = None) -> str:
+    """Invoke read_file with preset bytes and optional offset/limit, return the text."""
+    toolset = ExecutionEnv(environment=_BytesEnvironment(root='/x', data=data)).get_toolset()
+    ctx: RunContext[None] = RunContext(deps=None, model=TestModel(), usage=RunUsage())
+    tools = await toolset.get_tools(ctx)
+    args: dict[str, object] = {'path': 'f.txt'}
+    if offset is not None:
+        args['offset'] = offset
+    if limit is not None:
+        args['limit'] = limit
+    result = await toolset.call_tool('read_file', args, ctx, tools['read_file'])
+    return result
+
+
+async def test_read_no_offset_returns_full_text() -> None:
+    assert await _read(b'a\nb\nc') == 'a\nb\nc'
+
+
+async def test_read_offset_and_limit_window() -> None:
+    # 1-indexed lines: 1=a 2=b 3=c 4=d 5=e; offset=2, limit=2 -> b, c. Lines 4-5 remain,
+    # so the user-limit-stopped-early note fires pointing at the next line.
+    out = await _read(b'a\nb\nc\nd\ne', offset=2, limit=2)
+    assert out == 'b\nc\n\n[2 more lines in file. Use offset=4 to continue.]'
+
+
+async def test_read_limit_stops_early_adds_more_note() -> None:
+    out = await _read(b'a\nb\nc\nd\ne', limit=2)
+    assert out == 'a\nb\n\n[3 more lines in file. Use offset=3 to continue.]'
+
+
+@pytest.mark.parametrize('offset,limit', [(0, None), (-1, None), (None, 0)])
+async def test_read_invalid_offset_or_limit_is_model_retry(offset: int | None, limit: int | None) -> None:
+    with pytest.raises(ModelRetry):
+        await _read(b'a\nb', offset=offset, limit=limit)
+
+
+async def test_read_offset_beyond_eof_is_model_retry() -> None:
+    with pytest.raises(ModelRetry):
+        await _read(b'a\nb', offset=5)
+
+
+async def test_read_truncates_by_line_cap_with_note() -> None:
+    # 2001 short lines: over the line cap, well under the byte cap.
+    data = '\n'.join(str(i) for i in range(2001)).encode('utf-8')
+    out = await _read(data)
+    assert out.endswith('[Showing lines 1-2000 of 2001. Use offset=2001 to continue.]')
+
+
+async def test_read_truncates_by_byte_cap_with_note() -> None:
+    # 100 lines of 1KB each: ~100KB but only 100 lines, so the byte cap wins.
+    data = '\n'.join('x' * 1024 for _ in range(100)).encode('utf-8')
+    out = await _read(data)
+    assert '(50.0KB limit). Use offset=' in out
+
+
+async def test_read_first_line_too_big_is_omitted() -> None:
+    data = ('x' * (60 * 1024) + '\nrest').encode('utf-8')
+    out = await _read(data)
+    assert out == '[Line 1 is 60.0KB, exceeds the 50.0KB limit and was omitted.]'
