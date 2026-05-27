@@ -15,6 +15,7 @@ from ..environments.exceptions import (
     EnvFileNotFoundError,
     EnvFilePermissionError,
     EnvFileReadError,
+    EnvFileWriteError,
     PathEscapeError,
 )
 
@@ -57,6 +58,21 @@ class ExecutionEnv(AbstractCapability[AgentDepsT]):
             except UnicodeDecodeError as e:
                 raise ModelRetry(str(e)) from e
 
+        async def write_file(
+            path: Annotated[str, Field(description='Path to the file, relative to the workspace root.')],
+            data: Annotated[str, Field(description='Data to write to the file.')],
+        ) -> None:
+            """Write a file to the execution environment."""
+            try:
+                await self.environment.write_file(path, data.encode('utf-8'))
+            except EnvFilePermissionError as e:
+                raise ModelRetry(str(e)) from e
+            except (EnvFileWriteError,):
+                # TODO: This should be a ToolFailed error when I merge that in
+                # catching and re raising here to show the boundary where we change it
+                raise
+
         toolset.add_function(read_file, description='Read a file from the execution environment.')
+        toolset.add_function(write_file, description='Write a file to the execution environment.')
 
         return toolset

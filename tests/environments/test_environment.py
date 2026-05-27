@@ -56,3 +56,54 @@ async def test_read_file_through_symlinked_root(tmp_path: Path) -> None:
     # compares a resolved candidate against the unresolved root, it wrongly
     # rejects this legit read with PathEscapeError.
     assert await local_env.read_file('ok.txt') == b'inside the box'
+
+
+async def test_write_file(tmp_path: Path) -> None:
+    # The reason I am not both reading and writing here is because we want to only test the write invariant
+    # If we test both in the same test it will be difficult to trace in case of errors
+    local_env = LocalEnvironment(root=str(tmp_path))
+    await local_env.write_file('test.txt', b'Hello, world!')
+    assert (tmp_path / 'test.txt').read_bytes() == b'Hello, world!'
+
+
+async def test_write_file_through_symlinked_root(tmp_path: Path) -> None:
+    # A real directory that actually holds the file.
+    real_box = tmp_path / 'realbox'
+    real_box.mkdir()
+
+    # A symlink that points at real_box. `link_box.symlink_to(real_box)` creates
+    # `link_box` as a pointer to `real_box` (like `ln -s real_box link_box`).
+    link_box = tmp_path / 'linkbox'
+    link_box.symlink_to(real_box)
+
+    # Root the environment at the SYMLINK -- a perfectly valid but non-canonical
+    # root, exactly like rooting at /tmp/... on macOS.
+    local_env = LocalEnvironment(root=str(link_box))
+    await local_env.write_file('test.txt', b'Hello, world!')
+
+    # 'ok.txt' is genuinely inside the box. Reading it must SUCCEED. If the jail
+    # compares a resolved candidate against the unresolved root, it wrongly
+    # rejects this legit read with PathEscapeError.
+    assert (real_box / 'test.txt').read_bytes() == b'Hello, world!'
+
+
+async def test_write_file_does_not_write_outside_root_absolute(tmp_path: Path) -> None:
+    local_env = LocalEnvironment(root=str(tmp_path))
+
+    # absolute path
+    secret = tmp_path.parent / 'secret.txt'
+
+    # try to read the files
+    with pytest.raises(PathEscapeError):
+        await local_env.write_file(str(secret), b'top secret')
+
+
+async def test_write_file_does_not_write_outside_root_relative(tmp_path: Path) -> None:
+    local_env = LocalEnvironment(root=str(tmp_path))
+
+    # relative path
+    secret = '../secret.txt'
+
+    # try to read the files
+    with pytest.raises(PathEscapeError):
+        await local_env.write_file(str(secret), b'top secret')

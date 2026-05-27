@@ -31,3 +31,7 @@ class EnvFileTooLargeError(ExecutionEnvironmentError):
 
 class EnvFileReadError(ExecutionEnvironmentError):
     """File read error."""
+
+
+class EnvFileWriteError(ExecutionEnvironmentError):
+    """File write error."""

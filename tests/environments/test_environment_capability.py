@@ -75,6 +75,9 @@ class _RaisingEnvironment(AbstractEnvironment):
     async def read_file(self, path: str) -> bytes:
         raise self.error
 
+    async def write_file(self, path: str, data: bytes) -> None:
+        raise self.error
+
 
 @dataclass(kw_only=True)
 class _BytesEnvironment(AbstractEnvironment):
@@ -84,6 +87,9 @@ class _BytesEnvironment(AbstractEnvironment):
 
     async def read_file(self, path: str) -> bytes:
         return self.data
+
+    async def write_file(self, path: str, data: bytes) -> None:
+        return None
 
 
 async def _call_read_file(environment: AbstractEnvironment, path: str = 'f.txt') -> object:
