@@ -15,6 +15,8 @@ default Logfire instance keeps its variable registry across `configure()` calls.
 
 from __future__ import annotations
 
+from collections.abc import Generator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any
 from unittest.mock import patch
@@ -23,7 +25,7 @@ import logfire
 import pytest
 from inline_snapshot import snapshot
 from logfire.testing import CaptureLogfire
-from logfire.variables.config import LabeledValue, Rollout, VariableConfig, VariablesConfig
+from logfire.variables import LabeledValue, Rollout, VariableConfig, VariablesConfig
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from pydantic_ai import Agent, RunContext
 from pydantic_ai.capabilities import Instrumentation
@@ -55,9 +57,36 @@ def instructions_seen(result_messages: list[ModelMessage]) -> list[str]:
     return [m.instructions for m in result_messages if isinstance(m, ModelRequest) and m.instructions is not None]
 
 
-# Span attributes whose values vary between runs (random ids, the resolution span's
-# merged resource attributes) and would otherwise make snapshots non-deterministic.
-_VOLATILE_SPAN_ATTRIBUTES = ('attributes', 'gen_ai.conversation.id', 'gen_ai.agent.call.id')
+# Span attributes whose values vary between runs (random ids, line numbers, the
+# resolution span's merged-into-attributes JSON blob from Logfire) and would otherwise
+# make snapshots non-deterministic. `attributes` here is the literal key Logfire emits
+# on the resolve span containing the serialized targeting attributes -- it shadows the
+# enclosing span attributes dict by name, so the pop targets the inner one.
+_VOLATILE_SPAN_ATTRIBUTES = (
+    'attributes',
+    'code.lineno',
+    'gen_ai.conversation.id',
+    'gen_ai.agent.call.id',
+)
+
+
+@contextmanager
+def _variables_provider_configured(capfire: CaptureLogfire, variables_config: VariablesConfig) -> Generator[None]:
+    """Reconfigure Logfire with a local variables provider for the duration of the block.
+
+    Restores the module's baseline configuration on exit so the change does not leak
+    into other tests in this module (or any module collected after it).
+    """
+    logfire.configure(
+        send_to_logfire=False,
+        console=False,
+        variables=logfire.LocalVariablesOptions(config=variables_config),
+        additional_span_processors=[SimpleSpanProcessor(capfire.exporter)],
+    )
+    try:
+        yield
+    finally:
+        logfire.configure(send_to_logfire=False, console=False)
 
 
 def span_attributes(capfire: CaptureLogfire) -> list[dict[str, Any]]:
@@ -160,7 +189,6 @@ async def test_records_variable_resolution_span(capfire: CaptureLogfire) -> None
                 'attributes': {
                     'code.filepath': '_managed_prompt.py',
                     'code.function': 'wrap_run',
-                    'code.lineno': 123,
                     'targeting_key': 'null',
                     'logfire.msg_template': 'Resolve variable prompt__span_slug',
                     'logfire.msg': 'Resolve variable prompt__span_slug',
@@ -199,7 +227,6 @@ async def test_baggage_propagates_to_run_and_child_spans(capfire: CaptureLogfire
                 'attributes': {
                     'code.filepath': '_managed_prompt.py',
                     'code.function': 'wrap_run',
-                    'code.lineno': 123,
                     'targeting_key': 'null',
                     'logfire.msg_template': 'Resolve variable prompt__baggage_slug',
                     'logfire.msg': 'Resolve variable prompt__baggage_slug',
@@ -399,7 +426,6 @@ async def test_resolved_property_exposes_active_resolution() -> None:
     assert capability.resolved is None
 
 
-# Kept last: it reconfigures the global Logfire instance with a variable provider.
 async def test_provider_backed_resolution_uses_remote_value_and_label(capfire: CaptureLogfire) -> None:
     config = VariablesConfig(
         variables={
@@ -411,18 +437,13 @@ async def test_provider_backed_resolution_uses_remote_value_and_label(capfire: C
             )
         }
     )
-    logfire.configure(
-        send_to_logfire=False,
-        console=False,
-        variables=logfire.LocalVariablesOptions(config=config),
-        additional_span_processors=[SimpleSpanProcessor(capfire.exporter)],
-    )
-    agent = Agent(
-        TestModel(),
-        capabilities=[ManagedPrompt('remote_slug', default='fallback', label='production'), Instrumentation()],
-    )
+    with _variables_provider_configured(capfire, config):
+        agent = Agent(
+            TestModel(),
+            capabilities=[ManagedPrompt('remote_slug', default='fallback', label='production'), Instrumentation()],
+        )
 
-    result = await agent.run('hello')
+        result = await agent.run('hello')
 
     # The remote value -- not the code default -- backs the instructions.
     assert instructions_seen(result.all_messages()) == ['You are the PRODUCTION prompt.']
@@ -435,3 +456,9 @@ async def test_provider_backed_resolution_uses_remote_value_and_label(capfire: C
     # Child spans are tagged with the resolved label via baggage.
     tagged = {s['name'] for s in spans if s['attributes'].get('logfire.variables.prompt__remote_slug') == 'production'}
     assert {'agent run', 'chat test'} <= tagged
+
+
+def test_logfire_instance_with_prebuilt_variable_warns() -> None:
+    var = logfire.var(name='prompt__instance_conflict', type=str, default=DEFAULT)
+    with pytest.warns(UserWarning, match='is ignored when `name` is a `Variable`'):
+        ManagedPrompt(var, logfire_instance=logfire.DEFAULT_LOGFIRE_INSTANCE)

@@ -9,14 +9,14 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 import logfire
-from logfire.variables.variable import Variable
+from logfire.variables import Variable
 from pydantic_ai import TemplateStr
 from pydantic_ai.capabilities import AbstractCapability, CapabilityOrdering, Instrumentation
 from pydantic_ai.tools import AgentDepsT, RunContext
 
 if TYPE_CHECKING:
     from logfire import Logfire
-    from logfire.variables.abstract import ResolvedVariable
+    from logfire.variables import ResolvedVariable
     from pydantic_ai.capabilities.abstract import WrapRunHandler
     from pydantic_ai.run import AgentRunResult
 
@@ -35,6 +35,12 @@ def _new_resolved_var() -> ContextVar[ResolvedVariable[str] | None]:
 @dataclass
 class ManagedPrompt(AbstractCapability[AgentDepsT]):
     """Back an agent's instructions with a Logfire-managed prompt.
+
+    **Prompt-cache trade-off:** the resolved value lands in the system instructions block, so any
+    Logfire-side change to the prompt (new version rollout, label flip, A/B targeting) invalidates
+    the provider's prompt cache for the affected runs. Pin a `label` (e.g. `'production'`) for the
+    cache-stable path; treat percentage rollouts and per-user targeting as opt-in cache cost. See
+    the README's "Prompt-cache trade-off" section for the full picture.
 
     Pass the managed prompt name and a default value and the capability declares the backing
     [managed variable](https://logfire.pydantic.dev/docs/reference/advanced/managed-variables/)
@@ -67,15 +73,15 @@ class ManagedPrompt(AbstractCapability[AgentDepsT]):
 
     The prompt value is resolved **once per run**, inside the run's
     [`wrap_run`][pydantic_ai.capabilities.AbstractCapability.wrap_run] hook, using the
-    [`ResolvedVariable`][logfire.ResolvedVariable] as a context manager that stays open for the
+    [`ResolvedVariable`][logfire.variables.ResolvedVariable] as a context manager that stays open for the
     whole run -- so the selected label and version are attached as baggage to every child span
     of the agent run.
 
     Declaring the same name more than once is fine -- each `ManagedPrompt` constructs its own
     backing variable, so sharing a prompt across several agents just works. Pass an existing
-    [`logfire.Variable`][logfire.Variable] as `name` instead of a prompt name when you want to
-    use a variable you defined yourself (for example a `template_var`, or one registered for
-    [`variables_push`][logfire.Logfire.variables_push]).
+    [`logfire.variables.Variable`][logfire.variables.Variable] as `name` instead of a prompt name
+    when you want to use a variable you defined yourself (for example a `template_var`, or one
+    registered for [`variables_push`][logfire.Logfire.variables_push]).
     """
 
     name: str | Variable[str]
@@ -120,12 +126,20 @@ class ManagedPrompt(AbstractCapability[AgentDepsT]):
 
     def __post_init__(self) -> None:
         if not isinstance(self.name, str):
+            if self.logfire_instance is not None:
+                warnings.warn(
+                    '`logfire_instance` is ignored when `name` is a `Variable`; '
+                    'the variable already carries its own Logfire instance.',
+                    stacklevel=2,
+                )
             self._variable = self.name
             return
 
         if self.default is None:
             raise TypeError('`default` is required when `name` is a prompt name rather than a `Variable`.')
 
+        # Strip the prefix if the user accidentally passed it so we can still apply
+        # hyphen-to-underscore normalization, then re-add the prefix below.
         name = self.name
         if name.startswith(_PROMPT_VARIABLE_PREFIX):
             warnings.warn(
@@ -152,7 +166,7 @@ class ManagedPrompt(AbstractCapability[AgentDepsT]):
     def resolved(self) -> ResolvedVariable[str] | None:
         """The prompt resolution for the active run, or `None` outside a run.
 
-        Exposes the full [`ResolvedVariable`][logfire.ResolvedVariable] (`value`, `label`,
+        Exposes the full [`ResolvedVariable`][logfire.variables.ResolvedVariable] (`value`, `label`,
         `version`, `reason`, ...) so callers can inspect which prompt version is in play.
         """
         return self._resolved.get()
