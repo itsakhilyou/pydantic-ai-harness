@@ -18,8 +18,6 @@ from .exceptions import (
 class LocalEnvironment(AbstractEnvironment):
     """Local environment using the local filesystem."""
 
-    root: str
-
     async def read_file(self, path: str) -> bytes:
         """Read a file from the local filesystem."""
         root = Path(self.root).resolve()
