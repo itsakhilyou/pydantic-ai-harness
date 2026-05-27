@@ -22,14 +22,14 @@ from pydantic_ai.models.function import AgentInfo, FunctionModel
 from pydantic_ai.models.test import TestModel
 from pydantic_ai.usage import RunUsage
 
-from pydantic_ai_harness.environments.abstract import AbstractEnvironment
+from pydantic_ai_harness.environments.abstract import AbstractEnvironment, AbstractFile
 from pydantic_ai_harness.environments.exceptions import (
     EnvFileIsADirectoryError,
     EnvFileNotADirectoryError,
     EnvFileNotFoundError,
     EnvFilePermissionError,
-    EnvFileReadError,
-    EnvFileWriteError,
+    EnvReadError,
+    EnvWriteError,
     ExecutionEnvironmentError,
     PathEscapeError,
 )
@@ -49,6 +49,9 @@ class _RaisingEnvironment(AbstractEnvironment):
     async def write_file(self, path: str, data: bytes) -> None:
         raise self.error
 
+    async def ls(self, path: str) -> list[AbstractFile]:
+        raise self.error
+
 
 @dataclass(kw_only=True)
 class _StoreEnvironment(AbstractEnvironment):
@@ -61,6 +64,9 @@ class _StoreEnvironment(AbstractEnvironment):
 
     async def write_file(self, path: str, data: bytes) -> None:
         self.data = data
+
+    async def ls(self, path: str) -> list[AbstractFile]:
+        return [AbstractFile(name='sub', is_directory=True), AbstractFile(name='file.txt', is_directory=False)]
 
 
 def _ctx() -> RunContext[None]:
@@ -114,6 +120,14 @@ async def _edit(
     return await toolset.call_tool('edit_file', args, ctx, tools['edit_file'])
 
 
+async def _ls(environment: AbstractEnvironment, *, path: str = 'd') -> object:
+    """Invoke the ls tool through its toolset."""
+    toolset = ExecutionEnv(environment=environment).get_toolset()
+    ctx = _ctx()
+    tools = await toolset.get_tools(ctx)
+    return await toolset.call_tool('ls', {'path': path}, ctx, tools['ls'])
+
+
 # --- read_file: error routing -------------------------------------------------
 
 
@@ -133,8 +147,8 @@ async def test_recoverable_errors_become_model_retry(error: ExecutionEnvironment
 
 
 async def test_infra_error_propagates() -> None:
-    with pytest.raises(EnvFileReadError):
-        await _call_read_file(_RaisingEnvironment(root='/x', error=EnvFileReadError('disk on fire')))
+    with pytest.raises(EnvReadError):
+        await _call_read_file(_RaisingEnvironment(root='/x', error=EnvReadError('disk on fire')))
 
 
 async def test_non_utf8_file_becomes_model_retry() -> None:
@@ -201,8 +215,8 @@ async def test_write_permission_error_is_model_retry() -> None:
 
 
 async def test_write_infra_error_propagates() -> None:
-    with pytest.raises(EnvFileWriteError):
-        await _write(_RaisingEnvironment(root='/x', error=EnvFileWriteError('disk on fire')))
+    with pytest.raises(EnvWriteError):
+        await _write(_RaisingEnvironment(root='/x', error=EnvWriteError('disk on fire')))
 
 
 # --- edit_file ----------------------------------------------------------------
@@ -257,36 +271,56 @@ async def test_edit_non_utf8_file_is_model_retry() -> None:
 
 
 async def test_edit_read_infra_error_propagates() -> None:
-    with pytest.raises(EnvFileReadError):
-        await _edit(
-            _RaisingEnvironment(root='/x', error=EnvFileReadError('disk on fire')), old_string='a', new_string='b'
-        )
+    with pytest.raises(EnvReadError):
+        await _edit(_RaisingEnvironment(root='/x', error=EnvReadError('disk on fire')), old_string='a', new_string='b')
 
 
 async def test_edit_write_permission_error_is_model_retry() -> None:
     @dataclass(kw_only=True)
-    class _ReadOkWriteDenied(AbstractEnvironment):
-        async def read_file(self, path: str) -> bytes:
-            return b'hello world'
-
+    class _ReadOkWriteDenied(_StoreEnvironment):
         async def write_file(self, path: str, data: bytes) -> None:
             raise EnvFilePermissionError('read only')
 
     with pytest.raises(ModelRetry):
-        await _edit(_ReadOkWriteDenied(root='/x'), old_string='world', new_string='there')
+        await _edit(_ReadOkWriteDenied(root='/x', data=b'hello world'), old_string='world', new_string='there')
 
 
 async def test_edit_write_infra_error_propagates() -> None:
     @dataclass(kw_only=True)
-    class _ReadOkWriteFails(AbstractEnvironment):
-        async def read_file(self, path: str) -> bytes:
-            return b'hello world'
-
+    class _ReadOkWriteFails(_StoreEnvironment):
         async def write_file(self, path: str, data: bytes) -> None:
-            raise EnvFileWriteError('disk on fire')
+            raise EnvWriteError('disk on fire')
 
-    with pytest.raises(EnvFileWriteError):
-        await _edit(_ReadOkWriteFails(root='/x'), old_string='world', new_string='there')
+    with pytest.raises(EnvWriteError):
+        await _edit(_ReadOkWriteFails(root='/x', data=b'hello world'), old_string='world', new_string='there')
+
+
+# --- ls -----------------------------------------------------------------------
+
+
+async def test_ls_formats_directory_suffix() -> None:
+    # `/` appended to directories, plain name otherwise -- exercises both branches.
+    assert await _ls(_StoreEnvironment(root='/x', data=b'')) == ['sub/', 'file.txt']
+
+
+@pytest.mark.parametrize(
+    'error',
+    [
+        EnvFileNotFoundError('not found'),
+        EnvFilePermissionError('not listable'),
+        EnvFileIsADirectoryError('is a directory'),
+        EnvFileNotADirectoryError('not a directory'),
+        PathEscapeError('outside root'),
+    ],
+)
+async def test_ls_recoverable_errors_become_model_retry(error: ExecutionEnvironmentError) -> None:
+    with pytest.raises(ModelRetry):
+        await _ls(_RaisingEnvironment(root='/x', error=error))
+
+
+async def test_ls_infra_error_propagates() -> None:
+    with pytest.raises(EnvReadError):
+        await _ls(_RaisingEnvironment(root='/x', error=EnvReadError('disk on fire')))
 
 
 # --- end-to-end: capability through a real backend + agent --------------------

@@ -29,9 +29,17 @@ class EnvFileTooLargeError(ExecutionEnvironmentError):
     """File too large."""
 
 
-class EnvFileReadError(ExecutionEnvironmentError):
-    """File read error."""
+class EnvReadError(ExecutionEnvironmentError):
+    """Unexpected I/O failure during a non-mutating operation (e.g. `read_file`, `ls`).
+
+    The catch-all for any OS error a read-shaped operation raises that is not one of the
+    specific subclasses above. Nothing changed on disk.
+    """
 
 
-class EnvFileWriteError(ExecutionEnvironmentError):
-    """File write error."""
+class EnvWriteError(ExecutionEnvironmentError):
+    """Unexpected I/O failure during a mutating operation (e.g. `write_file`).
+
+    The catch-all for any OS error a write-shaped operation raises that is not one of the
+    specific subclasses above. State may have been partially changed.
+    """

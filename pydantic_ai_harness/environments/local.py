@@ -10,8 +10,8 @@ from .exceptions import (
     EnvFileNotADirectoryError,
     EnvFileNotFoundError,
     EnvFilePermissionError,
-    EnvFileReadError,
-    EnvFileWriteError,
+    EnvReadError,
+    EnvWriteError,
     PathEscapeError,
 )
 
@@ -55,7 +55,7 @@ class LocalEnvironment(AbstractEnvironment):
                 f'{path!r} is not a directory in the environment root {self.root!r}: {str(e)}'
             )
         except OSError as e:
-            raise EnvFileReadError(f'{path!r} could not be read in the environment root {self.root!r}: {str(e)}')
+            raise EnvReadError(f'{path!r} could not be read in the environment root {self.root!r}: {str(e)}')
 
     async def write_file(self, path: str, data: bytes) -> None:
         """Write a file to the local filesystem."""
@@ -71,7 +71,7 @@ class LocalEnvironment(AbstractEnvironment):
         except PermissionError as e:
             raise EnvFilePermissionError(f'{path!r} is not writable by the environment root {self.root!r}: {str(e)}')
         except OSError as e:
-            raise EnvFileWriteError(f'{path!r} could not be written to the environment root {self.root!r}: {str(e)}')
+            raise EnvWriteError(f'{path!r} could not be written to the environment root {self.root!r}: {str(e)}')
 
     async def ls(self, path: str) -> list[AbstractFile]:
         """List the contents of a directory."""
@@ -90,5 +90,13 @@ class LocalEnvironment(AbstractEnvironment):
             # so a broken symlink is simply "not a directory" rather than a `stat` that raises.
             with os.scandir(resolved_path) as entries:
                 return [AbstractFile(name=e.name, is_directory=e.is_dir(follow_symlinks=False)) for e in entries]
+        except FileNotFoundError as e:
+            raise EnvFileNotFoundError(f'{path!r} not found in the environment root {self.root!r}: {str(e)}')
         except PermissionError as e:
             raise EnvFilePermissionError(f'{path!r} is not listable by the environment root {self.root!r}: {str(e)}')
+        except NotADirectoryError as e:
+            raise EnvFileNotADirectoryError(
+                f'{path!r} is not a directory in the environment root {self.root!r}: {str(e)}'
+            )
+        except OSError as e:
+            raise EnvReadError(f'{path!r} could not be listed in the environment root {self.root!r}: {str(e)}')

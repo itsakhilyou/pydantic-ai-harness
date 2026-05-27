@@ -15,8 +15,8 @@ from ..environments.exceptions import (
     EnvFileNotADirectoryError,
     EnvFileNotFoundError,
     EnvFilePermissionError,
-    EnvFileReadError,
-    EnvFileWriteError,
+    EnvReadError,
+    EnvWriteError,
     PathEscapeError,
 )
 from ._truncate import DEFAULT_MAX_BYTES, format_size, truncate_head
@@ -54,7 +54,7 @@ async def _read_file(environment: AbstractEnvironment, path: str, offset: int | 
         EnvFileNotADirectoryError,
     ) as e:
         raise ModelRetry(str(e)) from e
-    except (EnvFileReadError,):
+    except (EnvReadError,):
         # TODO: This should be a ToolFailed error when I merge that in
         # catching and re raising here to show the boundary where we change it
         raise
@@ -145,7 +145,7 @@ async def _edit_file(
         EnvFileNotADirectoryError,
     ) as e:
         raise ModelRetry(str(e)) from e
-    except (EnvFileReadError,):
+    except (EnvReadError,):
         raise  # TODO: ToolFailed when merged
     except UnicodeDecodeError as e:
         raise ModelRetry(str(e)) from e
@@ -176,7 +176,7 @@ async def _edit_file(
         await environment.write_file(path, new_text.encode('utf-8'))
     except EnvFilePermissionError as e:
         raise ModelRetry(str(e)) from e
-    except (EnvFileWriteError,):
+    except (EnvWriteError,):
         # TODO: This should be a ToolFailed error when I merge that in
         # catching and re raising here to show the boundary where we change it
         raise
@@ -211,7 +211,7 @@ class ExecutionEnv(AbstractCapability[AgentDepsT]):
                 await self.environment.write_file(path, data.encode('utf-8'))
             except EnvFilePermissionError as e:
                 raise ModelRetry(str(e)) from e
-            except (EnvFileWriteError,):
+            except (EnvWriteError,):
                 # TODO: This should be a ToolFailed error when I merge that in
                 # catching and re raising here to show the boundary where we change it
                 raise
@@ -231,13 +231,27 @@ class ExecutionEnv(AbstractCapability[AgentDepsT]):
             path: Annotated[str, Field(description='Path to the directory to list, relative to the workspace root.')],
         ) -> list[str]:
             """List the contents of a directory."""
-            ls_result = await self.environment.ls(path)
-            return [file.name + ('/' if file.is_directory else '') for file in ls_result]
-
-        toolset.add_function(ls, description='List the contents of a directory.')
+            try:
+                ls_result = await self.environment.ls(path)
+                return [file.name + ('/' if file.is_directory else '') for file in ls_result]
+            except PathEscapeError as e:
+                get_current_span().add_event('path_escape_attempt', {'path': path})
+                raise ModelRetry(str(e)) from e
+            except (
+                EnvFileNotFoundError,
+                EnvFilePermissionError,
+                EnvFileIsADirectoryError,
+                EnvFileNotADirectoryError,
+            ) as e:
+                raise ModelRetry(str(e)) from e
+            except (EnvReadError,):
+                # TODO: This should be a ToolFailed error when I merge that in
+                # catching and re raising here to show the boundary where we change it
+                raise
 
         toolset.add_function(read_file, description='Read a file from the execution environment.')
         toolset.add_function(write_file, description='Write a file to the execution environment.')
         toolset.add_function(edit_file, description='Replace a unique occurrence of text in a file.')
+        toolset.add_function(ls, description='List the contents of a directory.')
 
         return toolset

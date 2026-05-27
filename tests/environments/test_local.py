@@ -13,7 +13,7 @@ import pytest
 
 from pydantic_ai_harness.environments.exceptions import (
     EnvFilePermissionError,
-    EnvFileReadError,
+    EnvReadError,
     PathEscapeError,
 )
 from pydantic_ai_harness.environments.local import LocalEnvironment
@@ -101,5 +101,31 @@ async def test_read_symlink_loop_raises_read_error(tmp_path: Path) -> None:
     b.symlink_to(a)
 
     env = LocalEnvironment(root=str(tmp_path))
-    with pytest.raises(EnvFileReadError):
+    with pytest.raises(EnvReadError):
         await env.read_file('a')
+
+
+@skip_if_root
+async def test_ls_unlistable_directory_raises_permission(tmp_path: Path) -> None:
+    box = tmp_path / 'locked'
+    box.mkdir()
+    box.chmod(0o000)
+    try:
+        env = LocalEnvironment(root=str(tmp_path))
+        with pytest.raises(EnvFilePermissionError):
+            await env.ls('locked')
+    finally:
+        box.chmod(0o755)  # let tmp_path cleanup remove it
+
+
+async def test_ls_symlink_loop_raises_read_error(tmp_path: Path) -> None:
+    # Listing through a symlink cycle fails with a generic OSError (ELOOP) -- not one of the
+    # mapped subclasses -- exercising the catch-all path in `ls`.
+    a = tmp_path / 'a'
+    b = tmp_path / 'b'
+    a.symlink_to(b)
+    b.symlink_to(a)
+
+    env = LocalEnvironment(root=str(tmp_path))
+    with pytest.raises(EnvReadError):
+        await env.ls('a')

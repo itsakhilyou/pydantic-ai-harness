@@ -38,7 +38,7 @@ class AbstractEnvironment(ABC):
             EnvFileIsADirectoryError: `path` is a directory, not a file.
             EnvFileNotADirectoryError: A component of `path` is not a directory.
             EnvFilePermissionError: The backend may not read `path`.
-            EnvFileReadError: Any other I/O failure (nothing builtin leaks).
+            EnvReadError: Any other I/O failure (nothing builtin leaks).
         """
         raise NotImplementedError  # pragma: no cover
 
@@ -53,7 +53,7 @@ class AbstractEnvironment(ABC):
         Raises:
             PathEscapeError: `path` resolves outside `root`.
             EnvFilePermissionError: The backend may not write `path`.
-            EnvFileWriteError: Any other I/O failure (nothing builtin leaks).
+            EnvWriteError: Any other I/O failure (nothing builtin leaks).
         """
         raise NotImplementedError  # pragma: no cover
 
@@ -66,5 +66,12 @@ class AbstractEnvironment(ABC):
 
         Returns:
             A list of files and directories in the directory.
+
+        Raises:
+            PathEscapeError: `path` resolves outside `root`.
+            EnvFileNotFoundError: No directory exists at `path`.
+            EnvFileNotADirectoryError: A component of `path` is not a directory.
+            EnvFilePermissionError: The backend may not list `path`.
+            EnvReadError: Any other I/O failure (nothing builtin leaks).
         """
         raise NotImplementedError  # pragma: no cover
