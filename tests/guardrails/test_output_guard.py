@@ -11,6 +11,7 @@ from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanE
 from opentelemetry.trace import NoOpTracer, Tracer
 from pydantic import BaseModel
 from pydantic_ai import Agent
+from pydantic_ai.capabilities import CapabilityOrdering, Instrumentation
 from pydantic_ai.exceptions import UnexpectedModelBehavior
 from pydantic_ai.models.test import TestModel
 from pydantic_ai.output import OutputContext
@@ -238,7 +239,27 @@ class TestOutputGuardStreaming:
 class TestOutputGuardTracing:
     """Spans emitted on block and redaction."""
 
-    async def test_block_emits_span(self):
+    async def test_block_span_includes_message_when_enabled(self):
+        tracer, exporter = _recording_tracer()
+        og = OutputGuard[None](guard=lambda _: GuardResult.block('contains SSN'))
+
+        with pytest.raises(OutputBlocked):
+            await og.after_output_process(
+                _run_ctx(tracer=tracer, trace_include_content=True),
+                output_context=_TEXT_OUTPUT_CONTEXT,
+                output='leaks SSN',
+            )
+
+        span = _only_span(exporter)
+        assert span.name == 'guardrail blocked output'
+        assert dict(span.attributes or {}) == {
+            'guardrail.direction': 'output',
+            'guardrail.action': 'block',
+            'guardrail.message': 'contains SSN',
+        }
+
+    async def test_block_span_omits_message_by_default(self):
+        """The refusal message may quote sensitive output, so it is gated like redactions are."""
         tracer, exporter = _recording_tracer()
         og = OutputGuard[None](guard=lambda _: GuardResult.block('contains SSN'))
 
@@ -249,11 +270,15 @@ class TestOutputGuardTracing:
 
         span = _only_span(exporter)
         assert span.name == 'guardrail blocked output'
-        assert dict(span.attributes or {}) == {
-            'guardrail.direction': 'output',
-            'guardrail.action': 'block',
-            'guardrail.message': 'contains SSN',
-        }
+        assert dict(span.attributes or {}) == {'guardrail.direction': 'output', 'guardrail.action': 'block'}
+
+
+class TestOutputGuardOrdering:
+    """`get_ordering()` placement: outermost but wrapped by `Instrumentation`."""
+
+    def test_declares_outermost_inside_instrumentation(self):
+        ordering = OutputGuard[None](guard=lambda _: True).get_ordering()
+        assert ordering == CapabilityOrdering(position='outermost', wrapped_by=[Instrumentation])
 
     async def test_redaction_span_includes_content_when_enabled(self):
         tracer, exporter = _recording_tracer()

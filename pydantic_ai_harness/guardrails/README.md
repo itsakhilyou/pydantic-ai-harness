@@ -107,7 +107,9 @@ OutputGuard(guard=must_cite_sources)
 
 ## Tracing
 
-`replace` and `block` are recorded as spans on the active OpenTelemetry tracer, so a redaction or refusal shows up in Logfire traces (`guardrail redacted input`, `guardrail blocked output`, etc.) with `guardrail.*` attributes. The original and replacement values are attached **only** when `RunContext.trace_include_content` is enabled — a redacted value is often the very content the guard exists to keep out of traces. `retry` needs no special tracing: the retried model request appears in the trace on its own.
+`replace` and `block` are recorded as spans on the active OpenTelemetry tracer, so a redaction or refusal shows up in Logfire traces (`guardrail redacted input`, `guardrail blocked output`, etc.) with `guardrail.*` attributes. Content attributes — the original/replacement values for a redaction and the refusal `message` for a block — are attached **only** when `RunContext.trace_include_content` is enabled, since these can quote the very content the guard exists to keep out of traces. `retry` needs no special tracing: the retried model request appears in the trace on its own.
+
+`OutputGuard` declares `position='outermost', wrapped_by=[Instrumentation]` so its block/redact spans are always captured by an enclosing `Instrumentation` span regardless of how the user orders capabilities. `InputGuard` declares `position='innermost'` so any capability that morphs messages (a prompt rewriter, a context manager) runs first and the guard sees the final prompt the model will receive.
 
 ## Parallel input guards
 

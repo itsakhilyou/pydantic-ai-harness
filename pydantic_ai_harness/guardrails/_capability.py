@@ -20,9 +20,9 @@ failure. Guards may be sync or async and may optionally take a
 [`RunContext`][pydantic_ai.tools.RunContext] as their first argument.
 
 `replace` and `block` are recorded as spans on the active OpenTelemetry
-tracer, so a redaction or refusal is visible in Logfire traces. The original
-and replacement values are included only when `RunContext.trace_include_content`
-is set.
+tracer, so a redaction or refusal is visible in Logfire traces. Content
+attributes (the original/replacement values and the refusal message) are
+attached only when `RunContext.trace_include_content` is set.
 """
 
 from __future__ import annotations
@@ -33,10 +33,11 @@ from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal
 
-from pydantic_ai.capabilities import AbstractCapability, WrapModelRequestHandler
+from pydantic_ai.capabilities import AbstractCapability, CapabilityOrdering, Instrumentation, WrapModelRequestHandler
 from pydantic_ai.exceptions import ModelRetry, SkipModelRequest, UserError
 from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart, UserPromptPart
 from pydantic_ai.tools import AgentDepsT, RunContext
+from typing_extensions import assert_never
 
 from pydantic_ai_harness.guardrails._exceptions import OutputBlocked
 
@@ -50,7 +51,7 @@ _DEFAULT_OUTPUT_BLOCK_MESSAGE = 'Output blocked by output guardrail.'
 _DEFAULT_OUTPUT_RETRY_MESSAGE = 'Output rejected by output guardrail.'
 
 
-@dataclass
+@dataclass(frozen=True, kw_only=True)
 class GuardResult:
     """The outcome a guard reports for the value it inspected.
 
@@ -68,6 +69,24 @@ class GuardResult:
 
     replacement: object | None = None
     """For `replace`, the value substituted for the inspected one."""
+
+    def __post_init__(self) -> None:
+        """Reject field combinations the four-outcome contract does not allow."""
+        match self.action:
+            case 'allow':
+                if self.message is not None or self.replacement is not None:
+                    raise UserError("GuardResult(action='allow') must not set `message` or `replacement`.")
+            case 'replace':
+                if self.replacement is None:
+                    raise UserError("GuardResult(action='replace') requires a `replacement` value.")
+            case 'retry':
+                if self.message is None:
+                    raise UserError("GuardResult(action='retry') requires a `message`.")
+            case 'block':
+                # `message=None` is valid: a default is supplied at the use site.
+                pass
+            case _:  # pragma: no cover - assert_never exhaustiveness guard
+                assert_never(self.action)
 
     @classmethod
     def allow(cls) -> GuardResult:
@@ -183,11 +202,16 @@ def _replace_prompt(messages: Sequence[ModelMessage], new_content: str) -> bool:
 
 
 def _trace_block(ctx: RunContext[AgentDepsT], *, direction: str, message: str) -> None:
-    """Record a zero-duration span marking a guardrail refusal."""
-    ctx.tracer.start_span(
-        f'guardrail blocked {direction}',
-        attributes={'guardrail.direction': direction, 'guardrail.action': 'block', 'guardrail.message': message},
-    ).end()
+    """Record a zero-duration span marking a guardrail refusal.
+
+    The refusal message is attached only when `ctx.trace_include_content` is
+    set — it can quote sensitive content from the guarded value, and ops
+    audiences are broader than the user who sees the refusal text.
+    """
+    attributes: dict[str, str] = {'guardrail.direction': direction, 'guardrail.action': 'block'}
+    if ctx.trace_include_content:
+        attributes['guardrail.message'] = message
+    ctx.tracer.start_span(f'guardrail blocked {direction}', attributes=attributes).end()
 
 
 def _trace_redaction(ctx: RunContext[AgentDepsT], *, direction: str, original: object, replacement: object) -> None:
@@ -209,13 +233,10 @@ class InputGuard(AbstractCapability[AgentDepsT]):
     """Validate the user prompt before it reaches the model.
 
     The `guard` callable receives the prompt text and returns one of the four
-    outcomes (see the module docstring). `block` short-circuits the model call
-    with a refusal message; `replace` rewrites the prompt sent to the model
-    (redaction) — the rewrite also replaces the original in the run's message
-    history, so a redacted secret is not retained, and it targets text prompts
-    (a `str` replacement overwrites a multimodal prompt's other parts); `retry`
-    is not valid for an input guard. Raising an exception from the guard
-    propagates it as-is.
+    outcomes (see the module docstring). `replace` rewrites the prompt sent to
+    the model and also overwrites the original in the run's message history,
+    so a redacted secret is not retained; a `str` replacement overwrites a
+    multimodal prompt's other parts. `retry` is not valid for an input guard.
 
     ```python
     from pydantic_ai import Agent
@@ -251,6 +272,10 @@ class InputGuard(AbstractCapability[AgentDepsT]):
     and evaluates the original user prompt. Subsequent model requests in the
     same run (e.g. after tool calls) are not re-checked, since the user input
     has not changed.
+
+    Ordering: declares `position='innermost'` so any capability that morphs
+    the messages (a prompt rewriter, a context manager) runs first and the
+    guard sees the final prompt that will reach the model.
     """
 
     guard: InputGuardFunc[AgentDepsT]
@@ -258,6 +283,10 @@ class InputGuard(AbstractCapability[AgentDepsT]):
 
     parallel: bool = False
     """Run the guard concurrently with the model request and cancel the model call on failure."""
+
+    def get_ordering(self) -> CapabilityOrdering:
+        """Sit innermost so message-morphing capabilities run first and the guard sees the final prompt."""
+        return CapabilityOrdering(position='innermost')
 
     async def _run_guard(
         self,
@@ -272,27 +301,33 @@ class InputGuard(AbstractCapability[AgentDepsT]):
         `parallel=True` raise `UserError`.
         """
         verdict = await _evaluate(self.guard, ctx, prompt)
-        if verdict.action == 'allow':
-            return
-        if verdict.action == 'retry':
-            raise UserError(
-                'An InputGuard guard cannot return GuardResult.retry() — retry applies to model output only.'
-            )
-        if verdict.action == 'block':
-            message = verdict.message or _DEFAULT_INPUT_BLOCK_MESSAGE
-            _trace_block(ctx, direction='input', message=message)
-            raise SkipModelRequest(ModelResponse(parts=[TextPart(content=message)]))
-        if self.parallel:
-            raise UserError(
-                'InputGuard(parallel=True) is incompatible with GuardResult.replace(): the model call has '
-                'already started with the original prompt. Use sequential mode for prompt redaction.'
-            )
-        replacement = verdict.replacement
-        if not isinstance(replacement, str):
-            raise UserError('GuardResult.replace() for an input guard must provide replacement prompt text (str).')
-        if not _replace_prompt(request_context.messages, replacement):
-            raise UserError('InputGuard could not find a user prompt to redact in the request.')
-        _trace_redaction(ctx, direction='input', original=prompt, replacement=replacement)
+        match verdict.action:
+            case 'allow':
+                return
+            case 'retry':
+                raise UserError(
+                    'An InputGuard guard cannot return GuardResult.retry() — retry applies to model output only.'
+                )
+            case 'block':
+                message = verdict.message or _DEFAULT_INPUT_BLOCK_MESSAGE
+                _trace_block(ctx, direction='input', message=message)
+                raise SkipModelRequest(ModelResponse(parts=[TextPart(content=message)]))
+            case 'replace':
+                if self.parallel:
+                    raise UserError(
+                        'InputGuard(parallel=True) is incompatible with GuardResult.replace(): the model call has '
+                        'already started with the original prompt. Use sequential mode for prompt redaction.'
+                    )
+                replacement = verdict.replacement
+                if not isinstance(replacement, str):
+                    raise UserError(
+                        'GuardResult.replace() for an input guard must provide replacement prompt text (str).'
+                    )
+                if not _replace_prompt(request_context.messages, replacement):
+                    raise UserError('InputGuard could not find a user prompt to redact in the request.')
+                _trace_redaction(ctx, direction='input', original=prompt, replacement=replacement)
+            case _:  # pragma: no cover - assert_never exhaustiveness guard
+                assert_never(verdict.action)
 
     async def wrap_model_request(
         self,
@@ -349,8 +384,7 @@ class OutputGuard(AbstractCapability[AgentDepsT]):
     the four outcomes (see the module docstring): `allow` exposes the output,
     `block` raises [`OutputBlocked`][pydantic_ai_harness.guardrails.OutputBlocked],
     `replace` substitutes a sanitized output (redaction), and `retry` sends the
-    output back to the model to try again. Raising an exception from the guard
-    propagates it as-is.
+    output back to the model to try again.
 
     ```python
     from pydantic_ai import Agent
@@ -372,6 +406,11 @@ class OutputGuard(AbstractCapability[AgentDepsT]):
     [`RunContext`][pydantic_ai.tools.RunContext] as a first parameter; it is
     detected from the signature.
 
+    Ordering: declares `position='outermost'` so the guard sees the final
+    output after every inner capability has processed it, and `wrapped_by=
+    [Instrumentation]` so an enclosing `Instrumentation` span always captures
+    the guard's block/redact spans regardless of user list order.
+
     Streaming caveats. `retry` is supported with
     [`run()`][pydantic_ai.Agent.run] / `run_sync()` only — pydantic-ai does not
     support output retries during [`run_stream()`][pydantic_ai.Agent.run_stream],
@@ -386,6 +425,10 @@ class OutputGuard(AbstractCapability[AgentDepsT]):
     guard: OutputGuardFunc[AgentDepsT]
     """Callable that decides what to do with the agent output."""
 
+    def get_ordering(self) -> CapabilityOrdering:
+        """Sit outermost (inside `Instrumentation`) so the guard sees the final processed output."""
+        return CapabilityOrdering(position='outermost', wrapped_by=[Instrumentation])
+
     async def after_output_process(
         self,
         ctx: RunContext[AgentDepsT],
@@ -397,13 +440,17 @@ class OutputGuard(AbstractCapability[AgentDepsT]):
         if ctx.partial_output:
             return output
         verdict = await _evaluate(self.guard, ctx, output)
-        if verdict.action == 'allow':
-            return output
-        if verdict.action == 'block':
-            message = verdict.message or _DEFAULT_OUTPUT_BLOCK_MESSAGE
-            _trace_block(ctx, direction='output', message=message)
-            raise OutputBlocked(message)
-        if verdict.action == 'retry':
-            raise ModelRetry(verdict.message or _DEFAULT_OUTPUT_RETRY_MESSAGE)
-        _trace_redaction(ctx, direction='output', original=output, replacement=verdict.replacement)
-        return verdict.replacement
+        match verdict.action:
+            case 'allow':
+                return output
+            case 'block':
+                message = verdict.message or _DEFAULT_OUTPUT_BLOCK_MESSAGE
+                _trace_block(ctx, direction='output', message=message)
+                raise OutputBlocked(message)
+            case 'retry':
+                raise ModelRetry(verdict.message or _DEFAULT_OUTPUT_RETRY_MESSAGE)
+            case 'replace':
+                _trace_redaction(ctx, direction='output', original=output, replacement=verdict.replacement)
+                return verdict.replacement
+            case _:  # pragma: no cover - assert_never exhaustiveness guard
+                assert_never(verdict.action)

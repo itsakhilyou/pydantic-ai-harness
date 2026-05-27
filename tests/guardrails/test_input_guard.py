@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 from typing import Any
 
 import pytest
@@ -11,6 +12,7 @@ from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from opentelemetry.trace import NoOpTracer, Tracer
 from pydantic_ai import Agent
+from pydantic_ai.capabilities import CapabilityOrdering
 from pydantic_ai.exceptions import SkipModelRequest, UserError
 from pydantic_ai.messages import (
     ModelMessage,
@@ -473,13 +475,52 @@ class TestInputGuardParallel:
         leftover = {t for t in asyncio.all_tasks() if t is not current} - before
         assert leftover == set(), f'guard/handler tasks must be drained, got dangling: {leftover}'
 
+    async def test_no_dangling_tasks_on_outer_cancellation(self):
+        """If the caller cancels the run mid-flight, the `finally` block must still drain
+        guard and handler tasks instead of leaking them.
+
+        Regression guard for a reviewed concern about whether `asyncio.shield` was needed
+        around the cleanup `gather`. It isn't — the outer cancel is consumed by the
+        `asyncio.wait` above, so the subsequent `cancel()` + `gather()` in `finally`
+        complete without being re-cancelled.
+        """
+        run_ctx, req_ctx = _build_ctx_and_req()
+
+        async def slow_handler(_: Any) -> ModelResponse:
+            await asyncio.sleep(10)
+            return ModelResponse(parts=[TextPart(content='never')])  # pragma: no cover
+
+        async def slow_guard(_: str) -> bool:
+            await asyncio.sleep(10)
+            return True  # pragma: no cover
+
+        current = asyncio.current_task()
+        before = {t for t in asyncio.all_tasks() if t is not current}
+
+        ig = InputGuard[None](guard=slow_guard, parallel=True)
+
+        async def runner() -> ModelResponse:
+            return await ig.wrap_model_request(run_ctx, request_context=req_ctx, handler=slow_handler)
+
+        runner_task = asyncio.create_task(runner())
+        for _ in range(5):
+            await asyncio.sleep(0)
+        runner_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await runner_task
+        for _ in range(5):
+            await asyncio.sleep(0)
+
+        leftover = {t for t in asyncio.all_tasks() if t is not current and not t.done()} - before
+        assert leftover == set(), f'guard/handler tasks must be drained on outer cancel, got: {leftover}'
+
 
 class TestInputGuardTracing:
     """Spans emitted on block and redaction."""
 
-    async def test_block_emits_span(self):
+    async def test_block_span_includes_message_when_enabled(self):
         tracer, exporter = _recording_tracer()
-        run_ctx, req_ctx = _build_ctx_and_req(tracer=tracer)
+        run_ctx, req_ctx = _build_ctx_and_req(tracer=tracer, trace_include_content=True)
 
         ig = InputGuard[None](guard=lambda _: GuardResult.block('nope'))
         with pytest.raises(SkipModelRequest):
@@ -492,6 +533,19 @@ class TestInputGuardTracing:
             'guardrail.action': 'block',
             'guardrail.message': 'nope',
         }
+
+    async def test_block_span_omits_message_by_default(self):
+        """The refusal message may quote sensitive content, so it is gated like redactions are."""
+        tracer, exporter = _recording_tracer()
+        run_ctx, req_ctx = _build_ctx_and_req(tracer=tracer)
+
+        ig = InputGuard[None](guard=lambda _: GuardResult.block('nope'))
+        with pytest.raises(SkipModelRequest):
+            await ig.wrap_model_request(run_ctx, request_context=req_ctx, handler=_unreachable_handler)
+
+        span = _only_span(exporter)
+        assert span.name == 'guardrail blocked input'
+        assert dict(span.attributes or {}) == {'guardrail.direction': 'input', 'guardrail.action': 'block'}
 
     async def test_redaction_span_includes_content_when_enabled(self):
         tracer, exporter = _recording_tracer()
@@ -587,6 +641,44 @@ class TestExtractPrompt:
 
         messages: list[ModelMessage] = [ModelResponse(parts=[TextPart(content='only model parts here')])]
         assert _extract_prompt(_Ctx(), messages) is None  # pyright: ignore[reportArgumentType]
+
+
+class TestInputGuardOrdering:
+    """`get_ordering()` placement: innermost so message-morphing capabilities run first."""
+
+    def test_declares_innermost(self):
+        ordering = InputGuard[None](guard=lambda _: True).get_ordering()
+        assert ordering == CapabilityOrdering(position='innermost')
+
+
+class TestGuardResult:
+    """`GuardResult.__post_init__` rejects field combinations the four-outcome contract does not allow."""
+
+    def test_allow_rejects_message(self):
+        with pytest.raises(UserError, match="'allow'"):
+            GuardResult(action='allow', message='oops')
+
+    def test_allow_rejects_replacement(self):
+        with pytest.raises(UserError, match="'allow'"):
+            GuardResult(action='allow', replacement='oops')
+
+    def test_replace_requires_replacement(self):
+        with pytest.raises(UserError, match="'replace'"):
+            GuardResult(action='replace')
+
+    def test_retry_requires_message(self):
+        with pytest.raises(UserError, match="'retry'"):
+            GuardResult(action='retry')
+
+    def test_block_without_message_is_valid(self):
+        """A `block` with no message is fine: the default kicks in at the use site."""
+        result = GuardResult(action='block')
+        assert result.message is None
+
+    def test_is_frozen(self):
+        result = GuardResult.allow()
+        with pytest.raises(dataclasses.FrozenInstanceError):
+            result.message = 'mutated'  # pyright: ignore[reportAttributeAccessIssue]
 
 
 async def _unreachable_handler(_: ModelRequestContext) -> ModelResponse:  # pragma: no cover - never awaited
