@@ -34,12 +34,14 @@ from pydantic_ai_harness.environments.exceptions import (
     EnvNotFoundError,
     EnvPermissionError,
     EnvReadError,
+    EnvShellExecutionError,
     EnvWriteError,
     ExecutionEnvironmentError,
     PathEscapeError,
 )
 from pydantic_ai_harness.environments.local import LocalEnvironment
 from pydantic_ai_harness.execution_env import ExecutionEnv
+from pydantic_ai_harness.execution_env._truncate import DEFAULT_MAX_LINES
 
 
 @dataclass(kw_only=True)
@@ -434,6 +436,82 @@ async def test_glob_recoverable_errors_become_model_retry(error: ExecutionEnviro
 async def test_glob_infra_error_propagates() -> None:
     with pytest.raises(EnvReadError):
         await _glob(_RaisingEnvironment(root='/x', error=EnvReadError('disk on fire')))
+
+
+# --- shell --------------------------------------------------------------------
+
+
+@dataclass(kw_only=True)
+class _ShellEnvironment(_StoreEnvironment):
+    """Reuses _StoreEnvironment's file methods; shell_command returns a preset result."""
+
+    command_result: ShellCommandResult
+
+    async def shell_command(self, command: str, timeout: int | None = None) -> ShellCommandResult:
+        return self.command_result
+
+
+def _shell_env(
+    *, stdout: bytes = b'', stderr: bytes = b'', return_code: int = 0, timed_out: bool = False
+) -> _ShellEnvironment:
+    return _ShellEnvironment(
+        root='/x',
+        data=b'',
+        command_result=ShellCommandResult(
+            stdout=stdout, stderr=stderr, return_code=return_code, timed_out=timed_out
+        ),
+    )
+
+
+async def _shell(environment: AbstractEnvironment, *, command: str = 'echo hi', timeout: int | None = None) -> object:
+    """Invoke the shell tool through its toolset."""
+    toolset = ExecutionEnv(environment=environment).get_toolset()
+    ctx = _ctx()
+    tools = await toolset.get_tools(ctx)
+    args: dict[str, object] = {'command': command}
+    if timeout is not None:
+        args['timeout'] = timeout
+    return await toolset.call_tool('shell', args, ctx, tools['shell'])
+
+
+async def test_shell_success_returns_raw_output() -> None:
+    # Success: no status boilerplate, just the output.
+    assert await _shell(_shell_env(stdout=b'hello world')) == 'hello world'
+
+
+async def test_shell_non_zero_exit_includes_exit_code() -> None:
+    # A non-zero exit is a normal result; the model is told the code so it knows the command failed.
+    assert await _shell(_shell_env(stdout=b'boom', return_code=2)) == 'Command exited with code 2.\nboom'
+
+
+async def test_shell_timeout_includes_partial_output() -> None:
+    # The header reports the timeout; the partial output we captured before the kill is still shown.
+    out = await _shell(_shell_env(stdout=b'partial', timed_out=True), timeout=5)
+    assert out == 'Command timed out after 5s.\npartial'
+
+
+async def test_shell_includes_stderr_only_when_present() -> None:
+    # stderr is appended (labelled) when non-empty so warnings aren't dropped...
+    assert await _shell(_shell_env(stdout=b'out', stderr=b'warn')) == 'out\n[stderr]\nwarn'
+    # ...but a clean run with empty stderr reads as just its stdout (covered by the success test).
+
+
+async def test_shell_output_is_tail_truncated_with_marker() -> None:
+    # Oversized output keeps the END (errors/exit status live there) and prepends a marker so the
+    # model knows the head was dropped -- not a silent truncation.
+    lines = ['HEAD', *(f'mid{i}' for i in range(DEFAULT_MAX_LINES)), 'TAIL']
+    out = await _shell(_shell_env(stdout='\n'.join(lines).encode()))
+    assert isinstance(out, str)
+    assert out.startswith('[... output truncated')
+    assert out.endswith('TAIL')
+    assert 'HEAD' not in out
+
+
+async def test_shell_infra_error_propagates_not_model_retry() -> None:
+    # "Couldn't start a shell at all" is infra, not model-fixable -> it propagates as-is rather than
+    # becoming a ModelRetry (unlike the path-based errors in the other tools).
+    with pytest.raises(EnvShellExecutionError):
+        await _shell(_RaisingEnvironment(root='/x', error=EnvShellExecutionError('no shell')))
 
 
 # --- end-to-end: capability through a real backend + agent --------------------

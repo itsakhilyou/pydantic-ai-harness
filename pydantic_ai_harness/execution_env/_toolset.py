@@ -23,7 +23,7 @@ from ..environments.exceptions import (
     EnvWriteError,
     PathEscapeError,
 )
-from ._truncate import DEFAULT_MAX_BYTES, format_size, truncate_head
+from ._truncate import DEFAULT_MAX_BYTES, format_size, truncate, truncate_output
 
 
 async def _read_file(environment: AbstractEnvironment, path: str, offset: int | None, limit: int | None) -> str:
@@ -77,7 +77,7 @@ async def _read_file(environment: AbstractEnvironment, path: str, offset: int | 
     end = min(start + limit, total_lines) if limit is not None else total_lines
     window = lines[start:end]
 
-    result = truncate_head(window)
+    result = truncate(window)
     # 1-indexed line the window starts on, for the continuation notes.
     start_display = start + 1
 
@@ -298,27 +298,30 @@ async def _shell(environment: AbstractEnvironment, command: str, timeout: int | 
     decode(errors='replace') because this is the bytes->text boundary: a command can emit arbitrary
     non-UTF-8 bytes, so decoding must never raise.
 
-    TODO: output is untruncated -- a chatty command (verbose tests, `cat` of a large file) can flood
-    the model's context. Tail-truncate (errors live at the end) + spill to a temp file once we have a
-    truncate_tail helper, mirroring pi's bash output handling.
+    Output is tail-truncated (`truncate_output`): a chatty command (verbose tests, `cat` of a large
+    file) would otherwise flood the model's context. Tail keeps the end, where errors and the exit
+    status live. TODO: spill the full output to a temp file when truncated, mirroring pi.
     """
-    result = await environment.shell_command(command, timeout)
-    stdout = result.stdout.decode(errors='replace')
-    stderr = result.stderr.decode(errors='replace')
+    command_result = await environment.shell_command(command, timeout)
+    stdout = command_result.stdout.decode(errors='replace')
+    stderr = command_result.stderr.decode(errors='replace')
 
-    if result.timed_out:
+    if command_result.timed_out:
         # Include partial output: we deliberately captured what printed before the kill, and a model
         # debugging a hang needs it.
-        return _format_shell_result(f'Command timed out after {timeout}s.', stdout, stderr)
+        result = _format_shell_result(f'Command timed out after {timeout}s.', stdout, stderr)
+    elif command_result.return_code != 0:
+        result = _format_shell_result(f'Command exited with code {command_result.return_code}.', stdout, stderr)
+    else:
+        # Success: no status boilerplate -- the model just wants the output.
+        result = _format_shell_result(None, stdout, stderr)
 
-    if result.return_code != 0:
-        return _format_shell_result(f'Command exited with code {result.return_code}.', stdout, stderr)
-
-    # Success: no status boilerplate -- the model just wants the output.
-    return _format_shell_result(None, stdout, stderr)
+    return truncate_output(result, direction='tail')
 
 
-def build_toolset(environment: AbstractEnvironment, toolset: FunctionToolset[AgentDepsT]) -> FunctionToolset[AgentDepsT]:
+def build_toolset(
+    environment: AbstractEnvironment, toolset: FunctionToolset[AgentDepsT]
+) -> FunctionToolset[AgentDepsT]:
     """Define the tools (closing over `environment`) and register them on `toolset`.
 
     Takes the toolset as an argument so `AgentDepsT` is bound by the caller (`ExecutionEnv.get_toolset`
