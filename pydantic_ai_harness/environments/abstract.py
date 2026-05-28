@@ -110,3 +110,23 @@ class AbstractEnvironment(ABC):
             EnvReadError: Any other I/O failure (nothing builtin leaks).
         """
         raise NotImplementedError  # pragma: no cover
+
+    @abstractmethod
+    async def glob(self, path: str, pattern: str) -> list[str]:
+        """Find files under a directory matching a glob pattern.
+
+        Args:
+            path: Directory path, resolved against and confined to `root`.
+            pattern: The glob pattern to match. Matched recursively at any depth.
+
+        Returns:
+            A list of matching file paths, relative to `root`.
+
+        Raises:
+            PathEscapeError: `path` resolves outside `root`.
+            EnvNotFoundError: No file or directory exists at `path`.
+            EnvNotADirectoryError: `path` is a file, not a directory.
+            EnvPermissionError: The backend may not read `path`.
+            EnvReadError: Any other I/O failure (nothing builtin leaks).
+        """
+        raise NotImplementedError  # pragma: no cover

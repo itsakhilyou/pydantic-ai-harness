@@ -141,3 +141,34 @@ class LocalEnvironment(AbstractEnvironment):
         # job -- it sorts before presenting -- so backends stay thin and only one place has to
         # implement (and be verified for) the ordering. See ExecutionEnv.get_toolset grep tool.
         return results
+
+    async def glob(self, path: str, pattern: str) -> list[str]:
+        """Glob a directory for a pattern."""
+        root = Path(self.root).resolve()
+        resolved_path = Path(root, path).resolve()
+
+        if not resolved_path.is_relative_to(root):
+            raise PathEscapeError(f'{path!r} resolves outside the environment root {self.root!r}')
+
+        if not os.path.exists(resolved_path):
+            raise EnvNotFoundError(f'{path!r} not found in the environment root {self.root!r}')
+
+        if not os.access(resolved_path, os.R_OK):
+            raise EnvPermissionError(f'{path!r} is not readable by the environment root {self.root!r}')
+
+        if os.path.isfile(resolved_path):
+            raise EnvNotADirectoryError(f'{path!r} is a file in the environment root {self.root!r}')
+
+        results: list[str] = []
+
+        # rglob, not glob: a bare `*.py` matches at any depth, so the model can't fall into the
+        # silent-empty trap where `*.py` finds nothing in subdirectories (raw glob's `*` stops at
+        # `/`). The model learns this recursion from the `pattern` param description on the
+        # capability's glob tool -- this comment is for the maintainer, that one is for the model.
+        # Files only (is_file): directories are not glob results, matching grep's file orientation.
+        # Returned in filesystem walk order; the capability sorts for determinism (see grep/ls).
+        for match in resolved_path.rglob(pattern):
+            if match.is_file():
+                results.append(str(match.relative_to(root)))
+
+        return results

@@ -166,3 +166,18 @@ async def test_grep_unreadable_top_path_raises_permission(tmp_path: Path) -> Non
             await env.grep('locked', 'NEEDLE')
     finally:
         box.chmod(0o755)  # let tmp_path cleanup remove it
+
+
+@skip_if_root
+async def test_glob_unreadable_directory_raises_permission(tmp_path: Path) -> None:
+    # An unreadable search directory raises via the `os.access` guard clause -- the same
+    # guard grep uses, since rglob (like os.walk) would silently yield nothing instead.
+    box = tmp_path / 'locked'
+    box.mkdir()
+    box.chmod(0o000)
+    try:
+        env = LocalEnvironment(root=str(tmp_path))
+        with pytest.raises(EnvPermissionError):
+            await env.glob('locked', '*.py')
+    finally:
+        box.chmod(0o755)  # let tmp_path cleanup remove it

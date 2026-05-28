@@ -55,6 +55,9 @@ class _RaisingEnvironment(AbstractEnvironment):
     async def grep(self, path: str, pattern: str) -> list[AbstractMatch]:
         raise self.error
 
+    async def glob(self, path: str, pattern: str) -> list[str]:
+        raise self.error
+
 
 @dataclass(kw_only=True)
 class _StoreEnvironment(AbstractEnvironment):
@@ -78,6 +81,10 @@ class _StoreEnvironment(AbstractEnvironment):
             AbstractMatch(path='a.txt', line='five', lineno=5),
             AbstractMatch(path='a.txt', line='one', lineno=1),
         ]
+
+    async def glob(self, path: str, pattern: str) -> list[str]:
+        # Returned deliberately out of sorted order to prove the capability sorts.
+        return ['sub/b.py', 'a.py', 'sub/a.py']
 
 
 def _ctx() -> RunContext[None]:
@@ -381,6 +388,41 @@ async def test_grep_recoverable_errors_become_model_retry(error: ExecutionEnviro
 async def test_grep_infra_error_propagates() -> None:
     with pytest.raises(EnvReadError):
         await _grep(_RaisingEnvironment(root='/x', error=EnvReadError('disk on fire')))
+
+
+# --- glob ---------------------------------------------------------------------
+
+
+async def _glob(environment: AbstractEnvironment, *, path: str = 'd', pattern: str = '*.py') -> object:
+    """Invoke the glob tool through its toolset."""
+    toolset = ExecutionEnv(environment=environment).get_toolset()
+    ctx = _ctx()
+    tools = await toolset.get_tools(ctx)
+    return await toolset.call_tool('glob', {'path': path, 'pattern': pattern}, ctx, tools['glob'])
+
+
+async def test_glob_sorts_paths() -> None:
+    # The backend returns walk order; the capability sorts for determinism (like grep/ls).
+    assert await _glob(_StoreEnvironment(root='/x', data=b'')) == ['a.py', 'sub/a.py', 'sub/b.py']
+
+
+@pytest.mark.parametrize(
+    'error',
+    [
+        EnvNotFoundError('not found'),
+        EnvPermissionError('not readable'),
+        EnvNotADirectoryError('is a file'),
+        PathEscapeError('outside root'),
+    ],
+)
+async def test_glob_recoverable_errors_become_model_retry(error: ExecutionEnvironmentError) -> None:
+    with pytest.raises(ModelRetry):
+        await _glob(_RaisingEnvironment(root='/x', error=error))
+
+
+async def test_glob_infra_error_propagates() -> None:
+    with pytest.raises(EnvReadError):
+        await _glob(_RaisingEnvironment(root='/x', error=EnvReadError('disk on fire')))
 
 
 # --- end-to-end: capability through a real backend + agent --------------------

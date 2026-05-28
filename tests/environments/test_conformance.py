@@ -146,3 +146,37 @@ async def test_grep_single_file(environment: AbstractEnvironment, tmp_path: Path
     (tmp_path / 'only.txt').write_text('first\nNEEDLE on two\nthird\n')
     matches = await environment.grep('only.txt', 'NEEDLE')
     assert matches == snapshot([AbstractMatch(path='only.txt', line='NEEDLE on two\n', lineno=2)])
+
+
+async def test_glob_missing_directory_raises_not_found(environment: AbstractEnvironment) -> None:
+    with pytest.raises(EnvNotFoundError):
+        await environment.glob('does-not-exist', '*.py')
+
+
+async def test_glob_on_a_file_raises_not_a_directory(environment: AbstractEnvironment, tmp_path: Path) -> None:
+    # glob's `path` is the directory to search WITHIN; pointing it at a file is a model
+    # argument error, surfaced as EnvNotADirectoryError -> ModelRetry (mirrors ls).
+    (tmp_path / 'file.txt').write_bytes(b'x')
+    with pytest.raises(EnvNotADirectoryError):
+        await environment.glob('file.txt', '*.py')
+
+
+async def test_glob_relative_escape_raises(environment: AbstractEnvironment) -> None:
+    with pytest.raises(PathEscapeError):
+        await environment.glob('..', '*.py')
+
+
+async def test_glob_matches_recursively(environment: AbstractEnvironment, tmp_path: Path) -> None:
+    (tmp_path / 'top').mkdir()
+    (tmp_path / 'top' / 'sub').mkdir()
+    (tmp_path / 'top' / 'sub' / 'deep.py').write_text('NEEDLE')
+    (tmp_path / 'top' / 'sub' / 'notes.txt').write_text('NO MATCH')
+
+    matches = await environment.glob('.', '*.py')
+    assert matches == snapshot(['top/sub/deep.py'])
+
+
+async def test_glob_excludes_directories(environment: AbstractEnvironment, tmp_path: Path) -> None:
+    (tmp_path / 'sub').mkdir()
+    (tmp_path / 'sub' / 'inner.txt').write_text('x')
+    assert await environment.glob('.', 'sub') == []

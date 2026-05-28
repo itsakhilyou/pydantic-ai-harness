@@ -184,6 +184,29 @@ async def _edit_file(
     return f'Replaced {count} occurrence{"s" if count != 1 else ""} in {path!r}.'
 
 
+async def _glob(environment: AbstractEnvironment, path: str, pattern: str) -> list[str]:
+    """Glob the environment and sort the results.
+
+    Lives at module scope (like `_read_file`/`_edit_file`) so its try/except branches are
+    its own and don't push `get_toolset` over the complexity limit.
+    """
+    try:
+        paths = await environment.glob(path, pattern)
+        # Sort for determinism across separate runs/backends -- same reason as grep/ls
+        # (stable evals, snapshots, trace comparisons), not prompt caching.
+        paths.sort()
+        return paths
+    except PathEscapeError as e:
+        get_current_span().add_event('path_escape_attempt', {'path': path})
+        raise ModelRetry(str(e)) from e
+    except (EnvNotFoundError, EnvPermissionError, EnvNotADirectoryError) as e:
+        raise ModelRetry(str(e)) from e
+    except (EnvReadError,):
+        # TODO: This should be a ToolFailed error when I merge that in
+        # catching and re raising here to show the boundary where we change it
+        raise
+
+
 @dataclass
 class ExecutionEnv(AbstractCapability[AgentDepsT]):
     """Capability that exposes the execution environment to the agent.
@@ -212,10 +235,15 @@ class ExecutionEnv(AbstractCapability[AgentDepsT]):
             return await _read_file(self.environment, path, offset, limit)
 
         async def write_file(
-            path: Annotated[str, Field(description='Path to the file, relative to the workspace root.')],
-            data: Annotated[str, Field(description='Data to write to the file.')],
+            path: Annotated[
+                str,
+                Field(
+                    description='Path to the file, relative to the workspace root. Created if missing, overwritten if it exists.'
+                ),
+            ],
+            data: Annotated[str, Field(description='Data to write to the file. Replaces the entire file contents.')],
         ) -> None:
-            """Write a file to the execution environment."""
+            """Create or overwrite a file in the execution environment."""
             try:
                 await self.environment.write_file(path, data.encode('utf-8'))
             except EnvPermissionError as e:
@@ -301,10 +329,32 @@ class ExecutionEnv(AbstractCapability[AgentDepsT]):
                 # catching and re raising here to show the boundary where we change it
                 raise
 
+        async def glob(
+            path: Annotated[str, Field(description='Directory to search in, relative to the workspace root.')],
+            pattern: Annotated[
+                str,
+                Field(
+                    # The model reads this to learn our dialect. Two things it cannot infer and would
+                    # otherwise get wrong: (1) the pattern is matched RECURSIVELY at any depth -- a bare
+                    # `*.py` finds .py files in every subdirectory, unlike raw Python `glob` where `*`
+                    # stops at `/`. We imply recursion (rglob) so the model can't fall into the
+                    # silent-empty trap of typing `*.py` and wrongly concluding a subtree is empty. (2)
+                    # the concrete example patterns teach the syntax by demonstration, pi-style.
+                    description=(
+                        "Glob pattern, matched recursively at any depth. e.g. '*.py' (any .py file "
+                        "anywhere under the directory), '**/*.json', or 'src/**/*.py'."
+                    )
+                ),
+            ],
+        ) -> list[str]:
+            """Find files matching a glob pattern."""
+            return await _glob(self.environment, path, pattern)
+
         toolset.add_function(read_file, description='Read a file from the execution environment.')
-        toolset.add_function(write_file, description='Write a file to the execution environment.')
+        toolset.add_function(write_file, description='Create or overwrite a file in the execution environment.')
         toolset.add_function(edit_file, description='Replace a unique occurrence of text in a file.')
         toolset.add_function(ls, description='List the contents of a directory.')
         toolset.add_function(grep, description='Search a file or directory tree for a literal pattern.')
+        toolset.add_function(glob, description='Find files matching a glob pattern.')
 
         return toolset
