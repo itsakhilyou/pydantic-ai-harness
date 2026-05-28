@@ -234,9 +234,8 @@ class ExecutionEnv(AbstractCapability[AgentDepsT]):
             """List the contents of a directory."""
             try:
                 ls_result = await self.environment.ls(path)
-                if limit is not None:
-                    return [file.name + ('/' if file.is_directory else '') for file in ls_result[:limit]]
-                return [file.name + ('/' if file.is_directory else '') for file in ls_result]
+                entries = ls_result if limit is None else ls_result[:limit]
+                return [file.name + ('/' if file.is_directory else '') for file in entries]
             except PathEscapeError as e:
                 get_current_span().add_event('path_escape_attempt', {'path': path})
                 raise ModelRetry(str(e)) from e
