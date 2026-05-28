@@ -12,7 +12,7 @@ import pytest
 from inline_snapshot import snapshot
 
 from pydantic_ai_harness.environments import AbstractMatch
-from pydantic_ai_harness.environments.abstract import AbstractEnvironment
+from pydantic_ai_harness.environments.abstract import AbstractEnvironment, ShellCommandResult
 from pydantic_ai_harness.environments.exceptions import (
     EnvIsADirectoryError,
     EnvNotADirectoryError,
@@ -180,3 +180,47 @@ async def test_glob_excludes_directories(environment: AbstractEnvironment, tmp_p
     (tmp_path / 'sub').mkdir()
     (tmp_path / 'sub' / 'inner.txt').write_text('x')
     assert await environment.glob('.', 'sub') == []
+
+
+async def test_shell_captures_stdout(environment: AbstractEnvironment, tmp_path: Path) -> None:
+    result = await environment.shell_command('echo "hello"')
+    assert result == snapshot(ShellCommandResult(stdout=b'hello\n', stderr=b'', return_code=0, timed_out=False))
+
+
+async def test_shell_non_zero_exit_is_not_an_error(environment: AbstractEnvironment, tmp_path: Path) -> None:
+    result = await environment.shell_command('echo "hello" && exit 1')
+    assert result == snapshot(ShellCommandResult(stdout=b'hello\n', stderr=b'', return_code=1, timed_out=False))
+
+
+async def test_shell_captures_stderr_separately(environment: AbstractEnvironment, tmp_path: Path) -> None:
+    result = await environment.shell_command('echo "hello" >&2')
+    assert result == snapshot(ShellCommandResult(stdout=b'', stderr=b'hello\n', return_code=0, timed_out=False))
+
+
+async def test_shell_is_shell_interpreted(environment: AbstractEnvironment, tmp_path: Path) -> None:
+    result = await environment.shell_command('echo a && echo b')
+    assert result == snapshot(ShellCommandResult(stdout=b'a\nb\n', stderr=b'', return_code=0, timed_out=False))
+
+
+async def test_shell_runs_in_root(environment: AbstractEnvironment, tmp_path: Path) -> None:
+    result = await environment.shell_command('echo $PWD', timeout=1)
+    assert result == snapshot(
+        ShellCommandResult(
+            stdout=b'/private/var/folders/w5/b3glxyl5311dyplzzpxg3bpc0000gn/T/pytest-of-adtyavrdhn/pytest-140/test_shell_runs_in_root_local_0\n',
+            stderr=b'',
+            return_code=0,
+            timed_out=False,
+        )
+    )
+
+
+async def test_shell_no_state_persists_between_calls(environment: AbstractEnvironment, tmp_path: Path) -> None:
+    result = await environment.shell_command('export FOO=bar', timeout=1)
+    assert result == snapshot(ShellCommandResult(stdout=b'', stderr=b'', return_code=0, timed_out=False))
+    result = await environment.shell_command('echo $FOO', timeout=1)
+    assert result == snapshot(ShellCommandResult(stdout=b'\n', stderr=b'', return_code=0, timed_out=False))
+
+
+async def test_shell_timeout_sets_flag(environment: AbstractEnvironment, tmp_path: Path) -> None:
+    result = await environment.shell_command('sleep 10', timeout=1)
+    assert result == snapshot(ShellCommandResult(stdout=b'', stderr=b'', return_code=-15, timed_out=True))
