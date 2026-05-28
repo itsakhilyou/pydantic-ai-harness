@@ -6,6 +6,7 @@ permission errors, and the catch-all I/O error path. A Docker backend would exer
 concerns differently, so they are deliberately not part of the shared conformance suite.
 """
 
+import asyncio
 import os
 from pathlib import Path
 
@@ -181,3 +182,54 @@ async def test_glob_unreadable_directory_raises_permission(tmp_path: Path) -> No
             await env.glob('locked', '*.py')
     finally:
         box.chmod(0o755)  # let tmp_path cleanup remove it
+
+
+async def test_timeout_kills_the_whole_tree(tmp_path: Path) -> None:
+    # Proves the timeout kills the whole process GROUP, not just the bash leader we spawned.
+    #
+    # The command builds a small process tree:
+    #   bash (leader, its own process group via start_new_session=True)
+    #   |-- ( sleep 2; touch marker )  <- a SUBSHELL, backgrounded with `&` -> a separate
+    #   |                                 grandchild process that shares the leader's pgid
+    #   `-- sleep 30                   <- foreground, keeps the leader alive past the timeout
+    #                                     so the TIMEOUT ends the run, not the script finishing
+    #
+    # We can't ask the OS "is the grandchild still alive?" reliably (PID reuse, races), so we
+    # use a dead-man's switch: the grandchild only writes `marker` at t=2. If our killpg reaches
+    # the whole group, the grandchild dies at t=1 and never writes -> marker absent. If we only
+    # killed the leader (e.g. proc.kill()), the grandchild is orphaned, survives to t=2, and
+    # writes the file -> marker present. So "marker must not exist" == "the tree really died".
+    env = LocalEnvironment(root=str(tmp_path))
+    marker = tmp_path / 'marker.txt'
+    result = await env.shell_command(f'( sleep 2; touch {marker} ) & sleep 30', timeout=1)
+
+    assert result.timed_out is True
+    # Wait LONGER than the grandchild's t=2 write attempt. If an orphan survived, it has already
+    # written by now -- so checking after this sleep catches it. Checking immediately (the call
+    # returns at ~t=1 once the leader dies) would see "no marker yet" even with a live orphan
+    # and pass falsely; the sleep must outlast the orphan's delay-to-write for the assert to bite.
+    await asyncio.sleep(3)
+    assert not marker.exists()
+
+
+async def test_sigkill_escalation_kills_stubborn_child(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Proves the SIGKILL escalation: when a child IGNORES SIGTERM, we still force it down.
+    #
+    # `trap "" TERM` installs an empty SIGTERM handler -- the grandchild catches SIGTERM and does
+    # nothing, so (unlike the plain `sleep` in the test above) it survives the polite kill. That is
+    # exactly the case `_terminate_and_drain`'s `except TimeoutError -> SIGKILL` branch exists for:
+    # SIGTERM is ignored, the grace window elapses, and we escalate to SIGKILL (uncatchable -- you
+    # cannot trap it), which kills the grandchild before its t=2 `touch` -> marker stays absent.
+    #
+    # We shrink the grace to 0.1s by monkeypatching the private module constant (see its docstring:
+    # it's deliberately not a public knob, and a test of *this* module may patch this module's
+    # internals). Without this, the one test that hits the escalation branch would pay the full 5s.
+    monkeypatch.setattr('pydantic_ai_harness.environments.local._SIGTERM_GRACE_SECONDS', 0.1)
+
+    env = LocalEnvironment(root=str(tmp_path))
+    marker = tmp_path / 'marker.txt'
+    result = await env.shell_command(f'( trap "" TERM; sleep 2; touch {marker} ) & sleep 30', timeout=1)
+
+    assert result.timed_out is True
+    await asyncio.sleep(3)
+    assert not marker.exists()

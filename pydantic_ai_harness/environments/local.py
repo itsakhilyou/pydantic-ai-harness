@@ -19,6 +19,14 @@ from .exceptions import (
     PathEscapeError,
 )
 
+# Seconds to wait after SIGTERM before escalating to SIGKILL. Deliberately a private module
+# constant, NOT a public ctor knob: it describes the kill PROTOCOL (how long we politely wait for a
+# process to flush before forcing it down), not the user's workload. A user of the environment has
+# no information that would make them pick a better value -- unlike `root` or a command `timeout`,
+# where only they know the right answer. Exposing it would be a permanent API commitment we can't
+# easily walk back if teardown is later reworked (e.g. adaptive grace, two-phase kill); keeping it
+# private is the reversible choice -- promote it only if a real use case ever demands it. Tests that
+# need a faster grace monkeypatch this constant directly (honest: the test is *of* this module).
 _SIGTERM_GRACE_SECONDS = 5
 
 
@@ -56,15 +64,20 @@ async def _terminate_and_drain(proc: asyncio.subprocess.Process) -> tuple[bytes,
         os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
     except ProcessLookupError:
         pass
-    # Grace period: asyncio's child watcher updates proc.returncode in the background while the loop
-    # runs, so after sleeping we can tell whether SIGTERM actually killed it.
-    await asyncio.sleep(_SIGTERM_GRACE_SECONDS)
-    if proc.returncode is None:
-        # Ignored SIGTERM (or wedged) -> SIGKILL is uncatchable, guaranteed teardown.
-        try:
-            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-        except ProcessLookupError:
-            pass
+
+    # Give the LEADER the grace window to flush and exit on SIGTERM (event-based: returns the instant
+    # it dies, so a well-behaved process doesn't pay the full grace). But the leader exiting does NOT
+    # mean the group is empty -- a backgrounded `&` child outlives its parent. So after the wait we
+    # SIGKILL the whole group UNCONDITIONALLY to sweep any straggler that ignored SIGTERM; grace is for
+    # the leader (whose output we keep), and detached children already opted out of being waited on.
+    try:
+        await asyncio.wait_for(proc.wait(), timeout=_SIGTERM_GRACE_SECONDS)
+    except asyncio.TimeoutError:
+        pass
+    try:
+        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+    except ProcessLookupError:
+        pass
 
     # Process is dead -> pipes are at EOF -> read() returns buffered output without blocking. NOTE this
     # is best-effort/lossy: communicate() above already consumed (and on cancel, discarded) whatever it
