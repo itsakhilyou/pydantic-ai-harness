@@ -43,3 +43,7 @@ class EnvWriteError(ExecutionEnvironmentError):
     The catch-all for any OS error a write-shaped operation raises that is not one of the
     specific subclasses above. State may have been partially changed.
     """
+
+
+class EnvShellExecutionError(ExecutionEnvironmentError):
+    """Unexpected error executing a shell command."""

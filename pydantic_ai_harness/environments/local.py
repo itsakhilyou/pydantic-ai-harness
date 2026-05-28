@@ -14,9 +14,12 @@ from .exceptions import (
     EnvNotFoundError,
     EnvPermissionError,
     EnvReadError,
+    EnvShellExecutionError,
     EnvWriteError,
     PathEscapeError,
 )
+
+_SIGTERM_GRACE_SECONDS = 5
 
 
 async def _grep_file(root: str, path: str, pattern: str) -> list[AbstractMatch]:
@@ -189,9 +192,7 @@ class LocalEnvironment(AbstractEnvironment):
         elif shutil.which('sh') is not None:
             shell = 'sh'
         else:
-            # FIXME: OSError is the builtin alias for EnvironmentError and collides with how the
-            # capability layer maps env errors -- use a dedicated env exception type instead.
-            raise OSError(f'No bash or sh found in the environment root {self.root!r}')
+            raise EnvShellExecutionError(f'No bash or sh found in the environment root {self.root!r}')
 
         # create_subprocess_exec (async, argv list) -- not subprocess.run (blocks the loop) and not
         # create_subprocess_shell (hardcodes /bin/sh, defeats the resolution above). `-lc` = login
@@ -220,6 +221,8 @@ class LocalEnvironment(AbstractEnvironment):
             # and returns bytes.
             stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
         except asyncio.TimeoutError:
+            timed_out = True
+        finally:
             # TRAP: wait_for only cancelled the communicate() coroutine -- the process tree is STILL
             # ALIVE. Abandoning the await != killing it (OpenHands probe: a detached child survived).
             # killpg + getpgid, not proc.kill(): we signal the whole GROUP (created by setsid above) so
@@ -228,31 +231,32 @@ class LocalEnvironment(AbstractEnvironment):
             # ProcessLookupError = the process already exited in the window between the timeout firing
             # and this signal (a TOCTOU race, same shape as the filesystem jail). Already dead is the
             # outcome we wanted, so swallow it -- there's nothing left to kill.
-            try:
-                os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
-            except ProcessLookupError:
-                pass
-            # Grace period: asyncio's child watcher updates proc.returncode in the background while the
-            # loop runs, so after sleeping we can tell whether SIGTERM actually killed it.
-            await asyncio.sleep(5)
+
             if proc.returncode is None:
-                # Ignored SIGTERM (or wedged) -> SIGKILL is uncatchable, guaranteed teardown. We
-                # escalate rather than leak an orphan on a remote/billing backend. Same race guard:
-                # SIGTERM may have landed during the grace sleep, so the group can be gone by now.
                 try:
-                    os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                    os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
                 except ProcessLookupError:
                     pass
+                # Grace period: asyncio's child watcher updates proc.returncode in the background while the
+                # loop runs, so after sleeping we can tell whether SIGTERM actually killed it.
+                await asyncio.sleep(_SIGTERM_GRACE_SECONDS)
+                if proc.returncode is None:
+                    # Ignored SIGTERM (or wedged) -> SIGKILL is uncatchable, guaranteed teardown. We
+                    # escalate rather than leak an orphan on a remote/billing backend. Same race guard:
+                    # SIGTERM may have landed during the grace sleep, so the group can be gone by now.
+                    try:
+                        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
 
-            # Even though proc died there will be some partial stuff in the pipes so let us get that out
-            if proc.stdout is not None:
-                stdout = await proc.stdout.read()
-            if proc.stderr is not None:
-                stderr = await proc.stderr.read()
-            # Reap the zombie: we're the parent, so the dead process lingers in the process table
-            # holding its exit status + fds until we wait(). Also yields the final returncode.
-            await proc.wait()
-            timed_out = True
+                # Even though proc died there will be some partial stuff in the pipes so let us get that out
+                if proc.stdout is not None:
+                    stdout = await proc.stdout.read()
+                if proc.stderr is not None:
+                    stderr = await proc.stderr.read()
+                # Reap the zombie: we're the parent, so the dead process lingers in the process table
+                # holding its exit status + fds until we wait(). Also yields the final returncode.
+                await proc.wait()
 
         assert proc.returncode is not None
 
