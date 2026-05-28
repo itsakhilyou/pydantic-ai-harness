@@ -19,14 +19,9 @@ from .exceptions import (
     PathEscapeError,
 )
 
-# Seconds to wait after SIGTERM before escalating to SIGKILL. Deliberately a private module
-# constant, NOT a public ctor knob: it describes the kill PROTOCOL (how long we politely wait for a
-# process to flush before forcing it down), not the user's workload. A user of the environment has
-# no information that would make them pick a better value -- unlike `root` or a command `timeout`,
-# where only they know the right answer. Exposing it would be a permanent API commitment we can't
-# easily walk back if teardown is later reworked (e.g. adaptive grace, two-phase kill); keeping it
-# private is the reversible choice -- promote it only if a real use case ever demands it. Tests that
-# need a faster grace monkeypatch this constant directly (honest: the test is *of* this module).
+# Seconds between SIGTERM and SIGKILL. Private, not a public knob: it's a property of the kill
+# protocol, not the user's workload, so no caller could pick a better value -- and a public field
+# would be hard to walk back. Tests monkeypatch it for speed.
 _SIGTERM_GRACE_SECONDS = 5
 
 
@@ -56,12 +51,15 @@ async def _terminate_and_drain(proc: asyncio.subprocess.Process) -> tuple[bytes,
     if proc.returncode is not None:
         return None
 
-    # killpg + getpgid, not proc.kill(): signal the whole GROUP (created by start_new_session=True) so
-    # forked children don't orphan to init and keep running/billing. SIGTERM first (catchable) gives
-    # the tree a chance to flush/clean up. ProcessLookupError = it already exited in the race window
-    # between the timeout/cancel and this signal -- already dead is the outcome we wanted, so swallow.
+    # killpg, not proc.kill(): signal the whole GROUP so forked children don't orphan to init and keep
+    # running/billing. start_new_session=True made the leader a process-group LEADER, so its pgid == its
+    # pid -- we pass proc.pid directly rather than os.getpgid(proc.pid). That's deliberate: getpgid would
+    # raise ProcessLookupError once proc.wait() below reaps the leader, blinding us to a group whose
+    # backgrounded children are still alive. proc.pid is a stable int; the group persists while any
+    # member lives. SIGTERM first (catchable) lets the tree flush. ProcessLookupError from killpg == no
+    # member left == already dead, the outcome we wanted, so swallow.
     try:
-        os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+        os.killpg(proc.pid, signal.SIGTERM)
     except ProcessLookupError:
         pass
 
@@ -75,7 +73,7 @@ async def _terminate_and_drain(proc: asyncio.subprocess.Process) -> tuple[bytes,
     except asyncio.TimeoutError:
         pass
     try:
-        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        os.killpg(proc.pid, signal.SIGKILL)
     except ProcessLookupError:
         pass
 

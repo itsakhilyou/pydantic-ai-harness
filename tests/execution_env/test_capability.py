@@ -457,9 +457,7 @@ def _shell_env(
     return _ShellEnvironment(
         root='/x',
         data=b'',
-        command_result=ShellCommandResult(
-            stdout=stdout, stderr=stderr, return_code=return_code, timed_out=timed_out
-        ),
+        command_result=ShellCommandResult(stdout=stdout, stderr=stderr, return_code=return_code, timed_out=timed_out),
     )
 
 
