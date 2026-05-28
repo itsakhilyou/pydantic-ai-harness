@@ -1,10 +1,13 @@
 """Local environment using the local filesystem."""
 
+import asyncio
 import os
+import shutil
+import signal
 from dataclasses import dataclass
 from pathlib import Path
 
-from .abstract import AbstractEnvironment, AbstractFile, AbstractMatch
+from .abstract import AbstractEnvironment, AbstractFile, AbstractMatch, ShellCommandResult
 from .exceptions import (
     EnvIsADirectoryError,
     EnvNotADirectoryError,
@@ -172,3 +175,75 @@ class LocalEnvironment(AbstractEnvironment):
                 results.append(str(match.relative_to(root)))
 
         return results
+
+    async def shell_command(self, command: str, timeout: int | None = None) -> ShellCommandResult:
+        """Execute a shell command."""
+        # Resolve the shell instead of hardcoding: the ABC promises "a shell," not bash specifically
+        # (Alpine/minimal Docker images ship only `sh`). Prefer bash -- the model emits bash syntax
+        # (`[[ ]]`, arrays) -- and fall back to POSIX sh. We do NOT use the user's $SHELL: it may be
+        # fish/zsh, where the model's `&&`/`export` would break. POSIX-only for V1; a bare Windows box
+        # has neither bash nor sh, so `which` returns None and we fail fast here (use WSL/Docker).
+        # See agent_docs/shell-run-prior-art.md "Shell resolution & platform scope".
+        if shutil.which('bash') is not None:
+            shell = 'bash'
+        elif shutil.which('sh') is not None:
+            shell = 'sh'
+        else:
+            # FIXME: OSError is the builtin alias for EnvironmentError and collides with how the
+            # capability layer maps env errors -- use a dedicated env exception type instead.
+            raise OSError(f'No bash or sh found in the environment root {self.root!r}')
+
+        # create_subprocess_exec (async, argv list) -- not subprocess.run (blocks the loop) and not
+        # create_subprocess_shell (hardcodes /bin/sh, defeats the resolution above). `-lc` = login
+        # shell so it sources profile files and the command sees the user's PATH (nvm/pyenv); this is
+        # best-effort (login *bash* reads ~/.bash_profile, not ~/.zshrc). PIPE on both streams =
+        # captured bytes (no text=True) -> bytes-at-core contract. cwd = root so commands run in the
+        # jail. start_new_session=True calls setsid(): the child becomes its own process-GROUP leader
+        # so every process it forks shares one pgid -- the matched half of the killpg() below.
+        proc = await asyncio.create_subprocess_exec(
+            shell,
+            '-lc',
+            command,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            cwd=Path(self.root).resolve(),
+            start_new_session=True,
+        )
+
+        timed_out = False
+        stdout = b''
+        stderr = b''
+
+        try:
+            # wait_for(coro, None) == no limit, so timeout=None is the "no timeout" path for free.
+            # communicate() drains both pipes (a child that fills the ~64KB pipe buffer can't deadlock)
+            # and returns bytes.
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+        except asyncio.TimeoutError:
+            # TRAP: wait_for only cancelled the communicate() coroutine -- the process tree is STILL
+            # ALIVE. Abandoning the await != killing it (OpenHands probe: a detached child survived).
+            # killpg + getpgid, not proc.kill(): we signal the whole GROUP (created by setsid above) so
+            # forked children don't orphan to init and keep running/billing. SIGTERM first (catchable)
+            # gives the tree a chance to flush/clean up.
+            # FIXME: getpgid/killpg raise ProcessLookupError if the process already exited between the
+            # timeout and here (and again between SIGTERM and SIGKILL) -- guard "already dead = success".
+            os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+            # Grace period: asyncio's child watcher updates proc.returncode in the background while the
+            # loop runs, so after sleeping we can tell whether SIGTERM actually killed it.
+            await asyncio.sleep(5)
+            if proc.returncode is None:
+                # Ignored SIGTERM (or wedged) -> SIGKILL is uncatchable, guaranteed teardown. We
+                # escalate rather than leak an orphan on a remote/billing backend.
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+
+            # Even though proc died there will be some partial stuff in the pipes so let us get that out
+            # FIXME: proc.stdout/proc.stderr are StreamReader objects, not bytes -- this assigns the
+            # wrong type to a bytes field. Drain them instead, e.g. `await proc.stdout.read()` (guard
+            # for None), or restructure so communicate()'s partial output is captured.
+            stdout, stderr = proc.stdout, proc.stderr
+            # Reap the zombie: we're the parent, so the dead process lingers in the process table
+            # holding its exit status + fds until we wait(). Also yields the final returncode.
+            await proc.wait()
+            timed_out = True
+
+        return ShellCommandResult(stdout=stdout, stderr=stderr, return_code=proc.returncode, timed_out=timed_out)

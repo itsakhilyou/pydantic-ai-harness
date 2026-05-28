@@ -29,6 +29,23 @@ class AbstractMatch:
     """The line's number."""
 
 
+@dataclass(kw_only=True, frozen=True)
+class ShellCommandResult:
+    """The result of a shell command."""
+
+    stdout: bytes
+    """The command's stdout."""
+
+    stderr: bytes
+    """The command's stderr."""
+
+    return_code: int
+    """The command's return code."""
+
+    timed_out: bool
+    """Whether the command timed out."""
+
+
 @dataclass(kw_only=True)
 class AbstractEnvironment(ABC):
     """Abstract base class for all execution environments."""
@@ -128,5 +145,20 @@ class AbstractEnvironment(ABC):
             EnvNotADirectoryError: `path` is a file, not a directory.
             EnvPermissionError: The backend may not read `path`.
             EnvReadError: Any other I/O failure (nothing builtin leaks).
+        """
+        raise NotImplementedError  # pragma: no cover
+
+    @abstractmethod
+    async def shell_command(self, command: str) -> ShellCommandResult:
+        """Execute a shell command.
+
+        Args:
+            command: The command to execute.
+
+        Returns:
+            The command's result.
+
+        Raises:
+            EnvPermissionError: The backend may not execute command
         """
         raise NotImplementedError  # pragma: no cover
