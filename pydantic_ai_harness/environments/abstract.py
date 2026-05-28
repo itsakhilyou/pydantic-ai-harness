@@ -149,16 +149,24 @@ class AbstractEnvironment(ABC):
         raise NotImplementedError  # pragma: no cover
 
     @abstractmethod
-    async def shell_command(self, command: str) -> ShellCommandResult:
-        """Execute a shell command.
+    async def shell_command(self, command: str, timeout: int | None = None) -> ShellCommandResult:
+        """Run `command` in a shell and return its captured output and exit code.
+
+        The command is shell-interpreted (pipes, `&&`, globs all work) and runs in a fresh process; no
+        state (cwd, env, vars) persists between calls. A non-zero exit is **not** an error -- it
+        returns a result with that `return_code`; a timeout returns a result with `timed_out=True`.
+        Neither raises. Backends must not silently make execution stateful.
 
         Args:
-            command: The command to execute.
+            command: The shell command to run.
+            timeout: Seconds before the process tree is killed and the result returned with
+                `timed_out=True`. `None` means no timeout.
 
         Returns:
-            The command's result.
+            A `ShellCommandResult` for any command that ran, whatever its exit code.
 
         Raises:
-            EnvPermissionError: The backend may not execute command
+            EnvShellExecutionError: The environment could not start a shell at all (none available, or
+                the spawn failed). Not raised for a non-zero exit or a timeout.
         """
         raise NotImplementedError  # pragma: no cover

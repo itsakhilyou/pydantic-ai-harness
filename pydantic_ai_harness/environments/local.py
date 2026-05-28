@@ -36,6 +36,47 @@ async def _grep_file(root: str, path: str, pattern: str) -> list[AbstractMatch]:
     return results
 
 
+async def _terminate_and_drain(proc: asyncio.subprocess.Process) -> tuple[bytes, bytes] | None:
+    """Kill the process group (SIGTERM -> grace -> SIGKILL), reap it, and return drained output.
+
+    Returns None if the process already exited (the happy path): `communicate()` already reaped it
+    and captured its output, so we must not re-drain -- reading an EOF'd stream returns b'' and would
+    clobber the real output. Extracted so the whole teardown can be wrapped in a single
+    `asyncio.shield` (see `shell_command`): a cancellation must not abort us partway and orphan a
+    SIGTERM-ignoring child.
+    """
+    if proc.returncode is not None:
+        return None
+
+    # killpg + getpgid, not proc.kill(): signal the whole GROUP (created by start_new_session=True) so
+    # forked children don't orphan to init and keep running/billing. SIGTERM first (catchable) gives
+    # the tree a chance to flush/clean up. ProcessLookupError = it already exited in the race window
+    # between the timeout/cancel and this signal -- already dead is the outcome we wanted, so swallow.
+    try:
+        os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+    # Grace period: asyncio's child watcher updates proc.returncode in the background while the loop
+    # runs, so after sleeping we can tell whether SIGTERM actually killed it.
+    await asyncio.sleep(_SIGTERM_GRACE_SECONDS)
+    if proc.returncode is None:
+        # Ignored SIGTERM (or wedged) -> SIGKILL is uncatchable, guaranteed teardown.
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+
+    # Process is dead -> pipes are at EOF -> read() returns buffered output without blocking. NOTE this
+    # is best-effort/lossy: communicate() above already consumed (and on cancel, discarded) whatever it
+    # had read, so we only recover what was still in the pipe. See shell_command's data-loss note.
+    stdout = await proc.stdout.read() if proc.stdout is not None else b''
+    stderr = await proc.stderr.read() if proc.stderr is not None else b''
+    # Reap the zombie: we're the parent, so the dead process lingers in the process table holding its
+    # exit status + fds until we wait(). Also yields the final returncode.
+    await proc.wait()
+    return stdout, stderr
+
+
 @dataclass(kw_only=True)
 class LocalEnvironment(AbstractEnvironment):
     """Filesystem/shell environment backed by the local machine's filesystem.
@@ -180,7 +221,36 @@ class LocalEnvironment(AbstractEnvironment):
         return results
 
     async def shell_command(self, command: str, timeout: int | None = None) -> ShellCommandResult:
-        """Execute a shell command."""
+        """Run `command` in a shell and return its captured output and exit code.
+
+        The command is shell-interpreted (pipes, `&&`, globs, `$VARS` all work) and runs in a fresh
+        process rooted at `root`; no state (cwd, env, vars) persists between calls -- sequence with
+        `cd x && ...` in one call when you need it.
+
+        A command that exits non-zero is **not** an error: it returns a `ShellCommandResult` with that
+        `return_code`. Likewise a timeout returns a result with `timed_out=True`, not an exception. The
+        only raise is when the environment itself can't run a shell (see Raises).
+
+        Partial output on timeout is LOSSY (V1, deliberate): `communicate()` discards what it had
+        already read into its own buffers when `wait_for` cancels it, so a timed-out command recovers
+        only the *tail* still left in the pipe, not the full output. Accepted to keep the happy path
+        simple; the fix (own the read buffers via reader tasks) is deferred and also unlocks streaming.
+        See agent_docs/shell-run-prior-art.md "Partial output on timeout".
+
+        Args:
+            command: The shell command to run.
+            timeout: Seconds before the process tree is killed (SIGTERM -> grace -> SIGKILL) and the
+                result returned with `timed_out=True`. `None` means no timeout.
+
+        Returns:
+            A `ShellCommandResult` with captured `stdout`/`stderr` (bytes), `return_code`, and
+            `timed_out`. Present for any command that ran, whatever its exit code.
+
+        Raises:
+            EnvShellExecutionError: The environment could not start a shell at all -- no `bash`/`sh`
+                available, or the spawn failed (e.g. a broken `root`). Not raised for a non-zero exit
+                or a timeout.
+        """
         # Resolve the shell instead of hardcoding: the ABC promises "a shell," not bash specifically
         # (Alpine/minimal Docker images ship only `sh`). Prefer bash -- the model emits bash syntax
         # (`[[ ]]`, arrays) -- and fall back to POSIX sh. We do NOT use the user's $SHELL: it may be
@@ -201,15 +271,20 @@ class LocalEnvironment(AbstractEnvironment):
         # captured bytes (no text=True) -> bytes-at-core contract. cwd = root so commands run in the
         # jail. start_new_session=True calls setsid(): the child becomes its own process-GROUP leader
         # so every process it forks shares one pgid -- the matched half of the killpg() below.
-        proc = await asyncio.create_subprocess_exec(
-            shell,
-            '-lc',
-            command,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            cwd=Path(self.root).resolve(),
-            start_new_session=True,
-        )
+
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                shell,
+                '-lc',
+                command,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                cwd=Path(self.root).resolve(),
+                start_new_session=True,
+            )
+
+        except OSError as e:
+            raise EnvShellExecutionError(f'Failed to create a subprocess for the command {command!r}: {str(e)}') from e
 
         timed_out = False
         stdout = b''
@@ -221,42 +296,24 @@ class LocalEnvironment(AbstractEnvironment):
             # and returns bytes.
             stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
         except asyncio.TimeoutError:
-            timed_out = True
-        finally:
             # TRAP: wait_for only cancelled the communicate() coroutine -- the process tree is STILL
             # ALIVE. Abandoning the await != killing it (OpenHands probe: a detached child survived).
-            # killpg + getpgid, not proc.kill(): we signal the whole GROUP (created by setsid above) so
-            # forked children don't orphan to init and keep running/billing. SIGTERM first (catchable)
-            # gives the tree a chance to flush/clean up.
-            # ProcessLookupError = the process already exited in the window between the timeout firing
-            # and this signal (a TOCTOU race, same shape as the filesystem jail). Already dead is the
-            # outcome we wanted, so swallow it -- there's nothing left to kill.
-
-            if proc.returncode is None:
-                try:
-                    os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
-                except ProcessLookupError:
-                    pass
-                # Grace period: asyncio's child watcher updates proc.returncode in the background while the
-                # loop runs, so after sleeping we can tell whether SIGTERM actually killed it.
-                await asyncio.sleep(_SIGTERM_GRACE_SECONDS)
-                if proc.returncode is None:
-                    # Ignored SIGTERM (or wedged) -> SIGKILL is uncatchable, guaranteed teardown. We
-                    # escalate rather than leak an orphan on a remote/billing backend. Same race guard:
-                    # SIGTERM may have landed during the grace sleep, so the group can be gone by now.
-                    try:
-                        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-                    except ProcessLookupError:
-                        pass
-
-                # Even though proc died there will be some partial stuff in the pipes so let us get that out
-                if proc.stdout is not None:
-                    stdout = await proc.stdout.read()
-                if proc.stderr is not None:
-                    stderr = await proc.stderr.read()
-                # Reap the zombie: we're the parent, so the dead process lingers in the process table
-                # holding its exit status + fds until we wait(). Also yields the final returncode.
-                await proc.wait()
+            # The actual teardown is shared with the cancellation path, so it lives in the `finally`.
+            timed_out = True
+        finally:
+            # Runs on success, timeout, AND cancellation. The helper no-ops if the process already
+            # exited (happy path), else kills the group and returns drained partial output.
+            #
+            # asyncio.shield: if the caller cancels us mid-run, the teardown still runs to completion
+            # (kills the group + reaps) instead of being aborted partway -- which would orphan a
+            # SIGTERM-ignoring child. The CancelledError still propagates out of this await afterward,
+            # so on cancellation we never reach the `return` (the caller gets cancelled, not a result),
+            # and `drained` is never assigned -- which is why the assignment is guarded.
+            # KNOWN EDGE (V1): if the event LOOP itself is shutting down, the shielded cleanup may not
+            # finish. Accepted -- a race-free fix needs a cleanup running outside the loop's teardown.
+            drained = await asyncio.shield(_terminate_and_drain(proc))
+            if drained is not None:  # None == happy path; keep communicate()'s output untouched
+                stdout, stderr = drained
 
         assert proc.returncode is not None
 
