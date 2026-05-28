@@ -246,6 +246,7 @@ class ExecutionEnv(AbstractCapability[AgentDepsT]):
                 # docstring for why the bound lives here and not in the backend contract.
                 # (`[:None]` is the whole list, so this single expression covers the unbounded case.)
                 ls_result = await self.environment.ls(path)
+                ls_result.sort(key=lambda f: f.name)
                 return [file.name + ('/' if file.is_directory else '') for file in ls_result[:limit]]
             except PathEscapeError as e:
                 get_current_span().add_event('path_escape_attempt', {'path': path})
