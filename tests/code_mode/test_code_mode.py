@@ -1855,6 +1855,11 @@ class TestToolSearchIntegration:
         assert ToolSearch in ordering.wraps
 
 
+def _unused_os_callback(fn: OsFunction, args: tuple[Any, ...], kwargs: dict[str, Any]) -> Any:
+    """An `os` callback for tests that only assert description/forwarding, never run code."""
+    return NOT_HANDLED  # pragma: no cover - never invoked by these tests
+
+
 class TestCodeModeOSAccess:
     """`CodeMode(os=...)` / `mount=...` give sandboxed code host-backed OS access."""
 
@@ -1869,11 +1874,7 @@ class TestCodeModeOSAccess:
 
     async def test_description_with_os_callback_notes_host_access(self) -> None:
         """An `os` callback swaps the restriction line for the host-access note."""
-
-        def os_cb(fn: OsFunction, args: tuple[Any, ...], kwargs: dict[str, Any]) -> Any:
-            return NOT_HANDLED  # pragma: no cover - not invoked; this test only checks the description
-
-        wrapper = CodeMode[None](os=os_cb).get_wrapper_toolset(_build_function_toolset(add))
+        wrapper = CodeMode[None](os=_unused_os_callback).get_wrapper_toolset(_build_function_toolset(add))
         assert isinstance(wrapper, CodeModeToolset)
         description = (await wrapper.get_tools(build_run_context(None)))['run_code'].tool_def.description
         assert description is not None
@@ -1892,12 +1893,8 @@ class TestCodeModeOSAccess:
 
     async def test_description_host_access_note_shows_with_no_sandboxed_tools(self) -> None:
         """The host-access note appears even when no tools are sandboxed (base description)."""
-
-        def os_cb(fn: OsFunction, args: tuple[Any, ...], kwargs: dict[str, Any]) -> Any:
-            return NOT_HANDLED  # pragma: no cover - not invoked; this test only checks the description
-
         # `tools=[]` leaves every tool native, so `run_code` exposes no callable functions.
-        wrapper = CodeMode[None](os=os_cb, tools=[]).get_wrapper_toolset(_build_function_toolset(add))
+        wrapper = CodeMode[None](os=_unused_os_callback, tools=[]).get_wrapper_toolset(_build_function_toolset(add))
         assert isinstance(wrapper, CodeModeToolset)
         description = (await wrapper.get_tools(build_run_context(None)))['run_code'].tool_def.description
         assert description is not None
@@ -1923,6 +1920,25 @@ class TestCodeModeOSAccess:
         result = await wrapper.call_tool('run_code', {'code': code}, ctx, tools['run_code'])
         assert result.return_value == {'sum': 5, 'home': 'envval'}
 
+    async def test_os_access_persists_across_run_code_calls(self) -> None:
+        """`os` is supplied on every `feed_start`, so OS access still works on a later
+        `run_code` call that reuses the persisted (non-fresh) REPL."""
+
+        def os_cb(fn: OsFunction, args: tuple[Any, ...], kwargs: dict[str, Any]) -> Any:
+            if fn == 'os.getenv':
+                return 'persisted'
+            return NOT_HANDLED  # pragma: no cover - sandbox only calls os.getenv here
+
+        wrapper = CodeMode[None](os=os_cb).get_wrapper_toolset(_build_function_toolset(add))
+        assert isinstance(wrapper, CodeModeToolset)
+        ctx = await build_ctx(None, wrapper)
+        tools = await wrapper.get_tools(ctx)
+        first = await wrapper.call_tool('run_code', {'code': "import os\nos.getenv('A')"}, ctx, tools['run_code'])
+        assert first.return_value == 'persisted'
+        # Second call reuses the REPL (so `import os` carries over) and must still dispatch.
+        second = await wrapper.call_tool('run_code', {'code': "os.getenv('B')"}, ctx, tools['run_code'])
+        assert second.return_value == 'persisted'
+
     async def test_abstract_os_instance_dispatches_inside_run_code(self) -> None:
         """An `AbstractOS` instance is accepted as the `os` value and dispatches OS calls."""
         wrapper = CodeMode[None](os=OSAccess(environ={'THING': 'fromabs'})).get_wrapper_toolset(
@@ -1933,6 +1949,20 @@ class TestCodeModeOSAccess:
         tools = await wrapper.get_tools(ctx)
         result = await wrapper.call_tool('run_code', {'code': "import os\nos.getenv('THING')"}, ctx, tools['run_code'])
         assert result.return_value == 'fromabs'
+
+    async def test_os_callback_exception_becomes_model_retry(self) -> None:
+        """A raising `os` callback surfaces as a `ModelRetry`, like any other sandbox runtime
+        error -- it must not crash the agent loop."""
+
+        def os_cb(fn: OsFunction, args: tuple[Any, ...], kwargs: dict[str, Any]) -> Any:
+            raise ValueError('boom from os')
+
+        wrapper = CodeMode[None](os=os_cb).get_wrapper_toolset(_build_function_toolset(add))
+        assert isinstance(wrapper, CodeModeToolset)
+        ctx = await build_ctx(None, wrapper)
+        tools = await wrapper.get_tools(ctx)
+        with pytest.raises(ModelRetry, match='boom from os'):
+            await wrapper.call_tool('run_code', {'code': "import os\nos.getenv('X')"}, ctx, tools['run_code'])
 
     async def test_mount_exposes_host_directory(self, tmp_path: Any) -> None:
         """A `mount` exposes a host directory inside the sandbox, threaded through resumes."""
@@ -1947,16 +1977,27 @@ class TestCodeModeOSAccess:
         result = await wrapper.call_tool('run_code', {'code': code}, ctx, tools['run_code'])
         assert result.return_value == 'hello-from-host'
 
+    async def test_mount_accepts_list_of_directories(self, tmp_path: Any) -> None:
+        """`mount` accepts a `list[MountDir]`; each directory is exposed at its virtual path."""
+        (tmp_path / 'a').mkdir()
+        (tmp_path / 'b').mkdir()
+        (tmp_path / 'a' / 'f.txt').write_text('AA')
+        (tmp_path / 'b' / 'f.txt').write_text('BB')
+        mounts = [MountDir('/a', str(tmp_path / 'a')), MountDir('/b', str(tmp_path / 'b'))]
+        wrapper = CodeMode[None](mount=mounts).get_wrapper_toolset(_build_function_toolset(add))
+        assert isinstance(wrapper, CodeModeToolset)
+        ctx = await build_ctx(None, wrapper)
+        tools = await wrapper.get_tools(ctx)
+        code = "from pathlib import Path\nPath('/a/f.txt').read_text() + Path('/b/f.txt').read_text()"
+        result = await wrapper.call_tool('run_code', {'code': code}, ctx, tools['run_code'])
+        assert result.return_value == 'AABB'
+
     def test_capability_forwards_os_and_mount_to_toolset(self, tmp_path: Any) -> None:
         """`CodeMode` forwards `os`/`mount` onto the `CodeModeToolset` it builds."""
-
-        def os_cb(fn: OsFunction, args: tuple[Any, ...], kwargs: dict[str, Any]) -> Any:
-            return NOT_HANDLED  # pragma: no cover - never invoked; only identity is asserted
-
         mount = MountDir('/work', str(tmp_path))
-        wrapper = CodeMode[None](os=os_cb, mount=mount).get_wrapper_toolset(_build_function_toolset(add))
+        wrapper = CodeMode[None](os=_unused_os_callback, mount=mount).get_wrapper_toolset(_build_function_toolset(add))
         assert isinstance(wrapper, CodeModeToolset)
-        assert wrapper.os is os_cb
+        assert wrapper.os is _unused_os_callback
         assert wrapper.mount is mount
 
 
