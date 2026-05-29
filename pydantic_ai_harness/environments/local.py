@@ -276,9 +276,11 @@ class LocalEnvironment(AbstractEnvironment):
             raise EnvShellExecutionError(f'No bash or sh found in the environment root {self.root!r}')
 
         # create_subprocess_exec (async, argv list) -- not subprocess.run (blocks the loop) and not
-        # create_subprocess_shell (hardcodes /bin/sh, defeats the resolution above). `-lc` = login
-        # shell so it sources profile files and the command sees the user's PATH (nvm/pyenv); this is
-        # best-effort (login *bash* reads ~/.bash_profile, not ~/.zshrc). PIPE on both streams =
+        # create_subprocess_shell (hardcodes /bin/sh, defeats the resolution above). `-c` (NOT `-lc`):
+        # a non-login shell. We dropped `-l` -- it sourced profile for nvm/pyenv PATH but cost startup
+        # time + non-determinism (and on macOS read ~/.bash_profile not ~/.zshrc, so it was already
+        # imperfect), with no concrete consumer needing it. Add `-l` back when a use case demands it.
+        # PIPE on both streams =
         # captured bytes (no text=True) -> bytes-at-core contract. cwd = root so commands run in the
         # jail. start_new_session=True calls setsid(): the child becomes its own process-GROUP leader
         # so every process it forks shares one pgid -- the matched half of the killpg() below.
@@ -286,7 +288,7 @@ class LocalEnvironment(AbstractEnvironment):
         try:
             proc = await asyncio.create_subprocess_exec(
                 shell,
-                '-lc',
+                '-c',
                 command,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
