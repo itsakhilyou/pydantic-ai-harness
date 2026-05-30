@@ -39,19 +39,25 @@ class DockerEnvironment(AbstractEnvironment):
         )
 
     async def read_file(self, path: str) -> bytes:
+        """Skeleton: see class docstring; raises `NotImplementedError`."""
         raise self._not_implemented()
 
     async def write_file(self, path: str, data: bytes) -> None:
+        """Skeleton: see class docstring; raises `NotImplementedError`."""
         raise self._not_implemented()
 
     async def ls(self, path: str) -> list[AbstractFile]:
+        """Skeleton: see class docstring; raises `NotImplementedError`."""
         raise self._not_implemented()
 
     async def grep(self, path: str, pattern: str) -> list[AbstractMatch]:
+        """Skeleton: see class docstring; raises `NotImplementedError`."""
         raise self._not_implemented()
 
     async def glob(self, path: str, pattern: str) -> list[str]:
+        """Skeleton: see class docstring; raises `NotImplementedError`."""
         raise self._not_implemented()
 
     async def shell_command(self, command: str, timeout: float | None = None) -> ShellCommandResult:
+        """Skeleton: see class docstring; raises `NotImplementedError`."""
         raise self._not_implemented()

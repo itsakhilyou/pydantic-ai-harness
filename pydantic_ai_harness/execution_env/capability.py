@@ -2,11 +2,12 @@
 
 import os
 from dataclasses import dataclass, field
-from typing import Literal, assert_never
+from typing import Literal
 
 from pydantic_ai import FunctionToolset
 from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.tools import AgentDepsT
+from typing_extensions import assert_never
 
 from ..environments.abstract import AbstractEnvironment
 from ..environments.docker import DockerEnvironment
