@@ -2,7 +2,7 @@
 
 Give an agent filesystem and shell access — over a pluggable backend, so the same tools work whether the agent runs against your local machine or an isolated container.
 
-> **Status: in development.** `read_file`, `write_file`/edit, explore (`ls`/`glob`/`grep`), and `shell` are complete and tested. `LocalEnvironment` works today; `DockerEnvironment` is planned. This README describes the intended shape.
+> **Status: in development.** `read_file`, `write_file`/edit, explore (`ls`/`glob`/`grep`), and `shell` are complete and tested against `LocalEnvironment`. `DockerEnvironment` exists as an API skeleton — `environment='docker'` and `DockerEnvironment(...)` typecheck and wire through, but calling any tool today raises `NotImplementedError`. The real backend is coming next. This README describes the intended shape.
 
 ## The idea
 
@@ -19,28 +19,44 @@ The capability is written once; each backend implements the same operations its 
 
 ## Usage
 
+The common case is one line — the agent runs against your **current working directory** with a local backend:
+
 ```python
 from pydantic_ai import Agent
 from pydantic_ai_harness import ExecutionEnv
-from pydantic_ai_harness.environments import LocalEnvironment
 
-agent = Agent(
-    'anthropic:claude-sonnet-4-6',
-    capabilities=[ExecutionEnv(environment=LocalEnvironment(root='/path/to/workspace'))],
-)
+agent = Agent('anthropic:claude-sonnet-4-6', capabilities=[ExecutionEnv()])
 
 result = agent.run_sync('Read pyproject.toml and tell me the project name.')
 print(result.output)
 ```
 
-The agent calls `read_file('pyproject.toml')`; the tool delegates to the environment, which returns the file's bytes; the capability decodes them to text for the model. Swap `LocalEnvironment` for `DockerEnvironment` and nothing else changes.
+`ExecutionEnv()` defaults to `environment='local'`, which hands the agent your `cwd`. For container isolation (skeleton today; real implementation coming next), use the matching string:
+
+```python
+ExecutionEnv(environment='docker')
+```
+
+When you want to **configure** the backend — a different root, a specific Docker image, a custom backend — pass an `AbstractEnvironment` instance instead of a string:
+
+```python
+from pydantic_ai_harness.environments import DockerEnvironment, LocalEnvironment
+
+# Local rooted somewhere other than cwd:
+ExecutionEnv(environment=LocalEnvironment(root='/path/to/workspace'))
+
+# Docker with a chosen image (skeleton today; real backend coming):
+ExecutionEnv(environment=DockerEnvironment(image='python:3.12-slim'))
+```
+
+The agent's tools (`read_file`, `write_file`/`edit_file`, `ls`/`glob`/`grep`, `shell`) are the same on every backend — only the backend changes.
 
 ## Backends
 
 | Backend | What it is | Use for |
 |---|---|---|
 | `LocalEnvironment` | Operations run against your local filesystem, rooted at `root`. | Trusted, local development. |
-| `DockerEnvironment` *(planned)* | Operations run inside a container. The container is the isolation boundary. | Untrusted / model-generated code. |
+| `DockerEnvironment` *(skeleton; not yet usable)* | Operations run inside a container. The container is the isolation boundary. | Untrusted / model-generated code. |
 
 ## Security
 
