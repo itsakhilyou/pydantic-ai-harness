@@ -88,7 +88,7 @@ Write and run Python code in a sandboxed environment.
 The sandbox uses Monty, a subset of Python. Key restrictions:
 - **No classes**: class definitions are not supported
 - **No third-party libraries**: only the standard library modules listed below can be used
-- **Importable standard library modules**: `sys`, `typing`, `asyncio`, `math`, `json`, `re`, `datetime`, `os`, `pathlib`. These must be imported at the top of your snippet before use, just like in regular Python. For example: `import asyncio` then `results = await asyncio.gather(tool_one(...), tool_two(...))`."""
+- **Importable standard library modules**: `sys`, `typing`, `asyncio`, `math`, `json`, `re`, `datetime`, `os`, `pathlib`. These must be imported before use, just like in regular Python. For example: `import asyncio` then `results = await asyncio.gather(tool_one(...), tool_two(...))`."""
 
 # Timing/OS restriction line, swapped depending on what host access the agent
 # configured. Three states, because `mount` and `os` enable different things:
@@ -105,7 +105,7 @@ _MOUNT_ONLY_NOTE = (
 )
 _OS_ENABLED_NOTE = (
     '- **Host-backed OS access**: `pathlib.Path` operations, `os.getenv`/`os.environ`, '
-    '`datetime.datetime.now()`, and `datetime.date.today()` are routed to the host environment '
+    '`datetime.datetime.now()`, and `datetime.date.today()` are routed to the OS handler '
     'configured for this agent (availability depends on that configuration). `asyncio.sleep` and '
     'the `time` module remain unavailable.'
 )
