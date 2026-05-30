@@ -1,6 +1,7 @@
 """Execution environments for Pydantic AI."""
 
 from .abstract import AbstractEnvironment, AbstractFile, AbstractMatch
+from .docker import DockerEnvironment
 from .local import LocalEnvironment
 
-__all__ = ['AbstractEnvironment', 'AbstractFile', 'AbstractMatch', 'LocalEnvironment']
+__all__ = ['AbstractEnvironment', 'AbstractFile', 'AbstractMatch', 'DockerEnvironment', 'LocalEnvironment']

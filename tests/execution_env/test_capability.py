@@ -12,6 +12,7 @@ once, in `tests/environments/`. The single end-to-end test below wires a real
 `LocalEnvironment` through an agent to prove the capability composes.
 """
 
+import os
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -546,3 +547,27 @@ async def test_execution_env_capability_read_file(tmp_path: Path) -> None:
         if isinstance(part, ToolReturnPart) and part.tool_name == 'read_file'
     ]
     assert returns == ['Hello, world!']
+
+
+def test_string_local_resolves_to_local_environment_at_cwd() -> None:
+    """`ExecutionEnv()` with the default string resolves to a `LocalEnvironment` rooted at cwd."""
+    cap = ExecutionEnv[None]()
+    env = cap._environment  # pyright: ignore[reportPrivateUsage]
+    assert isinstance(env, LocalEnvironment)
+    assert env.root == os.getcwd()
+
+
+def test_string_docker_resolves_to_docker_environment() -> None:
+    """`ExecutionEnv(environment='docker')` resolves to a (skeleton) `DockerEnvironment`."""
+    from pydantic_ai_harness.environments.docker import DockerEnvironment
+
+    cap = ExecutionEnv[None](environment='docker')
+    env = cap._environment  # pyright: ignore[reportPrivateUsage]
+    assert isinstance(env, DockerEnvironment)
+
+
+def test_passed_instance_is_used_as_is() -> None:
+    """A user-supplied `AbstractEnvironment` is used verbatim (the power-user / configured path)."""
+    custom = LocalEnvironment(root='/tmp')
+    cap = ExecutionEnv[None](environment=custom)
+    assert cap._environment is custom  # pyright: ignore[reportPrivateUsage]
