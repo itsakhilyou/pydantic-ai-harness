@@ -35,8 +35,6 @@ def build_parser() -> argparse.ArgumentParser:
 
 def configure_logfire() -> None:
     """Configure Logfire and instrument Pydantic AI (no-op without a token)."""
-    # send_to_logfire='if-token-present' keeps the CLI usable without auth: with a token
-    # configured you get full traces, without one it's a no-op rather than an error.
     logfire.configure(send_to_logfire='if-token-present', service_name='harness-cli')
     logfire.instrument_pydantic_ai()
 
@@ -48,7 +46,7 @@ async def main() -> None:
 
     environment = LocalEnvironment(root=args.root)
     agent = Agent(
-        model='anthropic:claude-sonnet-4-6',
+        model=args.model,
         capabilities=[ExecutionEnv(environment=environment)],
         instructions='You are a coding agent that can read and write files in the workspace.',
     )
