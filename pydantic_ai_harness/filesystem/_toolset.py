@@ -104,8 +104,17 @@ class FileSystemToolset(FunctionToolset[Any]):
 
         return real
 
-    def _check_access(self, path: str, *, write: bool = False) -> None:
-        """Validate path against allow/deny/protected patterns."""
+    def _check_access(self, path: str, *, write: bool = False, check_allowed: bool = True) -> None:
+        """Validate path against allow/deny/protected patterns.
+
+        `check_allowed=False` skips the `allowed_patterns` gate. Walkers
+        (`list_directory`, `search_files`, `find_files`) pass it so their root
+        directory isn't required to match `allowed_patterns` itself — `.` or
+        `src` would never match a file pattern like `src/*.py`. The walk's
+        entries are still filtered against `allowed_patterns` per-entry via
+        `_is_accessible`. Denied and protected patterns continue to gate the
+        root.
+        """
         if write and self._protected_patterns:
             matched = self._first_matching_pattern(path, self._protected_patterns)
             if matched:
@@ -116,7 +125,7 @@ class FileSystemToolset(FunctionToolset[Any]):
             if matched:
                 raise PermissionError(f'Path {path!r} is denied by pattern {matched!r}.')
 
-        if self._allowed_patterns:
+        if check_allowed and self._allowed_patterns:
             if not any(fnmatch.fnmatch(path, p) for p in self._allowed_patterns):
                 raise PermissionError(f'Path {path!r} does not match any allowed pattern.')
 
@@ -137,9 +146,9 @@ class FileSystemToolset(FunctionToolset[Any]):
             return False
         return True
 
-    def _safe_resolve(self, path: str, *, write: bool = False) -> Path:
+    def _safe_resolve(self, path: str, *, write: bool = False, check_allowed: bool = True) -> Path:
         """Resolve and access-check a path in one step."""
-        self._check_access(path, write=write)
+        self._check_access(path, write=write, check_allowed=check_allowed)
         return self._resolve_path(path)
 
     async def read_file(self, path: str, *, offset: int = 0, limit: int | None = None) -> str:
@@ -257,7 +266,10 @@ class FileSystemToolset(FunctionToolset[Any]):
         Returns:
             A newline-separated listing with type indicators and sizes.
         """
-        resolved = self._safe_resolve(path)
+        # The listing root is gated by denied/protected patterns but not by
+        # allowed_patterns: a directory like '.' never matches a file pattern.
+        # Entries are filtered per-entry against allowed_patterns below.
+        resolved = self._safe_resolve(path, check_allowed=False)
         if not resolved.is_dir():
             raise NotADirectoryError(f'Not a directory: {path}')
 
@@ -293,7 +305,9 @@ class FileSystemToolset(FunctionToolset[Any]):
         Returns:
             Matching lines formatted as file:line_number:text.
         """
-        resolved = self._safe_resolve(path)
+        # See list_directory: the search root isn't gated by allowed_patterns;
+        # matched files are filtered per-entry below.
+        resolved = self._safe_resolve(path, check_allowed=False)
         try:
             compiled = re.compile(pattern)
         except re.error as e:
@@ -350,7 +364,9 @@ class FileSystemToolset(FunctionToolset[Any]):
         Returns:
             Newline-separated list of matching file paths relative to root.
         """
-        resolved = self._safe_resolve(path)
+        # See list_directory: the find root isn't gated by allowed_patterns;
+        # matched entries are filtered per-entry below.
+        resolved = self._safe_resolve(path, check_allowed=False)
         if not resolved.is_dir():
             raise NotADirectoryError(f'Not a directory: {path}')
 

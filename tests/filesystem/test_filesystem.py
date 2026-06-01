@@ -444,6 +444,24 @@ class TestListDirectory:
         assert 'visible.txt' in result
         assert '.env' not in result
 
+    async def test_list_root_allowed_patterns_filters_entries(self, fs_root: Path) -> None:
+        # A file-shaped allowed pattern must not make the root unlistable: '.'
+        # is always listed, and entries are filtered against the pattern.
+        (fs_root / 'keep.py').write_text('ok\n')
+        (fs_root / 'skip.md').write_text('ok\n')
+        ts = FileSystemToolset(
+            root_dir=fs_root,
+            allowed_patterns=['*.py'],
+            denied_patterns=[],
+            protected_patterns=[],
+            max_read_lines=2000,
+            max_search_results=1000,
+            max_find_results=1000,
+        )
+        result = await ts.list_directory('.')
+        assert 'keep.py' in result
+        assert 'skip.md' not in result
+
     async def test_list_hides_denied_entries(self, fs_root: Path) -> None:
         (fs_root / 'visible.txt').write_text('ok\n')
         (fs_root / 'creds.secret').write_text('hunter2\n')
@@ -549,12 +567,22 @@ class TestSearchFiles:
         assert 'creds.secret' not in result
 
     async def test_search_only_matches_allowed_files(self, fs_root: Path) -> None:
-        # Allowed-pattern filtering for recursive search is exercised by
-        # `test_is_accessible_allowed_list_excludes` and the
-        # toolset-level behavior; an end-to-end search requires
-        # `allowed_patterns` to also accept the root path, which is a
-        # pre-existing access-control limitation independent of this fix.
-        pass
+        # The search root ('.') isn't required to match allowed_patterns; only
+        # the matched files are filtered against it per-entry.
+        (fs_root / 'keep.py').write_text('findme\n')
+        (fs_root / 'skip.md').write_text('findme\n')
+        ts = FileSystemToolset(
+            root_dir=fs_root,
+            allowed_patterns=['*.py'],
+            denied_patterns=[],
+            protected_patterns=[],
+            max_read_lines=2000,
+            max_search_results=1000,
+            max_find_results=1000,
+        )
+        result = await ts.search_files('findme')
+        assert 'keep.py' in result
+        assert 'skip.md' not in result
 
 
 class TestFindFiles:
@@ -636,12 +664,22 @@ class TestFindFiles:
         assert 'creds.secret' not in result
 
     async def test_find_only_shows_allowed_entries(self, fs_root: Path) -> None:
-        # Allowed-pattern filtering for recursive find is exercised by
-        # `test_is_accessible_allowed_list_excludes` and the
-        # toolset-level behavior; an end-to-end find requires
-        # `allowed_patterns` to also accept the root path, which is a
-        # pre-existing access-control limitation independent of this fix.
-        pass
+        # The find root ('.') isn't required to match allowed_patterns; only
+        # the matched entries are filtered against it per-entry.
+        (fs_root / 'keep.py').write_text('ok\n')
+        (fs_root / 'skip.md').write_text('ok\n')
+        ts = FileSystemToolset(
+            root_dir=fs_root,
+            allowed_patterns=['*.py'],
+            denied_patterns=[],
+            protected_patterns=[],
+            max_read_lines=2000,
+            max_search_results=1000,
+            max_find_results=1000,
+        )
+        result = await ts.find_files('*')
+        assert 'keep.py' in result
+        assert 'skip.md' not in result
 
 
 class TestCreateDirectory:
