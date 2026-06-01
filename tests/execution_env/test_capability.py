@@ -259,6 +259,11 @@ async def test_write_infra_error_propagates() -> None:
         await _write(_RaisingEnvironment(root='/x', error=EnvWriteError('disk on fire')))
 
 
+async def test_write_path_escape_is_model_retry() -> None:
+    with pytest.raises(ModelRetry):
+        await _write(_RaisingEnvironment(root='/x', error=PathEscapeError('outside')))
+
+
 # --- edit_file ----------------------------------------------------------------
 
 

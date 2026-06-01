@@ -19,6 +19,7 @@ import pytest
 
 from pydantic_ai_harness.environments import docker as docker_module
 from pydantic_ai_harness.environments.docker import DockerEnvironment
+from pydantic_ai_harness.environments.exceptions import EnvSetupError
 
 
 @pytest.fixture
@@ -41,6 +42,9 @@ class _FakeClient:
         self.remove_exc: BaseException | None = None
         self.calls: list[str] = []
         self.closed = False
+        # Exit code returned by every internal `exec` (mkdir + tool probe). Default 0 so setup
+        # succeeds; a test sets it non-zero to simulate the root-creation/probe failure path.
+        self.exec_exit_code = 0
 
         client_self = self
 
@@ -70,7 +74,7 @@ class _FakeClient:
                 return (b'', b'')
 
             def exec_inspect(self, exec_id: str) -> dict[str, int]:
-                return {'ExitCode': 0}
+                return {'ExitCode': client_self.exec_exit_code}
 
         self.containers = _Containers()
         self.api = _API()
@@ -190,6 +194,25 @@ async def test_setup_raises_on_api_error(fake_docker: _FakeClient) -> None:
         await env.start()
 
     assert env._started is False  # pyright: ignore[reportPrivateUsage]
+
+
+async def test_owned_setup_failure_removes_container(fake_docker: _FakeClient) -> None:
+    """`containers.run` succeeds but the post-run `mkdir`/probe fails: setup must remove the
+    container it created and close the client. Otherwise `_started` stays False, a later `stop()`
+    no-ops, and the running container is leaked."""
+    container = _make_container('abc123', fake_docker)
+    fake_docker.run_result = container
+    fake_docker.get_result = container
+    fake_docker.exec_exit_code = 1  # `mkdir -p root` fails inside the container
+
+    env = DockerEnvironment(image='python:3.12-slim')
+    with pytest.raises(EnvSetupError):
+        await env.start()
+
+    assert any(c.startswith('remove(') for c in fake_docker.calls)
+    assert fake_docker.closed is True
+    assert env._started is False  # pyright: ignore[reportPrivateUsage]
+    assert env._container_id is None  # pyright: ignore[reportPrivateUsage]
 
 
 # --- owned mode: teardown success / "already gone" / daemon failure ----------

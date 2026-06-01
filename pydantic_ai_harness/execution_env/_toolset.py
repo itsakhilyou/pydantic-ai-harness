@@ -125,6 +125,9 @@ async def _write_file(environment: AbstractEnvironment, path: str, data: str) ->
     """Encode and write a file, routing recoverable errors to the model."""
     try:
         await environment.write_file(path, data.encode('utf-8'))
+    except PathEscapeError as e:
+        get_current_span().add_event('path_escape_attempt', {'path': path})
+        raise ModelRetry(str(e)) from e
     except EnvPermissionError as e:
         raise ModelRetry(str(e)) from e
     except (EnvWriteError,):

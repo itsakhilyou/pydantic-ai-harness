@@ -189,55 +189,68 @@ class DockerEnvironment(AbstractEnvironment):
         """
         client = await _run_blocking(docker.from_env)
         self._client = client
-        if self.image is not None:
-            labels = {
-                _SESSION_LABEL: self._session_id,
-                _CREATED_LABEL: datetime.now(timezone.utc).isoformat(),
-            }
-            try:
-                # `containers.run(detach=True)` returns a Container as soon as the container is
-                # created. We bind `_container_id` from its `.id` before any other await -- the
-                # acquire-then-protect line.
-                container = await asyncio.wait_for(
-                    _run_blocking(
-                        client.containers.run,
-                        self.image,
-                        ['sleep', 'infinity'],
-                        detach=True,
-                        environment=self.environment,
-                        user=self.user,
-                        volumes=self.volumes,
-                        labels=labels,
-                    ),
-                    timeout=self.startup_timeout,
+        # Everything past this point can fail after we've already acquired a resource: in owned
+        # mode `containers.run` may succeed and then `mkdir`/the tool probe fail (non-root `user`
+        # can't create `root`, image missing a required tool). `start()` only flips `_started`
+        # once `setup()` returns, so a later `stop()` would no-op and leak the running container
+        # plus the open client. Tear down whatever we built before propagating. `teardown()`
+        # already does the mode-correct thing: remove the owned container + close the client, or
+        # (attach mode) close the client only without touching the user's container.
+        try:
+            if self.image is not None:
+                labels = {
+                    _SESSION_LABEL: self._session_id,
+                    _CREATED_LABEL: datetime.now(timezone.utc).isoformat(),
+                }
+                try:
+                    # `containers.run(detach=True)` returns a Container as soon as the container is
+                    # created. We bind `_container_id` from its `.id` before any other await -- the
+                    # acquire-then-protect line.
+                    container = await asyncio.wait_for(
+                        _run_blocking(
+                            client.containers.run,
+                            self.image,
+                            ['sleep', 'infinity'],
+                            detach=True,
+                            environment=self.environment,
+                            user=self.user,
+                            volumes=self.volumes,
+                            labels=labels,
+                        ),
+                        timeout=self.startup_timeout,
+                    )
+                except docker.errors.ImageNotFound as exc:
+                    raise RuntimeError(f'docker image not found: {exc.explanation}') from exc
+                except docker.errors.APIError as exc:
+                    raise RuntimeError(f'docker run failed: {exc.explanation}') from exc
+                self._container_id = container.id
+
+            # Both modes: ensure `root` exists and required tools are present. Attach mode runs
+            # these against a user-owned container -- `mkdir -p` is a no-op if the dir already
+            # exists, and the probe gives a clear failure if the user attached an image we can't drive.
+            mkdir_exit, _o, mkdir_err = await self._exec(['mkdir', '-p', '--', self.root])
+            if mkdir_exit != 0:
+                raise EnvSetupError(
+                    f'failed to create environment root {self.root!r} in container: '
+                    f'{mkdir_err.decode(errors="replace").strip()}'
                 )
-            except docker.errors.ImageNotFound as exc:
-                raise RuntimeError(f'docker image not found: {exc.explanation}') from exc
-            except docker.errors.APIError as exc:
-                raise RuntimeError(f'docker run failed: {exc.explanation}') from exc
-            self._container_id = container.id
 
-        # Both modes: ensure `root` exists and required tools are present. Attach mode runs
-        # these against a user-owned container -- `mkdir -p` is a no-op if the dir already
-        # exists, and the probe gives a clear failure if the user attached an image we can't drive.
-        mkdir_exit, _o, mkdir_err = await self._exec(['mkdir', '-p', '--', self.root])
-        if mkdir_exit != 0:
-            raise EnvSetupError(
-                f'failed to create environment root {self.root!r} in container: '
-                f'{mkdir_err.decode(errors="replace").strip()}'
+            probe = (
+                'for t in '
+                + ' '.join(_REQUIRED_TOOLS)
+                + '; do command -v "$t" >/dev/null 2>&1 || { printf %s "$t"; exit 1; }; done'
             )
-
-        probe = (
-            'for t in '
-            + ' '.join(_REQUIRED_TOOLS)
-            + '; do command -v "$t" >/dev/null 2>&1 || { printf %s "$t"; exit 1; }; done'
-        )
-        probe_exit, probe_out, _e = await self._exec(['sh', '-c', probe])
-        if probe_exit != 0:
-            missing = probe_out.decode(errors='replace').strip() or '<unknown>'
-            raise EnvSetupError(
-                f'container is missing required tool {missing!r}; DockerEnvironment requires {_REQUIRED_TOOLS} in PATH'
-            )
+            probe_exit, probe_out, _e = await self._exec(['sh', '-c', probe])
+            if probe_exit != 0:
+                missing = probe_out.decode(errors='replace').strip() or '<unknown>'
+                raise EnvSetupError(
+                    f'container is missing required tool {missing!r}; DockerEnvironment requires {_REQUIRED_TOOLS} in PATH'
+                )
+        except BaseException:
+            # Best-effort cleanup; never let a teardown error mask the original setup failure.
+            with contextlib.suppress(Exception):
+                await self.teardown()
+            raise
 
     async def teardown(self) -> None:
         """Close the SDK client, removing the container too in owned mode.
@@ -567,10 +580,12 @@ class DockerEnvironment(AbstractEnvironment):
 
         Cancellation/timeout strategy: a launcher records its own PID into a per-exec pidfile
         before `exec`-replacing itself with the user's shell, so the recorded PID *is* the user's
-        process. On timeout/cancel a second `docker exec` runs `kill -KILL "$(cat <pidfile>)"`
-        inside the container -- the daemon performs the signal in the container's PID namespace,
-        which works on Linux, Docker Desktop, Colima, Podman-VM, and remote daemons alike.
-        Host-side `os.killpg` is unreachable across the VM boundary on macOS, so we never use it.
+        process. On timeout/cancel a second `docker exec` kills that PID *and all its descendants*
+        (a `/proc`-based tree walk -- see `_kill_remote_exec`) inside the container, so a command
+        that backgrounds children can't leave them running. The daemon performs the signal in the
+        container's PID namespace, which works on Linux, Docker Desktop, Colima, Podman-VM, and
+        remote daemons alike. Host-side `os.killpg` is unreachable across the VM boundary on macOS,
+        so we never use it.
         """
         # Guard via locals so pyright can narrow `client` and `container_id` to non-None
         # for the rest of the method (attribute narrowing doesn't survive across awaits).
@@ -633,14 +648,27 @@ class DockerEnvironment(AbstractEnvironment):
         )
 
     async def _kill_remote_exec(self, client: DockerClient, container_id: str, pidfile: str) -> None:
-        """Send SIGKILL to the in-container process recorded in `pidfile` via a second exec.
+        """SIGKILL the recorded launcher PID *and all its descendants* via a second exec.
 
-        Tolerant by design: a missing pidfile or a PID that has already exited collapses to
-        `kill 0`, which the trailing `|| true` swallows. Errors during cleanup must not mask
-        the original timeout or cancellation that triggered this.
+        The contract promises a timeout/cancel kills the whole process tree, not just the launcher
+        shell -- a command like `sleep 30 & wait`, or a test runner that forks workers, must not
+        leave children alive in the container. We can't `os.killpg` from the host (the container is
+        a separate PID namespace, behind a VM on macOS), so we walk the tree *inside* the container
+        using only POSIX `sh` and `/proc/<pid>/task/<tid>/children` (kernel >= 3.5, present in every
+        container) -- no `ps`/`pkill`/`setsid` dependency. Children are collected *before* the
+        parent is killed (post-order) so reparenting to PID 1 can't orphan them.
+
+        Tolerant by design: a missing pidfile or an already-exited PID collapses to a no-op, and a
+        cleanup error must never mask the original timeout or cancellation that triggered this.
         """
-        kill_cmd = f'kill -KILL "$(cat {pidfile} 2>/dev/null || echo 0)" 2>/dev/null || true'
+        kill_tree = (
+            'kill_tree() { '
+            'for c in $(cat /proc/"$1"/task/*/children 2>/dev/null); do kill_tree "$c"; done; '
+            'kill -KILL "$1" 2>/dev/null; '
+            '}; '
+            f'p=$(cat {pidfile} 2>/dev/null || echo 0); [ "$p" = 0 ] || kill_tree "$p"; true'
+        )
         exec_create = client.api.exec_create  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
         with contextlib.suppress(docker.errors.APIError):
-            kill_info = await _run_blocking(exec_create, container_id, cmd=['/bin/sh', '-c', kill_cmd])  # pyright: ignore[reportUnknownArgumentType]
+            kill_info = await _run_blocking(exec_create, container_id, cmd=['/bin/sh', '-c', kill_tree])  # pyright: ignore[reportUnknownArgumentType]
             await _run_blocking(client.api.exec_start, kill_info['Id'])

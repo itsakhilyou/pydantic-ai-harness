@@ -163,6 +163,19 @@ async def test_timeout_kills_process_and_marks_timed_out(env: DockerEnvironment)
     assert result.return_code == 137
 
 
+async def test_timeout_kills_descendant_processes(env: DockerEnvironment) -> None:
+    """The kill must reap the whole process tree, not just the launcher shell. A backgrounded
+    child must not survive a timeout: `sleep 30 & wait` records the child PID and then times out
+    while waiting; afterwards `kill -0 <child>` must report the process gone, not orphaned."""
+    result = await env.shell_command('sleep 30 & echo $! > child.pid; wait', timeout=1.0)
+    assert result.timed_out is True
+
+    child_pid = (await env.read_file('child.pid')).decode().strip()
+    # `kill -0` probes liveness without sending a real signal; it fails for a dead/absent PID.
+    check = await env.shell_command(f'kill -0 {child_pid} 2>/dev/null && echo ALIVE || echo DEAD')
+    assert check.stdout == b'DEAD\n'
+
+
 async def test_cancel_kills_process_and_reraises(env: DockerEnvironment) -> None:
     """Cancelling the awaiting task must SIGKILL the in-container process and re-raise.
 
