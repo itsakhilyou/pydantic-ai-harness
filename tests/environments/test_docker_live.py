@@ -8,14 +8,11 @@ mocked lifecycle tests in `test_docker.py` cover the daemon-free decision tree.
 import asyncio
 from collections.abc import AsyncIterator
 
-import docker
-import docker.errors
 import pytest
 from pydantic_ai import Agent, ModelResponse, TextPart
 from pydantic_ai.messages import ModelMessage, ToolCallPart, ToolReturnPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 
-from pydantic_ai_harness.environments.docker import DockerEnvironment
 from pydantic_ai_harness.environments.exceptions import (
     EnvInvalidPatternError,
     EnvIsADirectoryError,
@@ -23,6 +20,14 @@ from pydantic_ai_harness.environments.exceptions import (
     EnvShellExecutionError,
 )
 from pydantic_ai_harness.execution_environment import ExecutionEnvironment
+
+try:
+    import docker
+    import docker.errors
+
+    from pydantic_ai_harness.environments.docker import DockerEnvironment
+except ImportError:  # pragma: no cover -- only hit on the slim (no-`docker`-extra) CI leg
+    pytest.skip('docker extra not installed', allow_module_level=True)
 
 pytestmark = pytest.mark.anyio
 

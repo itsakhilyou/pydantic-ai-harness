@@ -16,17 +16,9 @@ from dataclasses import dataclass
 from typing import Any
 from unittest.mock import MagicMock
 
-import docker.errors
 import pytest
 
-from pydantic_ai_harness.environments import docker as docker_module
 from pydantic_ai_harness.environments._ripgrep import RG_EXIT_USAGE_OR_PATTERN
-from pydantic_ai_harness.environments.docker import (
-    _EXIT_COMMAND_NOT_FOUND,  # pyright: ignore[reportPrivateUsage]
-    _EXIT_IS_DIRECTORY,  # pyright: ignore[reportPrivateUsage]
-    _EXIT_PERMISSION_DENIED,  # pyright: ignore[reportPrivateUsage]
-    DockerEnvironment,
-)
 from pydantic_ai_harness.environments.exceptions import (
     EnvInvalidPatternError,
     EnvPermissionError,
@@ -35,6 +27,19 @@ from pydantic_ai_harness.environments.exceptions import (
     EnvShellExecutionError,
     EnvWriteError,
 )
+
+try:
+    import docker.errors
+
+    from pydantic_ai_harness.environments import docker as docker_module
+    from pydantic_ai_harness.environments.docker import (
+        _EXIT_COMMAND_NOT_FOUND,  # pyright: ignore[reportPrivateUsage]
+        _EXIT_IS_DIRECTORY,  # pyright: ignore[reportPrivateUsage]
+        _EXIT_PERMISSION_DENIED,  # pyright: ignore[reportPrivateUsage]
+        DockerEnvironment,
+    )
+except ImportError:  # pragma: no cover -- only hit on the slim (no-`docker`-extra) CI leg
+    pytest.skip('docker extra not installed', allow_module_level=True)
 
 
 @dataclass

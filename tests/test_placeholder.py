@@ -25,6 +25,20 @@ def test_lazy_exports_resolve():
         pydantic_ai_harness.DoesNotExist  # pyright: ignore[reportAttributeAccessIssue]
 
 
+def test_environments_lazy_exports_resolve():
+    """`DockerEnvironment` resolves lazily so importing the `environments` package (e.g. for
+    `LocalEnvironment`) never pulls the optional `docker` dependency. Unknown names raise."""
+    import pydantic_ai_harness.environments as environments
+
+    with pytest.raises(AttributeError):
+        environments.DoesNotExist  # pyright: ignore[reportAttributeAccessIssue]
+
+    pytest.importorskip('docker')  # the optional `docker` extra; skipped on the slim CI leg
+    from pydantic_ai_harness.environments.docker import DockerEnvironment
+
+    assert environments.DockerEnvironment is DockerEnvironment
+
+
 def test_test_model_fixture(test_model: TestModel):
     assert isinstance(test_model, TestModel)
 

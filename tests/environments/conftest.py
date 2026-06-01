@@ -10,19 +10,17 @@ run unchanged against `LocalEnvironment` (host FS), `DockerEnvironment` (contain
 and any future backend. The `seed_file` / `seed_dir` helpers below are the only setup
 primitives tests need.
 
-The `docker` param skips when no daemon is reachable so contributors without Docker
-installed still get a green local-only run; CI is expected to provide a daemon.
+The `docker` param skips when the optional `docker` dependency isn't installed or no
+daemon is reachable, so contributors without Docker still get a green local-only run;
+CI's all-extras leg provides both.
 """
 
 from collections.abc import AsyncIterator
 from pathlib import Path
 
-import docker
-import docker.errors
 import pytest
 
 from pydantic_ai_harness.environments.abstract import AbstractEnvironment
-from pydantic_ai_harness.environments.docker import DockerEnvironment
 from pydantic_ai_harness.environments.local import LocalEnvironment
 
 
@@ -32,7 +30,17 @@ def anyio_backend() -> str:
 
 
 def _docker_available() -> bool:
-    """`True` iff a Docker daemon is reachable. Used to skip the docker param locally."""
+    """`True` iff the `docker` extra is installed and a daemon is reachable.
+
+    Skips the docker param both locally (no daemon) and on the slim CI leg, where the
+    optional `docker` dependency isn't installed at all. The import is local so this module
+    imports cleanly without the extra -- only `LocalEnvironment` tests need it.
+    """
+    try:
+        import docker
+        import docker.errors
+    except ImportError:  # pragma: no cover -- only hit on the slim (no-`docker`-extra) CI leg
+        return False
     try:
         docker.from_env().ping()  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
     except (docker.errors.DockerException, OSError):  # pragma: no cover -- only hit without a daemon; CI provides one
@@ -52,8 +60,10 @@ async def environment(request: pytest.FixtureRequest, tmp_path: Path) -> AsyncIt
         async with env:
             yield env
     elif request.param == 'docker':
-        if not _docker_available():  # pragma: no cover -- only hit without a daemon; CI provides one
-            pytest.skip('no Docker daemon')
+        if not _docker_available():  # pragma: no cover -- only without the docker extra or a daemon; CI provides both
+            pytest.skip('Docker unavailable (extra not installed or no daemon)')
+        from pydantic_ai_harness.environments.docker import DockerEnvironment
+
         docker_env = DockerEnvironment(image='python:3.12-slim')
         async with docker_env:
             # `python:3.12-slim` doesn't ship `rg`; install before yielding so grep/glob

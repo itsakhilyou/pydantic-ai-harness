@@ -571,6 +571,7 @@ def test_default_is_local_environment_rooted_at_cwd() -> None:
 def test_docker_environment_can_be_passed_as_instance() -> None:
     """No string shorthand for Docker by design (image must be chosen). Users pass a
     configured `DockerEnvironment` instance, which the capability uses verbatim."""
+    pytest.importorskip('docker')  # the optional `docker` extra; skipped on the slim CI leg
     from pydantic_ai_harness.environments.docker import DockerEnvironment
 
     docker = DockerEnvironment(image='python:3.12-slim')

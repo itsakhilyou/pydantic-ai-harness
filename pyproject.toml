@@ -28,7 +28,6 @@ classifiers = [
     'Typing :: Typed',
 ]
 dependencies = [
-    "docker>=7.1.0",
     "pydantic-ai-slim>=1.95.1",
     "ripgrep>=15.1.0",
 ]
@@ -46,6 +45,9 @@ temporal = [
 ]
 dbos = [
     'pydantic-ai-slim[dbos]',
+]
+docker = [
+    "docker>=7.1.0",
 ]
 
 [project.urls]

@@ -1109,7 +1109,6 @@ wheels = [
 name = "pydantic-ai-harness"
 source = { editable = "." }
 dependencies = [
-    { name = "docker" },
     { name = "pydantic-ai-slim" },
     { name = "ripgrep" },
 ]
@@ -1123,6 +1122,9 @@ codemode = [
 ]
 dbos = [
     { name = "pydantic-ai-slim", extra = ["dbos"] },
+]
+docker = [
+    { name = "docker" },
 ]
 temporal = [
     { name = "pydantic-ai-slim", extra = ["temporal"] },
@@ -1148,7 +1150,7 @@ lint = [
 
 [package.metadata]
 requires-dist = [
-    { name = "docker", specifier = ">=7.1.0" },
+    { name = "docker", marker = "extra == 'docker'", specifier = ">=7.1.0" },
     { name = "pydantic-ai-slim", specifier = ">=1.95.1" },
     { name = "pydantic-ai-slim", extras = ["dbos"], marker = "extra == 'dbos'" },
     { name = "pydantic-ai-slim", extras = ["temporal"], marker = "extra == 'temporal'" },
@@ -1156,7 +1158,7 @@ requires-dist = [
     { name = "pydantic-monty", marker = "extra == 'codemode'", specifier = ">=0.0.16" },
     { name = "ripgrep", specifier = ">=15.1.0" },
 ]
-provides-extras = ["code-mode", "codemode", "dbos", "temporal"]
+provides-extras = ["code-mode", "codemode", "dbos", "docker", "temporal"]
 
 [package.metadata.requires-dev]
 dev = [

@@ -43,6 +43,8 @@ ExecutionEnvironment(environment=LocalEnvironment(root='/path/to/workspace'))
 ExecutionEnvironment(environment=DockerEnvironment(image='python:3.12-slim'))
 ```
 
+`DockerEnvironment` requires the optional `docker` dependency — install it with `pip install "pydantic-ai-harness[docker]"`. `LocalEnvironment` has no extra dependencies.
+
 The agent's tools (`read_file`, `write_file`/`edit_file`, `ls`/`glob`/`grep`, `shell`) are the same on every backend — only the backend changes.
 
 ## Backends

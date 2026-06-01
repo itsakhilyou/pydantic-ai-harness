@@ -30,9 +30,15 @@ from datetime import datetime, timezone
 from pathlib import PurePosixPath
 from typing import ParamSpec, TypeVar
 
-import docker
-import docker.errors
-from docker import DockerClient
+try:
+    import docker
+    import docker.errors
+    from docker import DockerClient
+except ImportError as _import_error:  # pragma: no cover -- only hit when the `docker` extra is absent
+    raise ImportError(
+        'Please install the `docker` package to use `DockerEnvironment`, '
+        'you can use the `docker` optional group — `pip install "pydantic-ai-harness[docker]"`'
+    ) from _import_error
 
 from ._ripgrep import RG_EXIT_USAGE_OR_PATTERN, parse_ripgrep_json
 from .abstract import AbstractEnvironment, AbstractFile, AbstractMatch, ShellCommandResult
