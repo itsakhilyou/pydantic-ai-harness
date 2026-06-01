@@ -47,3 +47,12 @@ class EnvWriteError(ExecutionEnvironmentError):
 
 class EnvShellExecutionError(ExecutionEnvironmentError):
     """Unexpected error executing a shell command."""
+
+
+class EnvInvalidPatternError(ExecutionEnvironmentError):
+    """The model supplied a malformed regex pattern to `grep`.
+
+    Model-fixable -- the capability layer routes this to `ModelRetry` so the model
+    is told its pattern is bad and can try again with a corrected one. Not raised
+    for patterns that are valid regex but match nothing; those return an empty list.
+    """

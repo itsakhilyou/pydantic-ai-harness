@@ -15,6 +15,7 @@ from pydantic_ai.tools import AgentDepsT
 
 from ..environments.abstract import AbstractEnvironment
 from ..environments.exceptions import (
+    EnvInvalidPatternError,
     EnvIsADirectoryError,
     EnvNotADirectoryError,
     EnvNotFoundError,
@@ -244,7 +245,10 @@ async def _grep(environment: AbstractEnvironment, path: str, pattern: str) -> li
     except PathEscapeError as e:
         get_current_span().add_event('path_escape_attempt', {'path': path})
         raise ModelRetry(str(e)) from e
-    except (EnvNotFoundError, EnvPermissionError) as e:
+    except (EnvNotFoundError, EnvPermissionError, EnvInvalidPatternError) as e:
+        # EnvInvalidPatternError is model-fixable -- malformed regex means the model wrote
+        # something `re.compile` rejected; we route it to ModelRetry so the model is told
+        # what was wrong and can try a corrected pattern.
         raise ModelRetry(str(e)) from e
     except (EnvReadError,):
         # TODO: This should be a ToolFailed error when I merge that in
@@ -375,23 +379,9 @@ def build_toolset(
                 description='File or directory to search, relative to the workspace root. Directories are searched recursively.'
             ),
         ],
-        pattern: Annotated[
-            str,
-            Field(
-                # Model-facing: name the dialect and show it, so the model isn't surprised when a regex
-                # silently no-matches. This is fixed-string substring, not regex -- `.` matches a literal
-                # dot, `foo.*` matches the literal text `foo.*`. Point it at shell for real power, but
-                # only "if available" since read-only toolsets omit shell.
-                description=(
-                    'Literal text to find (fixed-string substring match, NOT a regex): a line matches if '
-                    "it contains this text verbatim. e.g. 'def main(' matches that exact text; '.' matches "
-                    'a literal dot, not any char. For regex/glob-filtered search, use the `shell` tool '
-                    '(e.g. `grep -E`) if it is available.'
-                ),
-            ),
-        ],
+        pattern: Annotated[str, Field(description='Search pattern (regex or literal string)')],
     ) -> list[str]:
-        """Search a file or directory tree for literal text (fixed-string substring, not regex)."""
+        """Search a file or directory tree for a regex pattern."""
         return await _grep(environment, path, pattern)
 
     async def glob(
@@ -431,7 +421,9 @@ def build_toolset(
     toolset.add_function(write_file, description='Create or overwrite a file in the execution environment.')
     toolset.add_function(edit_file, description='Replace a unique occurrence of text in a file.')
     toolset.add_function(ls, description='List the contents of a directory.')
-    toolset.add_function(grep, description='Search a file or directory tree for a literal pattern.')
+    toolset.add_function(
+        grep, description='Search file contents for a pattern. Returns matching lines with file paths and line numbers.'
+    )
     toolset.add_function(glob, description='Find files matching a glob pattern.')
     toolset.add_function(shell, description='Run a shell command and return its captured output and exit code.')
 

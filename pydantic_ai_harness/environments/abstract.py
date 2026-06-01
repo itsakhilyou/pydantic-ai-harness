@@ -3,6 +3,8 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 
+from typing_extensions import Self, final
+
 
 @dataclass(kw_only=True, frozen=True)
 class AbstractFile:
@@ -112,18 +114,16 @@ class AbstractEnvironment(ABC):
 
     @abstractmethod
     async def grep(self, path: str, pattern: str) -> list[AbstractMatch]:
-        """Search a file or directory tree for a pattern.
+        """Search a file or directory tree for a regex pattern.
 
-        `pattern` is matched as a **fixed-string substring**, not a regex: a line matches iff it
-        contains `pattern` verbatim. This is a backend-independent contract the conformance suite
-        enforces -- every backend must give identical results, so backends that shell out must use
-        fixed-string mode (e.g. `grep -F`), never native regex. Regex power is the `shell` tool's job;
-        keeping this primitive simple is what lets a no-shell read-only toolset behave identically
-        across Local and Docker.
+        `pattern` is a ripgrep-dialect regex (Rust `regex` crate). Every backend uses the
+        same engine, so dialect is unambiguous and identical across backends -- there is no
+        "portable subset" to commit to or police. Patterns ripgrep accepts are valid;
+        patterns it rejects raise `EnvInvalidPatternError`.
 
         Args:
             path: File path, resolved against and confined to `root`.
-            pattern: Literal text to find (substring match, not a regex).
+            pattern: Regex string (ripgrep dialect).
 
         Returns:
             A list of matches.
@@ -134,6 +134,7 @@ class AbstractEnvironment(ABC):
             EnvIsADirectoryError: `path` is a directory, not a file.
             EnvNotADirectoryError: A component of `path` is not a directory.
             EnvPermissionError: The backend may not grep `path`.
+            EnvInvalidPatternError: `pattern` is malformed regex (model-fixable).
             EnvReadError: Any other I/O failure (nothing builtin leaks).
         """
         raise NotImplementedError  # pragma: no cover
@@ -187,35 +188,45 @@ class AbstractEnvironment(ABC):
         """
         raise NotImplementedError  # pragma: no cover
 
-    async def _do_start(self) -> None:
+    async def setup(self) -> None:
         """Allocate backend resources. Override in backends that hold a resource; default is a no-op."""
 
-    async def _do_stop(self) -> None:
+    async def teardown(self) -> None:
         """Release backend resources. Override in backends that hold a resource; default is a no-op."""
 
+    @final
     async def start(self) -> None:
-        """Start the environment. Idempotent: a second call while already started is a no-op."""
+        """Start the environment. Idempotent: a second call while already started is a no-op.
+
+        `@final`: subclasses must override `setup`, not `start` -- this method owns the idempotency
+        gate and the `_started` flag, and overriding it would skip both.
+        """
         if self._started:
             return
+        # `_started` is flipped only after `setup` returns: a failed allocation leaves the env in
+        # the not-started state so the caller gets a clean signal and stop() won't try to tear down
+        # something that was never built.
+        await self.setup()
+        self._started = True
 
-        # No op method
-        try:
-            await self._do_start()
-        except:
-            # If we were unable to start then we need to fail fast here
-            raise
-        else:
-            self._started = True
-
+    @final
     async def stop(self) -> None:
-        """Stop the environment. Idempotent: calling while not started is a no-op."""
+        """Stop the environment. Idempotent: calling while not started is a no-op.
+
+        `@final`: subclasses must override `teardown`, not `stop`.
+        """
         if not self._started:
             return
+        # `_started` stays True if `teardown` raises -- callers are told the resource may still
+        # exist rather than silently losing track of it; a retry can call stop() again safely.
+        await self.teardown()
+        self._started = False
 
-        try:
-            await self._do_stop()
-        except:
-            # If we were unable to stop then we need to fail fast here
-            raise
-        else:
-            self._started = False
+    async def __aenter__(self) -> Self:
+        """Start the environment and return self for `async with` use."""
+        await self.start()
+        return self
+
+    async def __aexit__(self, *exc: object) -> None:
+        """Stop the environment when the `async with` block exits, on success or exception."""
+        await self.stop()

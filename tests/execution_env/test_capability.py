@@ -21,6 +21,7 @@ from pydantic_ai import Agent, ModelResponse, ModelRetry, RunContext, TextPart
 from pydantic_ai.messages import ModelMessage, ToolCallPart, ToolReturnPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 from pydantic_ai.models.test import TestModel
+from pydantic_ai.run import AgentRunResult
 from pydantic_ai.usage import RunUsage
 
 from pydantic_ai_harness.environments.abstract import (
@@ -30,6 +31,7 @@ from pydantic_ai_harness.environments.abstract import (
     ShellCommandResult,
 )
 from pydantic_ai_harness.environments.exceptions import (
+    EnvInvalidPatternError,
     EnvIsADirectoryError,
     EnvNotADirectoryError,
     EnvNotFoundError,
@@ -394,6 +396,7 @@ async def test_grep_formats_and_sorts_path_lineno_line() -> None:
         EnvNotFoundError('not found'),
         EnvPermissionError('not readable'),
         PathEscapeError('outside root'),
+        EnvInvalidPatternError('bad regex'),
     ],
 )
 async def test_grep_recoverable_errors_become_model_retry(error: ExecutionEnvironmentError) -> None:
@@ -549,25 +552,95 @@ async def test_execution_env_capability_read_file(tmp_path: Path) -> None:
     assert returns == ['Hello, world!']
 
 
-def test_string_local_resolves_to_local_environment_at_cwd() -> None:
-    """`ExecutionEnv()` with the default string resolves to a `LocalEnvironment` rooted at cwd."""
+def test_default_is_local_environment_rooted_at_cwd() -> None:
+    """`ExecutionEnv()` with no args creates a `LocalEnvironment` rooted at the current
+    working directory -- the no-arg behavior advertised in the docstring. Resolved via
+    `default_factory`, so cwd is read at instance creation, not class definition."""
     cap = ExecutionEnv[None]()
-    env = cap._environment  # pyright: ignore[reportPrivateUsage]
-    assert isinstance(env, LocalEnvironment)
-    assert env.root == os.getcwd()
+    assert isinstance(cap.environment, LocalEnvironment)
+    assert cap.environment.root == os.getcwd()
 
 
-def test_string_docker_resolves_to_docker_environment() -> None:
-    """`ExecutionEnv(environment='docker')` resolves to a (skeleton) `DockerEnvironment`."""
+def test_docker_environment_can_be_passed_as_instance() -> None:
+    """No string shorthand for Docker by design (image must be chosen). Users pass a
+    configured `DockerEnvironment` instance, which the capability uses verbatim."""
     from pydantic_ai_harness.environments.docker import DockerEnvironment
 
-    cap = ExecutionEnv[None](environment='docker')
-    env = cap._environment  # pyright: ignore[reportPrivateUsage]
-    assert isinstance(env, DockerEnvironment)
+    docker = DockerEnvironment(image='python:3.12-slim')
+    cap = ExecutionEnv[None](environment=docker)
+    assert cap.environment is docker
 
 
 def test_passed_instance_is_used_as_is() -> None:
     """A user-supplied `AbstractEnvironment` is used verbatim (the power-user / configured path)."""
     custom = LocalEnvironment(root='/tmp')
     cap = ExecutionEnv[None](environment=custom)
-    assert cap._environment is custom  # pyright: ignore[reportPrivateUsage]
+    assert cap.environment is custom
+
+
+# --- lifecycle: wrap_run owns vs. defers based on outer scope ----------------
+
+
+@dataclass(kw_only=True)
+class _LifecycleSpyEnvironment(_StoreEnvironment):
+    """Counts setup/teardown calls so tests can assert `wrap_run`'s ownership decision."""
+
+    setup_calls: int = 0
+    teardown_calls: int = 0
+
+    async def setup(self) -> None:
+        self.setup_calls += 1
+
+    async def teardown(self) -> None:
+        self.teardown_calls += 1
+
+
+async def _trivial_handler() -> AgentRunResult[None]:
+    """Stand-in for the run handler `wrap_run` receives; we only care that it runs."""
+    return AgentRunResult(output=None)
+
+
+async def test_wrap_run_owns_lifecycle_when_env_not_started() -> None:
+    """No outer `async with`: `wrap_run` must start before the handler and stop after."""
+    env = _LifecycleSpyEnvironment(root='/x', data=b'')
+    cap = ExecutionEnv[None](environment=env)
+
+    async def handler() -> AgentRunResult[None]:
+        # During the handler the env should already be started, and stop hasn't been called yet.
+        assert env.setup_calls == 1
+        assert env.teardown_calls == 0
+        return await _trivial_handler()
+
+    await cap.wrap_run(_ctx(), handler=handler)
+    assert (env.setup_calls, env.teardown_calls) == (1, 1)
+
+
+async def test_wrap_run_skips_lifecycle_when_env_already_started() -> None:
+    """Outer `async with` started the env: `wrap_run` must not touch start/stop at all."""
+    env = _LifecycleSpyEnvironment(root='/x', data=b'')
+    cap = ExecutionEnv[None](environment=env)
+
+    async with env:
+        assert (env.setup_calls, env.teardown_calls) == (1, 0)
+        await cap.wrap_run(_ctx(), handler=_trivial_handler)
+        # wrap_run saw _started=True at entry, so owns=False -> no extra calls.
+        assert (env.setup_calls, env.teardown_calls) == (1, 0)
+
+    # `async with` exit ran stop exactly once; wrap_run did not double it.
+    assert (env.setup_calls, env.teardown_calls) == (1, 1)
+
+
+async def test_wrap_run_stops_env_when_handler_raises() -> None:
+    """A handler exception must still pair with stop() -- the finally branch is load-bearing."""
+    env = _LifecycleSpyEnvironment(root='/x', data=b'')
+    cap = ExecutionEnv[None](environment=env)
+
+    class _Boom(Exception):
+        pass
+
+    async def boom() -> AgentRunResult[None]:
+        raise _Boom
+
+    with pytest.raises(_Boom):
+        await cap.wrap_run(_ctx(), handler=boom)
+    assert (env.setup_calls, env.teardown_calls) == (1, 1)

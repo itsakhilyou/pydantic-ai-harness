@@ -14,6 +14,7 @@ from inline_snapshot import snapshot
 from pydantic_ai_harness.environments import AbstractMatch
 from pydantic_ai_harness.environments.abstract import AbstractEnvironment, ShellCommandResult
 from pydantic_ai_harness.environments.exceptions import (
+    EnvInvalidPatternError,
     EnvIsADirectoryError,
     EnvNotADirectoryError,
     EnvNotFoundError,
@@ -146,6 +147,106 @@ async def test_grep_single_file(environment: AbstractEnvironment, tmp_path: Path
     (tmp_path / 'only.txt').write_text('first\nNEEDLE on two\nthird\n')
     matches = await environment.grep('only.txt', 'NEEDLE')
     assert matches == snapshot([AbstractMatch(path='only.txt', line='NEEDLE on two\n', lineno=2)])
+
+
+# --- grep regex subset: backend-portable dialect (every backend must agree) ---
+#
+# The contract on `AbstractEnvironment.grep` commits to a subset of regex that we promise
+# every backend will match identically. These tests pin that subset; when DockerEnvironment
+# (or any new backend) lands, the same matrix runs against it and divergence becomes a red
+# CI signal, not a user-reported drift. Features outside this list are undefined-by-design.
+
+
+@pytest.fixture
+def grep_corpus(tmp_path: Path) -> Path:
+    """Tree with one line of each shape the subset covers, so every test below uses the same input."""
+    (tmp_path / 'src.py').write_text(
+        'def main():\n'
+        'class Widget:\n'
+        'from typing import Any\n'
+        'import os\n'
+        'TODO: refactor\n'
+        '# FIXME bug here\n'
+        'value = 42\n'
+        'name = "alpha"\n'
+        'literal_dot.here\n'
+    )
+    return tmp_path
+
+
+async def test_grep_subset_literal_match(environment: AbstractEnvironment, grep_corpus: Path) -> None:
+    """Literal text -- the simplest regex; carries over from the old substring contract."""
+    matches = await environment.grep('.', 'TODO')
+    assert {m.lineno for m in matches} == {5}
+
+
+async def test_grep_subset_word_class(environment: AbstractEnvironment, grep_corpus: Path) -> None:
+    """`\\w+` -- the bread-and-butter "identifier" pattern models reach for first."""
+    matches = await environment.grep('.', r'def \w+')
+    assert {m.lineno for m in matches} == {1}
+
+
+async def test_grep_subset_digit_class(environment: AbstractEnvironment, grep_corpus: Path) -> None:
+    """`\\d+` -- the matching numeric class."""
+    matches = await environment.grep('.', r'\d+')
+    assert {m.lineno for m in matches} == {7}
+
+
+async def test_grep_subset_anchor(environment: AbstractEnvironment, grep_corpus: Path) -> None:
+    """`^` -- start-of-line anchor; lets the model say "imports at column 0," not anywhere."""
+    matches = await environment.grep('.', r'^from \w+')
+    assert {m.lineno for m in matches} == {3}
+
+
+async def test_grep_subset_alternation(environment: AbstractEnvironment, grep_corpus: Path) -> None:
+    """`|` -- "either of these"; common for TODO|FIXME-style sweeps."""
+    matches = await environment.grep('.', r'TODO|FIXME')
+    assert {m.lineno for m in matches} == {5, 6}
+
+
+async def test_grep_subset_char_class(environment: AbstractEnvironment, grep_corpus: Path) -> None:
+    """`[…]` -- explicit character class; the only way to express "any of these chars" in regex."""
+    matches = await environment.grep('.', r'[A-Z]+')
+    assert {m.lineno for m in matches} == {2, 3, 5, 6}  # Widget, Any, TODO, FIXME
+
+
+async def test_grep_subset_escape_metacharacter(environment: AbstractEnvironment, grep_corpus: Path) -> None:
+    """`\\.` -- escape; the model must be able to search for literal `.` without it being any-char."""
+    matches = await environment.grep('.', r'literal_dot\.here')
+    assert {m.lineno for m in matches} == {9}
+
+
+async def test_grep_subset_group_and_quantifier(environment: AbstractEnvironment, grep_corpus: Path) -> None:
+    """`(?:…)+` -- non-capturing group with a quantifier; needed for "one or more of <thing>"."""
+    matches = await environment.grep('.', r'(?:import|from) \w+')
+    assert {m.lineno for m in matches} == {3, 4}
+
+
+async def test_grep_invalid_pattern_raises(environment: AbstractEnvironment, tmp_path: Path) -> None:
+    """Malformed regex (here, an unmatched `[`) must raise EnvInvalidPatternError so the capability
+    layer can route to ModelRetry -- the model gets a chance to fix it rather than silently see []."""
+    (tmp_path / 'src.py').write_text('hello\n')
+    with pytest.raises(EnvInvalidPatternError):
+        await environment.grep('.', r'[unterminated')
+
+
+async def test_grep_flag_looking_pattern_is_treated_as_data(environment: AbstractEnvironment, tmp_path: Path) -> None:
+    """A model-supplied pattern that LOOKS like a CLI flag must NOT be interpreted as one.
+
+    This is the load-bearing read-only safety test: if a backend's grep implementation passed
+    the model's pattern positionally to a regex tool like ripgrep, the model could write
+    `pattern='--pre=/bin/sh'` and trick the tool into executing an arbitrary preprocessor
+    binary on every file -- effectively shell access through a "search" tool, in a sandbox
+    that explicitly denied shell. Every backend must therefore pass the pattern as DATA, not
+    as an argv element that could be re-parsed as a flag. Concretely on rg: use the form
+    `--regexp=<pat>` (value bound in one argv element) and never `<pat>` positionally.
+
+    We assert the pattern simply doesn't match anything -- it's regex, treated as the literal
+    string `--pre=/bin/sh`, which doesn't appear in any file in the tree.
+    """
+    (tmp_path / 'src.py').write_text('def main():\n    pass\n')
+    matches = await environment.grep('.', '--pre=/bin/sh')
+    assert matches == []
 
 
 async def test_glob_missing_directory_raises_not_found(environment: AbstractEnvironment) -> None:

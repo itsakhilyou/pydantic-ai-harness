@@ -2,17 +2,27 @@
 
 import os
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import Any
 
 from pydantic_ai import FunctionToolset
 from pydantic_ai.capabilities import AbstractCapability
-from pydantic_ai.tools import AgentDepsT
-from typing_extensions import assert_never
+from pydantic_ai.capabilities.abstract import WrapRunHandler
+from pydantic_ai.run import AgentRunResult
+from pydantic_ai.tools import AgentDepsT, RunContext
 
 from ..environments.abstract import AbstractEnvironment
-from ..environments.docker import DockerEnvironment
 from ..environments.local import LocalEnvironment
 from ._toolset import build_toolset
+
+
+def _default_environment() -> AbstractEnvironment:
+    """Return a `LocalEnvironment` rooted at the current working directory.
+
+    Resolved at instance creation (via `default_factory`), not at class definition,
+    so `os.getcwd()` reflects where the user actually constructed the capability.
+    Lifted out of the class body to keep the field declaration single-line.
+    """
+    return LocalEnvironment(root=os.getcwd())
 
 
 @dataclass
@@ -20,8 +30,7 @@ class ExecutionEnv(AbstractCapability[AgentDepsT]):
     """Capability that exposes the execution environment to the agent.
 
     Defaults to running against your current working directory via `LocalEnvironment`,
-    so `ExecutionEnv()` "just works" for the common case. Pass `'docker'` for the
-    skeleton Docker backend (Slice 5; not yet usable), or an `AbstractEnvironment`
+    so `ExecutionEnv()` "just works" for the common case. Pass an `AbstractEnvironment`
     instance to configure the backend (e.g. `LocalEnvironment(root=...)`,
     `DockerEnvironment(image=...)`, or a custom backend).
 
@@ -37,30 +46,41 @@ class ExecutionEnv(AbstractCapability[AgentDepsT]):
     and the environment, and delegates tool construction to `build_toolset`.
     """
 
-    environment: AbstractEnvironment | Literal['local', 'docker'] = 'local'
-    """User-facing backend selector: a string shorthand for the sensible default of a
-    backend flavor (autocomplete-discoverable), or an `AbstractEnvironment` instance for
-    a configured backend. `__post_init__` normalizes this into `_environment`."""
+    environment: AbstractEnvironment = field(default_factory=_default_environment)
+    """Backend to delegate to. Defaults to a `LocalEnvironment` rooted at the current
+    working directory; pass a configured instance to use a different root or backend
+    (e.g. `DockerEnvironment(image=...)`).
 
-    _environment: AbstractEnvironment = field(init=False)
-    """Normalized backend used by `get_toolset`. Single, internal type; resolved once in
-    `__post_init__`. Note: `__post_init__` only *selects* the backend -- async startup
-    (Docker container, remote connect) belongs in a run-lifecycle hook, not here."""
-
-    def __post_init__(self) -> None:
-        """Normalize `environment` into `_environment` -- a single internal type."""
-        if isinstance(self.environment, AbstractEnvironment):
-            self._environment = self.environment
-            return
-        # `self.environment` is a Literal at this point; exhaustive match with assert_never
-        # guarantees a new arm added to the Literal forces a corresponding branch here.
-        if self.environment == 'local':
-            self._environment = LocalEnvironment(root=os.getcwd())
-        elif self.environment == 'docker':
-            self._environment = DockerEnvironment()
-        else:
-            assert_never(self.environment)
+    No string shorthand: any choice complex enough to be worth naming (Docker image,
+    custom root) needs configuration the string can't carry, and a single-arm
+    `Literal['local']` would be cosmetic. The default factory carries the only sensible
+    no-arg behavior; everything else is an instance.
+    """
 
     def get_toolset(self) -> FunctionToolset[AgentDepsT]:
-        """Build the toolset bound to the resolved environment."""
-        return build_toolset(self._environment, FunctionToolset[AgentDepsT]())
+        """Build the toolset bound to the environment."""
+        return build_toolset(self.environment, FunctionToolset[AgentDepsT]())
+
+    async def wrap_run(
+        self,
+        ctx: RunContext[AgentDepsT],
+        *,
+        handler: WrapRunHandler,
+    ) -> AgentRunResult[Any]:
+        """Manage the environment's lifecycle around an agent run.
+
+        Captures ownership at entry: if the environment was already started by an outer scope
+        (e.g. the user wrapped the env in `async with` to share it across many runs / agents),
+        this run does not start or stop it. Otherwise, this run owns the lifecycle and pairs
+        a `start()` with a `stop()` even if the run raises or is cancelled.
+        """
+        # Capture once, honor at exit: if an outer scope flips `_started` between entry and
+        # finally we must not double-start or double-stop. Same pattern as a re-entrant lock.
+        owns = not self.environment._started  # pyright: ignore[reportPrivateUsage]
+        if owns:
+            await self.environment.start()
+        try:
+            return await handler()
+        finally:
+            if owns:
+                await self.environment.stop()
