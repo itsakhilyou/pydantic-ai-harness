@@ -2,7 +2,7 @@
 
 The `environment` fixture is parametrized over backends. Today that is just
 `LocalEnvironment`; when `DockerEnvironment` lands it joins the `params` list and the
-entire `test_conformance.py` suite runs against it for free (see task: Slice 5).
+entire `test_conformance.py` suite runs against it for free.
 
 Conformance tests seed files on the host `tmp_path` and exercise them through
 `environment`. `local` roots the environment at `tmp_path` directly; a future `docker`

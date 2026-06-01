@@ -106,7 +106,7 @@ def test_image_mode_starts_not_yet_started() -> None:
     """Owned mode: setup hasn't run, so `_started` is False and there's no bound container."""
     env = DockerEnvironment(image='python:3.12-slim')
     assert env._started is False  # pyright: ignore[reportPrivateUsage]
-    assert env._container_id == ''  # pyright: ignore[reportPrivateUsage]
+    assert env._container_id is None  # pyright: ignore[reportPrivateUsage]
 
 
 def test_container_mode_binds_attached_id() -> None:
@@ -160,7 +160,7 @@ async def test_setup_raises_on_image_not_found(fake_docker: _FakeClient) -> None
     with pytest.raises(RuntimeError, match='docker image not found'):
         await env.start()
 
-    assert env._container_id == ''  # pyright: ignore[reportPrivateUsage]
+    assert env._container_id is None  # pyright: ignore[reportPrivateUsage]
     assert env._started is False  # pyright: ignore[reportPrivateUsage]
 
 
@@ -188,7 +188,7 @@ async def test_teardown_removes_owned_container(fake_docker: _FakeClient) -> Non
     await env.start()
     await env.stop()
 
-    assert env._container_id == ''  # pyright: ignore[reportPrivateUsage]
+    assert env._container_id is None  # pyright: ignore[reportPrivateUsage]
     assert env._started is False  # pyright: ignore[reportPrivateUsage]
     assert fake_docker.closed is True
     assert "remove('abc123', force=True)" in fake_docker.calls
@@ -203,7 +203,7 @@ async def test_teardown_swallows_not_found_from_get(fake_docker: _FakeClient) ->
     await env.start()
     await env.stop()
 
-    assert env._container_id == ''  # pyright: ignore[reportPrivateUsage]
+    assert env._container_id is None  # pyright: ignore[reportPrivateUsage]
     assert env._started is False  # pyright: ignore[reportPrivateUsage]
 
 
@@ -218,7 +218,7 @@ async def test_teardown_swallows_not_found_from_remove(fake_docker: _FakeClient)
     await env.start()
     await env.stop()
 
-    assert env._container_id == ''  # pyright: ignore[reportPrivateUsage]
+    assert env._container_id is None  # pyright: ignore[reportPrivateUsage]
     assert env._started is False  # pyright: ignore[reportPrivateUsage]
 
 
@@ -250,4 +250,4 @@ async def test_async_with_round_trip_in_owned_mode(fake_docker: _FakeClient) -> 
     async with env as bound:
         assert bound is env
         assert env._container_id == 'abc123'  # pyright: ignore[reportPrivateUsage]
-    assert env._container_id == ''  # pyright: ignore[reportPrivateUsage]
+    assert env._container_id is None  # pyright: ignore[reportPrivateUsage]
