@@ -28,6 +28,7 @@ classifiers = [
     'Typing :: Typed',
 ]
 dependencies = [
+    "docker>=7.1.0",
     "inline-snapshot>=0.33.0",
     "pydantic-ai-slim[anthropic]>=1.95.1",
     "ripgrep>=15.1.0",

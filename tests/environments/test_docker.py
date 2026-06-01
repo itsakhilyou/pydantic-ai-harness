@@ -1,23 +1,24 @@
-"""DockerEnvironment lifecycle tests with the `docker` CLI faked out.
+"""DockerEnvironment lifecycle tests with the `docker` SDK faked out.
 
-These cover the failure modes called out in `agent_docs/environment-lifecycle.md`
-"Backend implementer's guide" -- mode validation, attach-mode pre-seeding, owned-mode
-setup/teardown success and failure paths, and the "already gone" idempotent case. They
-run without a real Docker daemon by monkeypatching the module-level `_run_docker`
-helper to return canned `(returncode, stdout, stderr)` tuples.
+Covers the failure modes called out in `agent_docs/environment-lifecycle.md`
+"Backend implementer's guide": mode validation, attach-mode setup/teardown as no-ops,
+owned-mode setup/teardown success and failure paths, and the "already gone" idempotent
+case. Runs without a real Docker daemon by monkeypatching `docker.from_env` to return
+a fake client.
 
 Real-daemon integration tests will land alongside the file I/O methods; the unit
 coverage here is what proves the lifecycle decision tree, not the daemon plumbing.
 """
 
-import asyncio
 from collections.abc import Iterator
 from typing import Any
+from unittest.mock import MagicMock
 
+import docker.errors
 import pytest
 
 from pydantic_ai_harness.environments import docker as docker_module
-from pydantic_ai_harness.environments.docker import DockerEnvironment, _run_docker
+from pydantic_ai_harness.environments.docker import DockerEnvironment
 
 
 @pytest.fixture
@@ -25,26 +26,65 @@ def anyio_backend() -> str:
     return 'asyncio'
 
 
-@pytest.fixture
-def fake_docker(monkeypatch: pytest.MonkeyPatch) -> Iterator[list[tuple[int, bytes, bytes]]]:
-    """Queue of canned `_run_docker` responses; each call to docker pops the next one.
+class _FakeClient:
+    """In-memory stand-in for `docker.DockerClient`.
 
-    Pattern matches the monkeypatch style in test_local.py: replace the boundary helper
-    rather than `asyncio.create_subprocess_exec` directly, since the boundary is the
-    surface DockerEnvironment depends on.
+    Configurable per test: `run_result` is what `containers.run` returns (or an exception
+    instance to raise); `get_result` is what `containers.get` returns (or an exception);
+    `remove_exc` lets a test make `Container.remove` raise. Tracks calls so tests can
+    assert "this method was never called" (the load-bearing rule for attach mode).
     """
-    responses: list[tuple[int, bytes, bytes]] = []
-    calls: list[tuple[str, ...]] = []
 
-    async def fake_run_docker(*args: str, timeout: float) -> tuple[int, bytes, bytes]:
-        calls.append(args)
-        if not responses:  # pragma: no cover
-            raise AssertionError(f'unexpected docker call: {args!r}')
-        return responses.pop(0)
+    def __init__(self) -> None:
+        self.run_result: Any = None
+        self.get_result: Any = None
+        self.remove_exc: BaseException | None = None
+        self.calls: list[str] = []
+        self.closed = False
 
-    monkeypatch.setattr(docker_module, '_run_docker', fake_run_docker)
-    yield responses
-    # `calls` is exposed via closure if a test needs it; for now we just assert on responses.
+        client_self = self
+
+        class _Containers:
+            def run(self, image: str, command: list[str], detach: bool) -> Any:
+                client_self.calls.append(f'run({image!r})')
+                result = client_self.run_result
+                if isinstance(result, BaseException):
+                    raise result
+                return result
+
+            def get(self, container_id: str) -> Any:
+                client_self.calls.append(f'get({container_id!r})')
+                result = client_self.get_result
+                if isinstance(result, BaseException):
+                    raise result
+                return result
+
+        self.containers = _Containers()
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def _make_container(container_id: str, fake_client: _FakeClient) -> MagicMock:
+    """Build a fake `Container` whose `.remove` raises if the client has a remove_exc set."""
+    container = MagicMock()
+    container.id = container_id
+
+    def remove(force: bool) -> None:
+        fake_client.calls.append(f'remove({container_id!r}, force={force})')
+        if fake_client.remove_exc is not None:
+            raise fake_client.remove_exc
+
+    container.remove = remove
+    return container
+
+
+@pytest.fixture
+def fake_docker(monkeypatch: pytest.MonkeyPatch) -> Iterator[_FakeClient]:
+    """Replace `docker.from_env` so tests get a `_FakeClient` instead of a real daemon."""
+    client = _FakeClient()
+    monkeypatch.setattr(docker_module.docker, 'from_env', lambda: client)
+    yield client
 
 
 # --- mode validation ---------------------------------------------------------
@@ -71,9 +111,7 @@ def test_image_mode_starts_not_yet_started() -> None:
 
 def test_container_mode_binds_attached_id() -> None:
     """Attach mode binds the user's container id at construction; `_started` stays False so
-    the base class's idempotency gate works normally. The harness never touches a container
-    it didn't create because `setup`/`teardown` branch on `self.image is None`, not because
-    of a pre-seeded flag."""
+    the base class's idempotency gate works normally."""
     env = DockerEnvironment(container='abc123')
     assert env._started is False  # pyright: ignore[reportPrivateUsage]
     assert env._container_id == 'abc123'  # pyright: ignore[reportPrivateUsage]
@@ -82,35 +120,30 @@ def test_container_mode_binds_attached_id() -> None:
 # --- attach mode: setup/teardown branch to no-op on `self.image is None` -----
 
 
-async def test_attach_mode_setup_runs_no_docker(fake_docker: list[tuple[int, bytes, bytes]]) -> None:
-    """`start()` in attach mode calls `setup`, which returns immediately without running docker.
-    The flag flips so subsequent calls are idempotent; the user's container is never touched."""
+async def test_attach_mode_setup_runs_no_docker(fake_docker: _FakeClient) -> None:
+    """`start()` in attach mode calls `setup`, which returns immediately without invoking the SDK."""
     env = DockerEnvironment(container='abc123')
-    await env.start()  # would raise via fake_docker if any docker call were made
+    await env.start()
     assert env._container_id == 'abc123'  # pyright: ignore[reportPrivateUsage]
     assert env._started is True  # pyright: ignore[reportPrivateUsage]
+    assert fake_docker.calls == [], 'attach-mode setup must not invoke the SDK'
 
 
-async def test_attach_mode_teardown_runs_no_docker(fake_docker: list[tuple[int, bytes, bytes]]) -> None:
-    """`stop()` in attach mode must NEVER run `docker rm` on the user's container -- that is
-    the load-bearing safety rule. We pin it by asserting zero docker calls across a full
-    start/stop round trip; if the assertion fails, the harness killed a container it didn't own."""
+async def test_attach_mode_teardown_runs_no_docker(fake_docker: _FakeClient) -> None:
+    """`stop()` in attach mode must NEVER touch the user's container -- the load-bearing rule."""
     env = DockerEnvironment(container='abc123')
     await env.start()
     await env.stop()
-    # Zero responses consumed = zero docker calls made = the user's container is intact.
-    assert fake_docker == [], 'attach mode must not invoke docker; user owns lifecycle'
+    assert fake_docker.calls == [], 'attach mode must not invoke the SDK; user owns lifecycle'
     assert env._started is False  # pyright: ignore[reportPrivateUsage]
 
 
 # --- owned mode: setup success / failure --------------------------------------
 
 
-async def test_setup_binds_container_id_on_docker_run_success(
-    fake_docker: list[tuple[int, bytes, bytes]],
-) -> None:
-    """Happy path: `docker run -d <image>` returns the container id on stdout; we bind it."""
-    fake_docker.append((0, b'abc123\n', b''))
+async def test_setup_binds_container_id_on_run_success(fake_docker: _FakeClient) -> None:
+    """Happy path: `containers.run` returns a Container; we bind its id."""
+    fake_docker.run_result = _make_container('abc123', fake_docker)
     env = DockerEnvironment(image='python:3.12-slim')
 
     await env.start()
@@ -119,33 +152,52 @@ async def test_setup_binds_container_id_on_docker_run_success(
     assert env._started is True  # pyright: ignore[reportPrivateUsage]
 
 
-async def test_setup_raises_with_stderr_when_docker_run_fails(
-    fake_docker: list[tuple[int, bytes, bytes]],
-) -> None:
-    """`docker run` exits nonzero (bad image, network issue): surface stderr; do NOT mark started.
-
-    No container was created, so there's nothing to clean up; the next `start()` will retry.
-    This is the base class's failure policy (`_started` stays False on `setup` raise).
-    """
-    fake_docker.append((125, b'', b'Unable to find image nosuchimage:latest'))
+async def test_setup_raises_on_image_not_found(fake_docker: _FakeClient) -> None:
+    """`ImageNotFound`: no container was created, nothing to clean up; `_started` stays False."""
+    fake_docker.run_result = docker.errors.ImageNotFound('nosuchimage:latest not found')
     env = DockerEnvironment(image='nosuchimage:latest')
 
-    with pytest.raises(RuntimeError, match='Unable to find image'):
+    with pytest.raises(RuntimeError, match='docker image not found'):
         await env.start()
 
     assert env._container_id == ''  # pyright: ignore[reportPrivateUsage]
     assert env._started is False  # pyright: ignore[reportPrivateUsage]
 
 
+async def test_setup_raises_on_api_error(fake_docker: _FakeClient) -> None:
+    """Generic `APIError` during run: surface as RuntimeError; do not mark started."""
+    fake_docker.run_result = docker.errors.APIError('Cannot connect to the Docker daemon')
+    env = DockerEnvironment(image='python:3.12-slim')
+
+    with pytest.raises(RuntimeError, match='docker run failed'):
+        await env.start()
+
+    assert env._started is False  # pyright: ignore[reportPrivateUsage]
+
+
 # --- owned mode: teardown success / "already gone" / daemon failure ----------
 
 
-async def test_teardown_runs_docker_rm_on_owned_container(
-    fake_docker: list[tuple[int, bytes, bytes]],
-) -> None:
-    """Happy path: `docker rm -f <id>` succeeds; we clear `_container_id` and the flag."""
-    fake_docker.append((0, b'abc123\n', b''))  # docker run
-    fake_docker.append((0, b'abc123\n', b''))  # docker rm
+async def test_teardown_removes_owned_container(fake_docker: _FakeClient) -> None:
+    """Happy path: `containers.get` + `container.remove(force=True)`; flag clears."""
+    container = _make_container('abc123', fake_docker)
+    fake_docker.run_result = container
+    fake_docker.get_result = container
+    env = DockerEnvironment(image='python:3.12-slim')
+
+    await env.start()
+    await env.stop()
+
+    assert env._container_id == ''  # pyright: ignore[reportPrivateUsage]
+    assert env._started is False  # pyright: ignore[reportPrivateUsage]
+    assert fake_docker.closed is True
+    assert "remove('abc123', force=True)" in fake_docker.calls
+
+
+async def test_teardown_swallows_not_found_from_get(fake_docker: _FakeClient) -> None:
+    """`containers.get` raises `NotFound` (container removed out-of-band): swallow and finish."""
+    fake_docker.run_result = _make_container('abc123', fake_docker)
+    fake_docker.get_result = docker.errors.NotFound('No such container: abc123')
     env = DockerEnvironment(image='python:3.12-slim')
 
     await env.start()
@@ -155,38 +207,31 @@ async def test_teardown_runs_docker_rm_on_owned_container(
     assert env._started is False  # pyright: ignore[reportPrivateUsage]
 
 
-async def test_teardown_swallows_no_such_container(
-    fake_docker: list[tuple[int, bytes, bytes]],
-) -> None:
-    """ "Already gone" is the outcome teardown wanted; swallow rather than surface as an error.
-
-    Triggered in real life by: container OOM-killed, manually removed, daemon restarted, or
-    a previous teardown that succeeded on the daemon but lost its response. The base class's
-    idempotency then becomes meaningful: a second `stop()` after a daemon hiccup must succeed.
-    """
-    fake_docker.append((0, b'abc123\n', b''))  # docker run
-    fake_docker.append((1, b'', b'Error: No such container: abc123'))  # docker rm: already gone
+async def test_teardown_swallows_not_found_from_remove(fake_docker: _FakeClient) -> None:
+    """`container.remove` raises `NotFound` (race with daemon GC): swallow and finish."""
+    container = _make_container('abc123', fake_docker)
+    fake_docker.run_result = container
+    fake_docker.get_result = container
+    fake_docker.remove_exc = docker.errors.NotFound('No such container: abc123')
     env = DockerEnvironment(image='python:3.12-slim')
 
     await env.start()
-    await env.stop()  # must not raise
+    await env.stop()
 
     assert env._container_id == ''  # pyright: ignore[reportPrivateUsage]
     assert env._started is False  # pyright: ignore[reportPrivateUsage]
 
 
-async def test_teardown_propagates_real_daemon_error(
-    fake_docker: list[tuple[int, bytes, bytes]],
-) -> None:
-    """Daemon failure (not "no such container"): propagate. Leaves `_started=True` per the
-    base contract so the caller can retry or escalate -- the OpenHands antipattern we
-    deliberately avoid is blanket-suppressing this case."""
-    fake_docker.append((0, b'abc123\n', b''))  # docker run
-    fake_docker.append((1, b'', b'Cannot connect to the Docker daemon'))  # docker rm: daemon dead
+async def test_teardown_propagates_api_error(fake_docker: _FakeClient) -> None:
+    """`APIError` during remove (not NotFound): propagate; `_started` stays True so a retry is possible."""
+    container = _make_container('abc123', fake_docker)
+    fake_docker.run_result = container
+    fake_docker.get_result = container
+    fake_docker.remove_exc = docker.errors.APIError('Cannot connect to the Docker daemon')
     env = DockerEnvironment(image='python:3.12-slim')
 
     await env.start()
-    with pytest.raises(RuntimeError, match='Cannot connect to the Docker daemon'):
+    with pytest.raises(docker.errors.APIError, match='Cannot connect'):
         await env.stop()
 
     assert env._started is True  # pyright: ignore[reportPrivateUsage]
@@ -195,75 +240,14 @@ async def test_teardown_propagates_real_daemon_error(
 # --- async context manager round trip ----------------------------------------
 
 
-async def test_async_with_round_trip_in_owned_mode(
-    fake_docker: list[tuple[int, bytes, bytes]],
-) -> None:
-    """`async with` flows through start/stop with both docker calls in the expected order."""
-    fake_docker.append((0, b'abc123\n', b''))  # docker run
-    fake_docker.append((0, b'abc123\n', b''))  # docker rm
+async def test_async_with_round_trip_in_owned_mode(fake_docker: _FakeClient) -> None:
+    """`async with` flows through start/stop with both SDK calls in the expected order."""
+    container = _make_container('abc123', fake_docker)
+    fake_docker.run_result = container
+    fake_docker.get_result = container
 
     env = DockerEnvironment(image='python:3.12-slim')
     async with env as bound:
         assert bound is env
         assert env._container_id == 'abc123'  # pyright: ignore[reportPrivateUsage]
     assert env._container_id == ''  # pyright: ignore[reportPrivateUsage]
-
-
-# --- _run_docker: subprocess plumbing (success + timeout) --------------------
-
-
-class _FakeProc:
-    """Stand-in for an `asyncio.subprocess.Process` driven by canned values.
-
-    Just enough surface to satisfy `_run_docker`: `communicate` returns the pre-set
-    output and the `returncode` attribute is set; `kill` + `wait` exist for the timeout
-    path so the helper can clean up its client subprocess.
-    """
-
-    def __init__(self, returncode: int, stdout: bytes, stderr: bytes, *, hang: bool = False) -> None:
-        self.returncode = returncode
-        self._stdout = stdout
-        self._stderr = stderr
-        self._hang = hang
-        self.killed = False
-
-    async def communicate(self) -> tuple[bytes, bytes]:
-        if self._hang:
-            # Sleep longer than any test timeout so `wait_for` always trips first.
-            await asyncio.sleep(60)
-        return self._stdout, self._stderr
-
-    def kill(self) -> None:
-        self.killed = True
-
-    async def wait(self) -> int:
-        return self.returncode
-
-
-async def test_run_docker_returns_captured_subprocess_output(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Happy path: `_run_docker` returns the subprocess's exit code, stdout, and stderr."""
-    proc = _FakeProc(returncode=0, stdout=b'cid\n', stderr=b'')
-
-    async def fake_exec(*args: str, **kwargs: Any) -> _FakeProc:
-        return proc
-
-    monkeypatch.setattr(asyncio, 'create_subprocess_exec', fake_exec)
-
-    rc, stdout, stderr = await _run_docker('run', '-d', 'img', timeout=1.0)
-    assert (rc, stdout, stderr) == (0, b'cid\n', b'')
-
-
-async def test_run_docker_timeout_kills_subprocess_and_raises(monkeypatch: pytest.MonkeyPatch) -> None:
-    """When the daemon hangs past `timeout`, the helper kills the client subprocess and
-    propagates `asyncio.TimeoutError` -- the bounded-await guarantee from the implementer's
-    guide. Without this, a hung daemon would freeze every `setup` / `teardown`."""
-    proc = _FakeProc(returncode=0, stdout=b'', stderr=b'', hang=True)
-
-    async def fake_exec(*args: str, **kwargs: Any) -> _FakeProc:
-        return proc
-
-    monkeypatch.setattr(asyncio, 'create_subprocess_exec', fake_exec)
-
-    with pytest.raises(asyncio.TimeoutError):
-        await _run_docker('rm', '-f', 'cid', timeout=0.05)
-    assert proc.killed is True
