@@ -120,6 +120,23 @@ class FileSystemToolset(FunctionToolset[Any]):
             if not any(fnmatch.fnmatch(path, p) for p in self._allowed_patterns):
                 raise PermissionError(f'Path {path!r} does not match any allowed pattern.')
 
+    def _is_accessible(self, path: str, *, write: bool = False) -> bool:
+        """Predicate form of `_check_access` for filtering recursive walkers.
+
+        Used by `list_directory`, `search_files`, and `find_files` to skip
+        children that would be rejected if accessed directly. Note this only
+        checks the relative path against patterns; it does not resolve symlinks.
+        """
+        if write and self._protected_patterns:
+            if self._first_matching_pattern(path, self._protected_patterns) is not None:
+                return False
+        if self._denied_patterns:
+            if self._first_matching_pattern(path, self._denied_patterns) is not None:
+                return False
+        if self._allowed_patterns and not any(fnmatch.fnmatch(path, p) for p in self._allowed_patterns):
+            return False
+        return True
+
     def _safe_resolve(self, path: str, *, write: bool = False) -> Path:
         """Resolve and access-check a path in one step."""
         self._check_access(path, write=write)
@@ -250,6 +267,11 @@ class FileSystemToolset(FunctionToolset[Any]):
                 rel = str(entry.relative_to(self._real_root))
             except ValueError:  # pragma: no cover
                 continue
+            # Apply the same allow/deny/protected filtering used for direct
+            # access so a directory listing can't leak patterns the agent
+            # couldn't otherwise read or write.
+            if not self._is_accessible(rel, write=True):
+                continue
             if entry.is_dir():
                 entries.append(f'{rel}/')
             else:
@@ -295,6 +317,11 @@ class FileSystemToolset(FunctionToolset[Any]):
             if any(part.startswith('.') for part in rel_parts):
                 continue
             rel_str = str(file_path.relative_to(real_root))
+            # Apply the same allow/deny/protected filtering used for direct
+            # access so a recursive search can't read patterns the agent
+            # couldn't otherwise read.
+            if not self._is_accessible(rel_str, write=True):
+                continue
             if include_glob and not fnmatch.fnmatch(rel_str, include_glob):
                 continue
             try:
@@ -337,6 +364,11 @@ class FileSystemToolset(FunctionToolset[Any]):
             if any(part.startswith('.') for part in rel_parts):
                 continue
             rel = str(match.relative_to(real_root))
+            # Apply the same allow/deny/protected filtering used for direct
+            # access so a glob find can't surface patterns the agent
+            # couldn't otherwise see.
+            if not self._is_accessible(rel, write=True):
+                continue
             suffix = '/' if match.is_dir() else ''
             matches.append(f'{rel}{suffix}')
             if len(matches) >= self._max_find_results:
