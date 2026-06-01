@@ -152,8 +152,10 @@ class AbstractEnvironment(ABC):
         constrain `find`/native globbing to match these semantics rather than expose their own dialect;
         for anything more, the model uses `shell`.
 
-        Dotfiles are excluded for `*` patterns: `*.py` does not match `.hidden.py`, and
-        `**/*.py` does not descend into `.git/`.
+        Dotfile policy follows the underlying engine (ripgrep's `globset`): hidden directories
+        are not descended into (`**/*.py` does not enter `.git/`), but a hidden file matched by
+        the pattern at the top level IS returned (`*.py` does match `.hidden.py`). To exclude
+        top-level dotfiles, narrow the pattern (e.g. `[!.]*.py`).
 
         Args:
             path: Directory path, resolved against and confined to `root`.

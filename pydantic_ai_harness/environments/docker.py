@@ -9,8 +9,9 @@ Failure-handling patterns come from prior art -- see
 
 - Container id is bound from the `Container` object returned by `containers.run`,
   before any other await -- the orphan window is zero lines long.
-- Every blocking SDK call runs under `asyncio.wait_for(asyncio.to_thread(...))` so a
-  hung daemon can't hang the agent.
+- Every blocking SDK call runs under `asyncio.wait_for(_run_blocking(...))` (a
+  module-level `ThreadPoolExecutor`) so a hung daemon can't hang the agent and
+  repeated timeouts don't leak threads.
 - `teardown` swallows only `docker.errors.NotFound` (the idempotent "already gone"
   case). Every other SDK error (`APIError`, connection, permission) propagates,
   leaving `_started=True` so a retry is possible.
@@ -19,15 +20,64 @@ Failure-handling patterns come from prior art -- see
 import asyncio
 import contextlib
 import shlex
+import socket
 import uuid
+from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
+from pathlib import PurePosixPath
+from typing import ParamSpec, TypeVar
 
 import docker
 import docker.errors
 from docker import DockerClient
 
+from ._ripgrep import RG_EXIT_USAGE_OR_PATTERN, parse_ripgrep_json
 from .abstract import AbstractEnvironment, AbstractFile, AbstractMatch, ShellCommandResult
-from .exceptions import EnvShellExecutionError
+from .exceptions import (
+    EnvInvalidPatternError,
+    EnvIsADirectoryError,
+    EnvNotADirectoryError,
+    EnvNotFoundError,
+    EnvPermissionError,
+    EnvReadError,
+    EnvShellExecutionError,
+    EnvWriteError,
+    PathEscapeError,
+)
+
+_P = ParamSpec('_P')
+_T = TypeVar('_T')
+
+# Shared bounded executor so a hung daemon or repeated timeouts don't leak one thread per
+# blocking docker call. The default `asyncio.to_thread` executor is unbounded and grows under
+# timeout; a fixed pool caps the worst case.
+_DOCKER_EXECUTOR = ThreadPoolExecutor(max_workers=8, thread_name_prefix='harness-docker')
+
+
+# Sentinel exit codes returned by our internal pre-check shell scripts. Picked above 64 to
+# stay clear of POSIX's reserved range (0 success, 1 generic error, 2 usage, 126 not-executable,
+# 127 command-not-found, 128+N signal-N). When the script body has its own exit code we also
+# care about (cat, ls, rg), it shares the same numeric space -- the shell pre-checks run before
+# the body and exit early on mismatch, so the body's exit only surfaces on the happy path.
+_EXIT_NOT_FOUND = 71
+_EXIT_IS_DIRECTORY = 72
+_EXIT_PERMISSION_DENIED = 73
+_EXIT_NOT_A_DIRECTORY = 74
+
+# POSIX-mandated exit code from `sh` / `docker exec` when the requested binary is not found.
+# Used to detect "rg not installed in image" without parsing stderr text.
+_EXIT_COMMAND_NOT_FOUND = 127
+
+
+async def _run_blocking(fn: Callable[_P, _T], /, *args: _P.args, **kwargs: _P.kwargs) -> _T:
+    """`asyncio.to_thread` equivalent that uses the module-level docker executor.
+
+    `ParamSpec` preserves `fn`'s signature so overloaded SDK methods (e.g. `exec_start`)
+    bind to the correct overload and the return type carries through unchanged.
+    """
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(_DOCKER_EXECUTOR, lambda: fn(*args, **kwargs))
 
 
 @dataclass(kw_only=True)
@@ -95,14 +145,14 @@ class DockerEnvironment(AbstractEnvironment):
         if self.image is None:
             return
 
-        client = await asyncio.to_thread(docker.from_env)
+        client = await _run_blocking(docker.from_env)
         self._client = client
         try:
             # `containers.run(detach=True)` returns a Container as soon as the container is
             # created. We bind `_container_id` from its `.id` before any other await -- the
             # acquire-then-protect line.
             container = await asyncio.wait_for(
-                asyncio.to_thread(client.containers.run, self.image, ['sleep', 'infinity'], detach=True),
+                _run_blocking(client.containers.run, self.image, ['sleep', 'infinity'], detach=True),
                 timeout=self.startup_timeout,
             )
         except docker.errors.ImageNotFound as exc:
@@ -128,37 +178,288 @@ class DockerEnvironment(AbstractEnvironment):
         if container_id is None:  # pragma: no cover -- setup never bound an id
             return
         try:
-            container = await asyncio.to_thread(client.containers.get, container_id)
+            container = await _run_blocking(client.containers.get, container_id)
             await asyncio.wait_for(
-                asyncio.to_thread(container.remove, force=True),
+                _run_blocking(container.remove, force=True),
                 timeout=self.teardown_timeout,
             )
         except docker.errors.NotFound:
             # Container is already gone: the state we wanted. Idempotent.
             pass
         self._container_id = None
-        await asyncio.to_thread(client.close)
+        await _run_blocking(client.close)
         self._client = None
 
+    def _resolve(self, path: str) -> str:
+        """Resolve `path` against `root` and reject anything that escapes.
+
+        `PurePosixPath` because container paths are POSIX regardless of host. Same advisory
+        jail caveat as LocalEnvironment: jail is bypassable via the shell tool, symlinks, or
+        a TOCTOU race -- the container is the real boundary, the jail just keeps the model
+        from accidentally addressing absolute paths.
+        """
+        resolved = PurePosixPath(self.root, path)
+        root = PurePosixPath(self.root)
+        if not resolved.is_relative_to(root):
+            raise PathEscapeError(f'{path!r} resolves outside the environment root {self.root!r}')
+        return str(resolved)
+
+    async def _exec(self, argv: list[str], stdin: bytes | None = None) -> tuple[int, bytes, bytes]:
+        """Run `argv` in the container, optionally piping `stdin`, return (exit, stdout, stderr).
+
+        When `stdin` is provided the protocol is `exec_create(stdin=True)`, `exec_start(socket=True)`,
+        write bytes onto the underlying raw socket, half-close with `shutdown(SHUT_WR)` to signal
+        EOF, drain, then `exec_inspect` for the exit code. The `_sock` private-attribute reach is
+        the only path docker-py offers for half-close; the pyright ignores annotate stub gaps,
+        not unsafe access.
+        """
+        client = self._client
+        container_id = self._container_id
+        if client is None or container_id is None:
+            raise RuntimeError('environment not started; call start() first')
+
+        exec_create = client.api.exec_create  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
+        try:
+            exec_info = await _run_blocking(
+                exec_create,  # pyright: ignore[reportUnknownArgumentType]
+                container_id,
+                cmd=argv,
+                stdin=stdin is not None,
+            )
+        except docker.errors.APIError as exc:
+            raise EnvShellExecutionError(f'docker exec_create failed: {exc.explanation}') from exc
+        exec_id = exec_info['Id']
+
+        if stdin is None:
+            stdout_bytes, stderr_bytes = await _run_blocking(client.api.exec_start, exec_id, demux=True)
+        else:
+            stdout_bytes, stderr_bytes = await self._exec_with_stdin(client, exec_id, stdin)
+
+        info = await _run_blocking(client.api.exec_inspect, exec_id)
+        exit_code = info['ExitCode']
+        if exit_code is None:
+            raise EnvShellExecutionError(f'docker reported no exit code for internal exec {exec_id}')
+        return exit_code, stdout_bytes or b'', stderr_bytes or b''
+
+    async def _exec_with_stdin(self, client: DockerClient, exec_id: str, data: bytes) -> tuple[bytes, bytes]:
+        """Pipe `data` into a started exec via the half-close pattern, return drained output.
+
+        `exec_start(socket=True)` returns docker-py's `SocketIO` wrapper exposing a `_sock`
+        private attr -- the only way to call `shutdown(SHUT_WR)`, which is required to signal
+        EOF so `cat > path` flushes and exits. After EOF we drain the demuxed stream until the
+        socket closes; for `cat > path` the drain is normally empty (errors go to stderr and
+        are surfaced via the `exec_inspect` exit code).
+        """
+        sock = await _run_blocking(client.api.exec_start, exec_id, socket=True, demux=True)
+        raw = sock._sock  # pyright: ignore[reportPrivateUsage, reportAttributeAccessIssue, reportUnknownMemberType, reportUnknownVariableType]
+        try:
+            await _run_blocking(raw.sendall, data)  # pyright: ignore[reportUnknownArgumentType, reportUnknownMemberType]
+            await _run_blocking(raw.shutdown, socket.SHUT_WR)  # pyright: ignore[reportUnknownArgumentType, reportUnknownMemberType]
+            drained: list[bytes] = []
+            while True:
+                chunk: bytes = await _run_blocking(raw.recv, 65536)  # pyright: ignore[reportUnknownArgumentType, reportUnknownMemberType]
+                if not chunk:
+                    break
+                drained.append(chunk)
+        finally:
+            sock.close()  # pyright: ignore[reportUnknownMemberType]
+        # `cat > path` doesn't emit on stdout; anything in `drained` is the multiplexed stream
+        # which we'd parse for stderr only if we needed to distinguish. The exit code from
+        # `exec_inspect` already tells us success/failure; we surface the drained bytes as stderr
+        # for the error path's diagnostic text.
+        return b'', b''.join(drained)
+
     async def read_file(self, path: str) -> bytes:
-        """Coming next chunk."""
-        raise NotImplementedError  # pragma: no cover
+        """Read `path` via `cat` inside the container; pre-validate so errors map cleanly.
+
+        A small inline sh script pre-checks existence/type/readability and exits with sentinel
+        codes so we can raise the right ABC exception without scraping stderr text.
+        """
+        # Why `cat`, not `get_archive`: get_archive mis-behaves on volume-driver-mounted dirs.
+        # Reference: openai/openai-agents-python `docker.py:663-666`.
+        resolved = self._resolve(path)
+        # The pre-check exits with sentinel codes (see module-top constants) so we map errors
+        # without scraping stderr text. `cat`'s own exit is 0 for success or 1 for I/O error;
+        # the pre-checks run before cat so the common cases become structured signals.
+        script = (
+            f'[ -e "$1" ] || exit {_EXIT_NOT_FOUND};'
+            f' [ -d "$1" ] && exit {_EXIT_IS_DIRECTORY};'
+            f' [ -r "$1" ] || exit {_EXIT_PERMISSION_DENIED};'
+            ' cat -- "$1"'
+        )
+        exit_code, stdout, stderr = await self._exec(['/bin/sh', '-c', script, 'sh', resolved])
+        if exit_code == 0:
+            return stdout
+        if exit_code == _EXIT_NOT_FOUND:
+            raise EnvNotFoundError(f'{path!r} not found in the environment root {self.root!r}')
+        if exit_code == _EXIT_IS_DIRECTORY:
+            raise EnvIsADirectoryError(f'{path!r} is a directory in the environment root {self.root!r}')
+        if exit_code == _EXIT_PERMISSION_DENIED:
+            raise EnvPermissionError(f'{path!r} is not readable by the environment root {self.root!r}')
+        if exit_code == _EXIT_NOT_A_DIRECTORY:
+            raise EnvNotADirectoryError(
+                f'{path!r} contains a non-directory component in the environment root {self.root!r}'
+            )
+        raise EnvReadError(
+            f'{path!r} could not be read in the environment root {self.root!r}: {stderr.decode(errors="replace").strip()}'
+        )
 
     async def write_file(self, path: str, data: bytes) -> None:
-        """Coming next chunk."""
-        raise NotImplementedError  # pragma: no cover
+        """Write `data` to `path` via a streamed `cat > path` exec.
+
+        A pre-check script encodes the write-specific cases (target is a directory, parent not
+        writable) into sentinel exit codes so we don't have to parse stderr text.
+        """
+        # Why streamed stdin instead of `put_archive`: put_archive re-triggers mount-setup on
+        # volume-driver-plugin mounts and is a known bug class.
+        # References: openai/openai-agents-python `docker.py:663-666` (the workaround),
+        # openai-agents-python issue #3093 (symlink-in-tar safety, related).
+        resolved = self._resolve(path)
+        parent = str(PurePosixPath(resolved).parent)
+
+        # Create the parent dir; any mkdir failure becomes EnvWriteError. Write semantics treat
+        # a non-dir component as a write failure rather than reporting NotADirectory separately.
+        mkdir_exit, _mkdir_out, mkdir_err = await self._exec(['mkdir', '-p', '--', parent])
+        if mkdir_exit != 0:
+            raise EnvWriteError(
+                f'{path!r} could not be written in the environment root {self.root!r}: '
+                f'mkdir {parent!r} failed: {mkdir_err.decode(errors="replace").strip()}'
+            )
+
+        # Pre-check encodes write-specific cases into sentinel exit codes (see module-top
+        # constants). cat's own non-zero exit means the redirect failed at runtime; `set -e`
+        # so a failed redirect surfaces non-zero rather than silently truncating.
+        script = (
+            f'[ -d "$1" ] && exit {_EXIT_IS_DIRECTORY};'
+            f' [ -w "$(dirname -- "$1")" ] || exit {_EXIT_PERMISSION_DENIED};'
+            ' set -e; cat > "$1"'
+        )
+        exit_code, _stdout, stderr = await self._exec(
+            ['/bin/sh', '-c', script, 'sh', resolved],
+            stdin=data,
+        )
+        if exit_code == 0:
+            return
+        if exit_code == _EXIT_IS_DIRECTORY:
+            raise EnvWriteError(f'{path!r} is an existing directory in the environment root {self.root!r}')
+        if exit_code == _EXIT_PERMISSION_DENIED:
+            raise EnvPermissionError(f'{path!r} is not writable by the environment root {self.root!r}')
+        raise EnvWriteError(
+            f'{path!r} could not be written in the environment root {self.root!r}: '
+            f'{stderr.decode(errors="replace").strip()}'
+        )
 
     async def ls(self, path: str) -> list[AbstractFile]:
-        """Coming next chunk."""
-        raise NotImplementedError  # pragma: no cover
+        """List directory contents via `ls -1AF -- <path>` and parse the indicator suffix.
+
+        `-A` includes dotfiles (excludes `.`/`..`); `-1` one entry per line; `-F` appends a
+        type indicator (`/` directory, `@` symlink, `*` executable, `=` socket, `|` FIFO).
+        Symlinks classify by entry (a symlink to a directory gets `@`, not `/`) -- matches
+        LocalEnvironment's `is_dir(follow_symlinks=False)` semantics exactly.
+        """
+        resolved = self._resolve(path)
+        # Pre-check before `ls` so failures are structured signals (see module-top constants)
+        # rather than parsed from `ls`'s stderr text, which differs across coreutils/busybox.
+        script = (
+            f'[ -e "$1" ] || exit {_EXIT_NOT_FOUND};'
+            f' [ -d "$1" ] || exit {_EXIT_NOT_A_DIRECTORY};'
+            f' [ -r "$1" ] || exit {_EXIT_PERMISSION_DENIED};'
+            ' ls -1AF -- "$1"'
+        )
+        exit_code, stdout, stderr = await self._exec(['/bin/sh', '-c', script, 'sh', resolved])
+        if exit_code == _EXIT_NOT_FOUND:
+            raise EnvNotFoundError(f'{path!r} not found in the environment root {self.root!r}')
+        if exit_code == _EXIT_PERMISSION_DENIED:
+            raise EnvPermissionError(f'{path!r} is not listable by the environment root {self.root!r}')
+        if exit_code == _EXIT_NOT_A_DIRECTORY:
+            raise EnvNotADirectoryError(f'{path!r} is not a directory in the environment root {self.root!r}')
+        if exit_code != 0:
+            raise EnvReadError(
+                f'{path!r} could not be listed in the environment root {self.root!r}: '
+                f'{stderr.decode(errors="replace").strip()}'
+            )
+
+        entries: list[AbstractFile] = []
+        for raw_line in stdout.splitlines():
+            line = raw_line.decode()
+            if not line:
+                continue
+            # Strip the type indicator: `/` directory, `@` symlink, anything else (executable,
+            # socket, FIFO) treated as a file. Only `/` flips is_directory.
+            if line.endswith('/'):
+                entries.append(AbstractFile(name=line[:-1], is_directory=True))
+            elif line[-1] in '@*=|':
+                entries.append(AbstractFile(name=line[:-1], is_directory=False))
+            else:
+                entries.append(AbstractFile(name=line, is_directory=False))
+        return entries
 
     async def grep(self, path: str, pattern: str) -> list[AbstractMatch]:
-        """Coming next chunk."""
-        raise NotImplementedError  # pragma: no cover
+        """Search `path` for `pattern` by invoking `rg` inside the container.
+
+        Requires `rg` (ripgrep) to be installed in the container image. Exit 127 from the exec
+        indicates the binary is missing; vendoring `rg` automatically into the container is
+        tracked separately. Argv mirrors the host helper so the dialect contract is the same
+        engine on both backends: `--regexp=` keeps the pattern inside one argv element,
+        `--no-config`/`--one-file-system` defend against hostile env / mount escapes, `--` ends
+        flags so a path starting with `-` cannot be parsed as one.
+        """
+        target = self._resolve(path)
+        argv = [
+            'rg',
+            '--json',
+            '--no-config',
+            '--one-file-system',
+            f'--regexp={pattern}',
+            '--',
+            target,
+        ]
+        exit_code, stdout, stderr = await self._exec(argv)
+        if exit_code == _EXIT_COMMAND_NOT_FOUND:
+            raise EnvShellExecutionError(
+                'ripgrep (`rg`) is not installed in the container image; install it (e.g. '
+                '`apt-get install -y ripgrep`) or use an image that already provides it'
+            )
+        # Same exit-code discrimination as the host helper: empty stdout + exit 2 means the
+        # pattern did not compile (model-fixable); exit 2 with output means rg walked but hit
+        # a per-file error which we surface as the parsed partial result. Exit 1 is "no
+        # matches" -- normal empty result.
+        if exit_code == RG_EXIT_USAGE_OR_PATTERN and not stdout:
+            raise EnvInvalidPatternError(f'invalid regex {pattern!r}: {stderr.decode(errors="replace").strip()}')
+        return parse_ripgrep_json(stdout, PurePosixPath(self.root))
 
     async def glob(self, path: str, pattern: str) -> list[str]:
-        """Coming next chunk."""
-        raise NotImplementedError  # pragma: no cover
+        """List files under `path` matching glob `pattern` via `rg --files -g` in the container.
+
+        Single engine (rg's `globset` crate) across host and container backends -- the dialect
+        contract verified by the conformance suite is engine-level, not OS-level. Dotfile
+        policy follows rg: hidden directories are not descended into; top-level dotfile leaves
+        matched by the pattern are returned.
+        """
+        target = self._resolve(path)
+        argv = [
+            'rg',
+            '--files',
+            '--no-ignore',
+            '--no-config',
+            '--one-file-system',
+            f'--glob={pattern}',
+            '--',
+            target,
+        ]
+        exit_code, stdout, stderr = await self._exec(argv)
+        if exit_code == _EXIT_COMMAND_NOT_FOUND:
+            raise EnvShellExecutionError(
+                'ripgrep (`rg`) is not installed in the container image; install it (e.g. '
+                '`apt-get install -y ripgrep`) or use an image that already provides it'
+            )
+        if exit_code == RG_EXIT_USAGE_OR_PATTERN:
+            msg = stderr.decode(errors='replace').strip()
+            if not stdout:
+                raise EnvInvalidPatternError(f'invalid glob {pattern!r}: {msg}')
+            raise EnvReadError(f'ripgrep failed for {path!r} in the environment root {self.root!r}: {msg}')
+        root = PurePosixPath(self.root)
+        return [str(PurePosixPath(line.decode()).relative_to(root)) for line in stdout.splitlines() if line]
 
     async def shell_command(self, command: str, timeout: float | None = None) -> ShellCommandResult:
         """Run `command` in the container and return stdout, stderr, and the exit code.
@@ -188,13 +489,13 @@ class DockerEnvironment(AbstractEnvironment):
         # kwarg is typed. `exec_start` and `exec_inspect` in the same stub are fully typed.
         exec_create = client.api.exec_create  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
         try:
-            exec_info = await asyncio.to_thread(exec_create, container_id, cmd=['/bin/sh', '-c', launcher])  # pyright: ignore[reportUnknownArgumentType]
+            exec_info = await _run_blocking(exec_create, container_id, cmd=['/bin/sh', '-c', launcher])  # pyright: ignore[reportUnknownArgumentType]
         except docker.errors.APIError as exc:
             raise EnvShellExecutionError(f'docker exec_create failed: {exc.explanation}') from exc
         exec_id = exec_info['Id']
 
         exec_start = client.api.exec_start
-        exec_task = asyncio.create_task(asyncio.to_thread(exec_start, exec_id, demux=True))
+        exec_task = asyncio.create_task(_run_blocking(exec_start, exec_id, demux=True))
 
         timed_out = False
         try:
@@ -209,11 +510,19 @@ class DockerEnvironment(AbstractEnvironment):
                 await exec_task
             raise
 
-        info = await asyncio.to_thread(client.api.exec_inspect, exec_id)
+        info = await _run_blocking(client.api.exec_inspect, exec_id)
+        exit_code = info['ExitCode']
+        if exit_code is None:
+            # `ExitCode is None` means the daemon hasn't recorded the exit yet -- the stream
+            # closed but the exec is still flagged Running. Treat as transport failure rather
+            # than papering over it with a 0 or -1; the caller has no reliable result to use.
+            raise EnvShellExecutionError(
+                f'docker reported no exit code for exec {exec_id}; daemon state is inconsistent'
+            )
         return ShellCommandResult(
             stdout=stdout_bytes or b'',
             stderr=stderr_bytes or b'',
-            return_code=info['ExitCode'],
+            return_code=exit_code,
             timed_out=timed_out,
         )
 
@@ -227,5 +536,5 @@ class DockerEnvironment(AbstractEnvironment):
         kill_cmd = f'kill -KILL "$(cat {pidfile} 2>/dev/null || echo 0)" 2>/dev/null || true'
         exec_create = client.api.exec_create  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
         with contextlib.suppress(docker.errors.APIError):
-            kill_info = await asyncio.to_thread(exec_create, container_id, cmd=['/bin/sh', '-c', kill_cmd])  # pyright: ignore[reportUnknownArgumentType]
-            await asyncio.to_thread(client.api.exec_start, kill_info['Id'])
+            kill_info = await _run_blocking(exec_create, container_id, cmd=['/bin/sh', '-c', kill_cmd])  # pyright: ignore[reportUnknownArgumentType]
+            await _run_blocking(client.api.exec_start, kill_info['Id'])

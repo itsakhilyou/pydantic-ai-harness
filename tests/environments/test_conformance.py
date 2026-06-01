@@ -335,9 +335,14 @@ async def test_write_creates_intermediate_directories(environment: AbstractEnvir
     assert await environment.read_file('pkg/sub/new.txt') == b'hello'
 
 
-async def test_glob_excludes_dotfiles(environment: AbstractEnvironment, tmp_path: Path) -> None:
+async def test_glob_excludes_dotdir_contents_but_returns_top_level_dotfiles(
+    environment: AbstractEnvironment, tmp_path: Path
+) -> None:
+    """rg's dotfile policy is our policy: hidden DIRS are not descended into, but a hidden FILE
+    matched by `--glob` at the top level IS returned. Single engine, single dialect; if the model
+    wants to exclude top-level dotfiles, it narrows the pattern (`[!.]*.py`)."""
     (tmp_path / 'visible.py').write_text('')
     (tmp_path / '.hidden.py').write_text('')
     (tmp_path / '.cache').mkdir()
     (tmp_path / '.cache' / 'inside.py').write_text('')
-    assert await environment.glob('.', '*.py') == ['visible.py']
+    assert sorted(await environment.glob('.', '*.py')) == ['.hidden.py', 'visible.py']

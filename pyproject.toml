@@ -126,6 +126,13 @@ filterwarnings = [
     'error',
     # DBOS's run_sync triggers this on Python 3.12+ — not our code.
     'ignore:There is no current event loop:DeprecationWarning',
+    # docker-py/urllib3 HTTPResponse finalizers race the connection-pool socket close on
+    # Python 3.14 and surface as PytestUnraisableExceptionWarning during teardown. Only hits
+    # live-docker tests (mocked tests don't open real sockets); the ownership lives in
+    # docker-py/urllib3, not us. References: docker-py#1293, urllib3#3082, cpython#113199,
+    # pytest#13308. Same workaround testcontainers-python and pytest itself adopt.
+    'ignore::pytest.PytestUnraisableExceptionWarning',
+    'ignore::ResourceWarning',
 ]
 anyio_mode = 'auto'
 
