@@ -1,11 +1,12 @@
 # Mutation Testing Results
 
 > Generated from commit `bd268c8` on 2026-05-26. Results may become stale as code
-> evolves — regenerate via `uv run mutmut run --max-children 1`.
+> evolves — regenerate via `scripts/run-mutmut.sh run --max-children 1`.
 
 Covers `pydantic_ai_harness/filesystem/_toolset.py` and `pydantic_ai_harness/shell/_toolset.py`.
 
-Run with [mutmut](https://mutmut.readthedocs.io/) v3 (`uv run mutmut run --max-children 1`).
+Run with [mutmut](https://mutmut.readthedocs.io/) v3 via `scripts/run-mutmut.sh` (which
+installs mutmut ephemerally with `uv run --with` — no dev dependency required).
 
 ## Summary
 
@@ -42,7 +43,7 @@ tests exercise the same code paths as the asyncio tests.
 ## Running
 
 ```bash
-uv run mutmut run --max-children 1
-uv run mutmut results
-uv run mutmut show <mutant-name>
+scripts/run-mutmut.sh run --max-children 1
+scripts/run-mutmut.sh results
+scripts/run-mutmut.sh show <mutant-name>
 ```

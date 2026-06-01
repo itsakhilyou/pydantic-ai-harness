@@ -65,7 +65,6 @@ dev = [
     'logfire[httpx]>=4.31.0',
     "dirty-equals>=0.9.0",
     "inline-snapshot>=0.32.5",
-    "mutmut>=3.5.0",
 ]
 lint = [
     'ruff>=0.14',
