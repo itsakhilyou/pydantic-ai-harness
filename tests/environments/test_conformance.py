@@ -1,17 +1,17 @@
 """Backend conformance suite: the contract every `AbstractEnvironment` must satisfy.
 
 Each test takes the parametrized `environment` fixture and runs against every backend.
-Files are seeded on the host `tmp_path` and exercised through `environment`; the two
-point at the same directory (see `conftest.py`). Backend-specific behavior (symlink
-resolution, POSIX permissions) lives in the per-backend test modules, not here.
+Tests seed files via `seed_file` / `seed_dir` (defined in `conftest.py`), which call
+`env.write_file()` -- so the same test body works on any backend without depending on
+host-FS access. Backend-specific behavior (symlink resolution, POSIX permissions) lives
+in the per-backend test modules, not here.
 
-Assertions about backend-reported paths compare against `environment.root`, not `tmp_path`:
-Docker reports the in-container WORKDIR, not the host seed dir.
+Assertions about backend-reported paths compare against `environment.root`, not host
+paths: Docker reports the in-container WORKDIR.
 """
 
-from pathlib import Path
-
 import pytest
+from conftest import seed_dir, seed_file  # type: ignore[import-not-found]  # pytest puts conftest dir on sys.path
 from inline_snapshot import snapshot
 
 from pydantic_ai_harness.environments import AbstractMatch
@@ -31,14 +31,14 @@ async def test_write_then_read_round_trips(environment: AbstractEnvironment) -> 
     assert await environment.read_file('note.txt') == b'hello'
 
 
-async def test_read_returns_raw_bytes(environment: AbstractEnvironment, tmp_path: Path) -> None:
-    (tmp_path / 'data.bin').write_bytes(b'\x00\xff\xfe')
+async def test_read_returns_raw_bytes(environment: AbstractEnvironment) -> None:
+    await seed_file(environment, 'data.bin', b'\x00\xff\xfe')
     assert await environment.read_file('data.bin') == b'\x00\xff\xfe'
 
 
-async def test_write_creates_missing_file(environment: AbstractEnvironment, tmp_path: Path) -> None:
+async def test_write_creates_missing_file(environment: AbstractEnvironment) -> None:
     await environment.write_file('fresh.txt', b'new')
-    assert (tmp_path / 'fresh.txt').read_bytes() == b'new'
+    assert await environment.read_file('fresh.txt') == b'new'
 
 
 async def test_read_missing_file_raises_not_found(environment: AbstractEnvironment) -> None:
@@ -46,25 +46,23 @@ async def test_read_missing_file_raises_not_found(environment: AbstractEnvironme
         await environment.read_file('does-not-exist.txt')
 
 
-async def test_read_directory_raises_is_a_directory(environment: AbstractEnvironment, tmp_path: Path) -> None:
-    (tmp_path / 'subdir').mkdir()
+async def test_read_directory_raises_is_a_directory(environment: AbstractEnvironment) -> None:
+    await seed_dir(environment, 'subdir')
     with pytest.raises(EnvIsADirectoryError):
         await environment.read_file('subdir')
 
 
-async def test_read_through_file_component_raises_not_a_directory(
-    environment: AbstractEnvironment, tmp_path: Path
-) -> None:
+async def test_read_through_file_component_raises_not_a_directory(environment: AbstractEnvironment) -> None:
     # A path that treats a regular file as if it were a directory.
-    (tmp_path / 'file.txt').write_bytes(b'x')
+    await seed_file(environment, 'file.txt', b'x')
     with pytest.raises(EnvNotADirectoryError):
         await environment.read_file('file.txt/inner')
 
 
-async def test_write_onto_directory_raises_write_error(environment: AbstractEnvironment, tmp_path: Path) -> None:
+async def test_write_onto_directory_raises_write_error(environment: AbstractEnvironment) -> None:
     # Writing bytes where a directory already exists is an I/O failure, not a model-fixable
     # path problem -> the generic write error, which the capability layer propagates.
-    (tmp_path / 'adir').mkdir()
+    await seed_dir(environment, 'adir')
     with pytest.raises(EnvWriteError):
         await environment.write_file('adir', b'nope')
 
@@ -79,9 +77,9 @@ async def test_relative_escape_write_raises(environment: AbstractEnvironment) ->
         await environment.write_file('../escape.txt', b'nope')
 
 
-async def test_ls_lists_entries_with_types(environment: AbstractEnvironment, tmp_path: Path) -> None:
-    (tmp_path / 'a.txt').write_bytes(b'x')
-    (tmp_path / 'subdir').mkdir()
+async def test_ls_lists_entries_with_types(environment: AbstractEnvironment) -> None:
+    await seed_file(environment, 'a.txt', b'x')
+    await seed_dir(environment, 'subdir')
     listing = await environment.ls('.')
     assert {(f.name, f.is_directory) for f in listing} == {('a.txt', False), ('subdir', True)}
 
@@ -91,8 +89,8 @@ async def test_ls_missing_directory_raises_not_found(environment: AbstractEnviro
         await environment.ls('does-not-exist')
 
 
-async def test_ls_on_a_file_raises_not_a_directory(environment: AbstractEnvironment, tmp_path: Path) -> None:
-    (tmp_path / 'file.txt').write_bytes(b'x')
+async def test_ls_on_a_file_raises_not_a_directory(environment: AbstractEnvironment) -> None:
+    await seed_file(environment, 'file.txt', b'x')
     with pytest.raises(EnvNotADirectoryError):
         await environment.ls('file.txt')
 
@@ -102,11 +100,10 @@ async def test_ls_relative_escape_raises(environment: AbstractEnvironment) -> No
         await environment.ls('..')
 
 
-async def test_grep_finds_matches_recursively(environment: AbstractEnvironment, tmp_path: Path) -> None:
-    (tmp_path / 'top.txt').write_text('hello\nNEEDLE here\n')
-    (tmp_path / 'sub').mkdir()
-    (tmp_path / 'sub' / 'deep.txt').write_text('nothing\nalso NEEDLE\n')
-    (tmp_path / 'sub' / 'miss.txt').write_text('no match here\n')
+async def test_grep_finds_matches_recursively(environment: AbstractEnvironment) -> None:
+    await seed_file(environment, 'top.txt', b'hello\nNEEDLE here\n')
+    await seed_file(environment, 'sub/deep.txt', b'nothing\nalso NEEDLE\n')
+    await seed_file(environment, 'sub/miss.txt', b'no match here\n')
 
     matches = await environment.grep('.', 'NEEDLE')
 
@@ -128,26 +125,20 @@ async def test_grep_relative_escape_raises(environment: AbstractEnvironment) -> 
         await environment.grep('..', 'NEEDLE')
 
 
-async def test_grep_binary_file_skips_and_continues(environment: AbstractEnvironment, tmp_path: Path) -> None:
-    # Create a directory with a binary file in it
-    (tmp_path / 'dir').mkdir()
-    (tmp_path / 'dir' / 'binary.bin').write_bytes(b'\x00\xff\xfe')
-
-    # Create a file with a match
-    (tmp_path / 'dir' / 'match.txt').write_text('NEEDLE')
-
-    # Create a file with a non-match
-    (tmp_path / 'dir' / 'non-match.txt').write_text('no match here')
-
-    # Grep the directory
+async def test_grep_binary_file_skips_and_continues(environment: AbstractEnvironment) -> None:
+    # Binary file alongside text files in the same dir; rg detects + skips the binary and
+    # still emits matches from the text files.
+    await seed_file(environment, 'dir/binary.bin', b'\x00\xff\xfe')
+    await seed_file(environment, 'dir/match.txt', b'NEEDLE')
+    await seed_file(environment, 'dir/non-match.txt', b'no match here')
 
     matches = await environment.grep('dir', 'NEEDLE')
     assert matches == snapshot([AbstractMatch(path='dir/match.txt', line='NEEDLE', lineno=1)])
 
 
-async def test_grep_single_file(environment: AbstractEnvironment, tmp_path: Path) -> None:
+async def test_grep_single_file(environment: AbstractEnvironment) -> None:
     # A file path (not a directory) exercises the is-a-file branch: search just that file.
-    (tmp_path / 'only.txt').write_text('first\nNEEDLE on two\nthird\n')
+    await seed_file(environment, 'only.txt', b'first\nNEEDLE on two\nthird\n')
     matches = await environment.grep('only.txt', 'NEEDLE')
     assert matches == snapshot([AbstractMatch(path='only.txt', line='NEEDLE on two', lineno=2)])
 
@@ -155,85 +146,86 @@ async def test_grep_single_file(environment: AbstractEnvironment, tmp_path: Path
 # --- grep regex subset: backend-portable dialect (every backend must agree) ---
 #
 # The contract on `AbstractEnvironment.grep` commits to a subset of regex that we promise
-# every backend will match identically. These tests pin that subset; when DockerEnvironment
-# (or any new backend) lands, the same matrix runs against it and divergence becomes a red
-# CI signal, not a user-reported drift. Features outside this list are undefined-by-design.
+# every backend will match identically. These tests pin that subset; divergence becomes a
+# red CI signal, not a user-reported drift. Features outside this list are undefined-by-design.
 
 
 @pytest.fixture
-def grep_corpus(tmp_path: Path) -> Path:
-    """Tree with one line of each shape the subset covers, so every test below uses the same input."""
-    (tmp_path / 'src.py').write_text(
-        'def main():\n'
-        'class Widget:\n'
-        'from typing import Any\n'
-        'import os\n'
-        'TODO: refactor\n'
-        '# FIXME bug here\n'
-        'value = 42\n'
-        'name = "alpha"\n'
-        'literal_dot.here\n'
+async def grep_corpus(environment: AbstractEnvironment) -> AbstractEnvironment:
+    """One file containing one line of each shape the subset covers, seeded via the env."""
+    await seed_file(
+        environment,
+        'src.py',
+        b'def main():\n'
+        b'class Widget:\n'
+        b'from typing import Any\n'
+        b'import os\n'
+        b'TODO: refactor\n'
+        b'# FIXME bug here\n'
+        b'value = 42\n'
+        b'name = "alpha"\n'
+        b'literal_dot.here\n',
     )
-    return tmp_path
+    return environment
 
 
-async def test_grep_subset_literal_match(environment: AbstractEnvironment, grep_corpus: Path) -> None:
+async def test_grep_subset_literal_match(grep_corpus: AbstractEnvironment) -> None:
     """Literal text -- the simplest regex; carries over from the old substring contract."""
-    matches = await environment.grep('.', 'TODO')
+    matches = await grep_corpus.grep('.', 'TODO')
     assert {m.lineno for m in matches} == {5}
 
 
-async def test_grep_subset_word_class(environment: AbstractEnvironment, grep_corpus: Path) -> None:
+async def test_grep_subset_word_class(grep_corpus: AbstractEnvironment) -> None:
     """`\\w+` -- the bread-and-butter "identifier" pattern models reach for first."""
-    matches = await environment.grep('.', r'def \w+')
+    matches = await grep_corpus.grep('.', r'def \w+')
     assert {m.lineno for m in matches} == {1}
 
 
-async def test_grep_subset_digit_class(environment: AbstractEnvironment, grep_corpus: Path) -> None:
+async def test_grep_subset_digit_class(grep_corpus: AbstractEnvironment) -> None:
     """`\\d+` -- the matching numeric class."""
-    matches = await environment.grep('.', r'\d+')
+    matches = await grep_corpus.grep('.', r'\d+')
     assert {m.lineno for m in matches} == {7}
 
 
-async def test_grep_subset_anchor(environment: AbstractEnvironment, grep_corpus: Path) -> None:
+async def test_grep_subset_anchor(grep_corpus: AbstractEnvironment) -> None:
     """`^` -- start-of-line anchor; lets the model say "imports at column 0," not anywhere."""
-    matches = await environment.grep('.', r'^from \w+')
+    matches = await grep_corpus.grep('.', r'^from \w+')
     assert {m.lineno for m in matches} == {3}
 
 
-async def test_grep_subset_alternation(environment: AbstractEnvironment, grep_corpus: Path) -> None:
+async def test_grep_subset_alternation(grep_corpus: AbstractEnvironment) -> None:
     """`|` -- "either of these"; common for TODO|FIXME-style sweeps."""
-    matches = await environment.grep('.', r'TODO|FIXME')
+    matches = await grep_corpus.grep('.', r'TODO|FIXME')
     assert {m.lineno for m in matches} == {5, 6}
 
 
-async def test_grep_subset_char_class(environment: AbstractEnvironment, grep_corpus: Path) -> None:
+async def test_grep_subset_char_class(grep_corpus: AbstractEnvironment) -> None:
     """`[…]` -- explicit character class; the only way to express "any of these chars" in regex."""
-    matches = await environment.grep('.', r'[A-Z]+')
+    matches = await grep_corpus.grep('.', r'[A-Z]+')
     assert {m.lineno for m in matches} == {2, 3, 5, 6}  # Widget, Any, TODO, FIXME
 
 
-async def test_grep_subset_escape_metacharacter(environment: AbstractEnvironment, grep_corpus: Path) -> None:
+async def test_grep_subset_escape_metacharacter(grep_corpus: AbstractEnvironment) -> None:
     """`\\.` -- escape; the model must be able to search for literal `.` without it being any-char."""
-    matches = await environment.grep('.', r'literal_dot\.here')
+    matches = await grep_corpus.grep('.', r'literal_dot\.here')
     assert {m.lineno for m in matches} == {9}
 
 
-async def test_grep_subset_group_and_quantifier(environment: AbstractEnvironment, grep_corpus: Path) -> None:
+async def test_grep_subset_group_and_quantifier(grep_corpus: AbstractEnvironment) -> None:
     """`(?:…)+` -- non-capturing group with a quantifier; needed for "one or more of <thing>"."""
-    matches = await environment.grep('.', r'(?:import|from) \w+')
+    matches = await grep_corpus.grep('.', r'(?:import|from) \w+')
     assert {m.lineno for m in matches} == {3, 4}
 
 
-async def test_grep_invalid_pattern_raises(environment: AbstractEnvironment, tmp_path: Path) -> None:
+async def test_grep_invalid_pattern_raises(environment: AbstractEnvironment) -> None:
     """Malformed regex (here, an unmatched `[`) must raise EnvInvalidPatternError so the capability
     layer can route to ModelRetry -- the model gets a chance to fix it rather than silently see []."""
-    (tmp_path / 'src.py').write_text('hello\n')
+    await seed_file(environment, 'src.py', b'hello\n')
     with pytest.raises(EnvInvalidPatternError):
         await environment.grep('.', r'[unterminated')
 
 
-async def test_grep_flag_looking_pattern_is_treated_as_data(environment: AbstractEnvironment, tmp_path: Path) -> None:
+async def test_grep_flag_looking_pattern_is_treated_as_data(environment: AbstractEnvironment) -> None:
     """A model-supplied pattern that LOOKS like a CLI flag must NOT be interpreted as one.
 
     This is the load-bearing read-only safety test: if a backend's grep implementation passed
@@ -247,7 +239,7 @@ async def test_grep_flag_looking_pattern_is_treated_as_data(environment: Abstrac
     We assert the pattern simply doesn't match anything -- it's regex, treated as the literal
     string `--pre=/bin/sh`, which doesn't appear in any file in the tree.
     """
-    (tmp_path / 'src.py').write_text('def main():\n    pass\n')
+    await seed_file(environment, 'src.py', b'def main():\n    pass\n')
     matches = await environment.grep('.', '--pre=/bin/sh')
     assert matches == []
 
@@ -257,10 +249,10 @@ async def test_glob_missing_directory_raises_not_found(environment: AbstractEnvi
         await environment.glob('does-not-exist', '*.py')
 
 
-async def test_glob_on_a_file_raises_not_a_directory(environment: AbstractEnvironment, tmp_path: Path) -> None:
+async def test_glob_on_a_file_raises_not_a_directory(environment: AbstractEnvironment) -> None:
     # glob's `path` is the directory to search WITHIN; pointing it at a file is a model
     # argument error, surfaced as EnvNotADirectoryError -> ModelRetry (mirrors ls).
-    (tmp_path / 'file.txt').write_bytes(b'x')
+    await seed_file(environment, 'file.txt', b'x')
     with pytest.raises(EnvNotADirectoryError):
         await environment.glob('file.txt', '*.py')
 
@@ -270,38 +262,35 @@ async def test_glob_relative_escape_raises(environment: AbstractEnvironment) -> 
         await environment.glob('..', '*.py')
 
 
-async def test_glob_matches_recursively(environment: AbstractEnvironment, tmp_path: Path) -> None:
-    (tmp_path / 'top').mkdir()
-    (tmp_path / 'top' / 'sub').mkdir()
-    (tmp_path / 'top' / 'sub' / 'deep.py').write_text('NEEDLE')
-    (tmp_path / 'top' / 'sub' / 'notes.txt').write_text('NO MATCH')
+async def test_glob_matches_recursively(environment: AbstractEnvironment) -> None:
+    await seed_file(environment, 'top/sub/deep.py', b'NEEDLE')
+    await seed_file(environment, 'top/sub/notes.txt', b'NO MATCH')
 
     matches = await environment.glob('.', '*.py')
     assert matches == snapshot(['top/sub/deep.py'])
 
 
-async def test_glob_excludes_directories(environment: AbstractEnvironment, tmp_path: Path) -> None:
-    (tmp_path / 'sub').mkdir()
-    (tmp_path / 'sub' / 'inner.txt').write_text('x')
+async def test_glob_excludes_directories(environment: AbstractEnvironment) -> None:
+    await seed_file(environment, 'sub/inner.txt', b'x')
     assert await environment.glob('.', 'sub') == []
 
 
-async def test_shell_captures_stdout(environment: AbstractEnvironment, tmp_path: Path) -> None:
+async def test_shell_captures_stdout(environment: AbstractEnvironment) -> None:
     result = await environment.shell_command('echo "hello"')
     assert result == snapshot(ShellCommandResult(stdout=b'hello\n', stderr=b'', return_code=0, timed_out=False))
 
 
-async def test_shell_non_zero_exit_is_not_an_error(environment: AbstractEnvironment, tmp_path: Path) -> None:
+async def test_shell_non_zero_exit_is_not_an_error(environment: AbstractEnvironment) -> None:
     result = await environment.shell_command('echo "hello" && exit 1')
     assert result == snapshot(ShellCommandResult(stdout=b'hello\n', stderr=b'', return_code=1, timed_out=False))
 
 
-async def test_shell_captures_stderr_separately(environment: AbstractEnvironment, tmp_path: Path) -> None:
+async def test_shell_captures_stderr_separately(environment: AbstractEnvironment) -> None:
     result = await environment.shell_command('echo "hello" >&2')
     assert result == snapshot(ShellCommandResult(stdout=b'', stderr=b'hello\n', return_code=0, timed_out=False))
 
 
-async def test_shell_is_shell_interpreted(environment: AbstractEnvironment, tmp_path: Path) -> None:
+async def test_shell_is_shell_interpreted(environment: AbstractEnvironment) -> None:
     result = await environment.shell_command('echo a && echo b')
     assert result == snapshot(ShellCommandResult(stdout=b'a\nb\n', stderr=b'', return_code=0, timed_out=False))
 
@@ -311,21 +300,21 @@ async def test_shell_runs_in_root(environment: AbstractEnvironment) -> None:
     assert result.stdout == f'{environment.root}\n'.encode()
 
 
-async def test_shell_no_state_persists_between_calls(environment: AbstractEnvironment, tmp_path: Path) -> None:
+async def test_shell_no_state_persists_between_calls(environment: AbstractEnvironment) -> None:
     result = await environment.shell_command('export FOO=bar', timeout=1)
     assert result == snapshot(ShellCommandResult(stdout=b'', stderr=b'', return_code=0, timed_out=False))
     result = await environment.shell_command('echo $FOO', timeout=1)
     assert result == snapshot(ShellCommandResult(stdout=b'\n', stderr=b'', return_code=0, timed_out=False))
 
 
-async def test_shell_timeout_sets_flag(environment: AbstractEnvironment, tmp_path: Path) -> None:
+async def test_shell_timeout_sets_flag(environment: AbstractEnvironment) -> None:
     result = await environment.shell_command('sleep 10', timeout=1)
     assert result == snapshot(ShellCommandResult(stdout=b'', stderr=b'', return_code=-15, timed_out=True))
 
 
-async def test_ls_includes_dotfiles(environment: AbstractEnvironment, tmp_path: Path) -> None:
-    (tmp_path / '.env').write_bytes(b'SECRET=x')
-    (tmp_path / 'visible.txt').write_bytes(b'')
+async def test_ls_includes_dotfiles(environment: AbstractEnvironment) -> None:
+    await seed_file(environment, '.env', b'SECRET=x')
+    await seed_file(environment, 'visible.txt', b'')
     listing = await environment.ls('.')
     assert {f.name for f in listing} == {'.env', 'visible.txt'}
 
@@ -335,14 +324,11 @@ async def test_write_creates_intermediate_directories(environment: AbstractEnvir
     assert await environment.read_file('pkg/sub/new.txt') == b'hello'
 
 
-async def test_glob_excludes_dotdir_contents_but_returns_top_level_dotfiles(
-    environment: AbstractEnvironment, tmp_path: Path
-) -> None:
+async def test_glob_excludes_dotdir_contents_but_returns_top_level_dotfiles(environment: AbstractEnvironment) -> None:
     """rg's dotfile policy is our policy: hidden DIRS are not descended into, but a hidden FILE
     matched by `--glob` at the top level IS returned. Single engine, single dialect; if the model
     wants to exclude top-level dotfiles, it narrows the pattern (`[!.]*.py`)."""
-    (tmp_path / 'visible.py').write_text('')
-    (tmp_path / '.hidden.py').write_text('')
-    (tmp_path / '.cache').mkdir()
-    (tmp_path / '.cache' / 'inside.py').write_text('')
+    await seed_file(environment, 'visible.py', b'')
+    await seed_file(environment, '.hidden.py', b'')
+    await seed_file(environment, '.cache/inside.py', b'')
     assert sorted(await environment.glob('.', '*.py')) == ['.hidden.py', 'visible.py']

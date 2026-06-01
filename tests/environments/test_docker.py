@@ -83,7 +83,7 @@ def _make_container(container_id: str, fake_client: _FakeClient) -> MagicMock:
 def fake_docker(monkeypatch: pytest.MonkeyPatch) -> Iterator[_FakeClient]:
     """Replace `docker.from_env` so tests get a `_FakeClient` instead of a real daemon."""
     client = _FakeClient()
-    monkeypatch.setattr(docker_module.docker, 'from_env', lambda: client)
+    monkeypatch.setattr(docker_module.docker, 'from_env', lambda: client)  # pyright: ignore[reportPrivateImportUsage]
     yield client
 
 
