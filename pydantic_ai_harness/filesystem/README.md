@@ -86,7 +86,8 @@ The three rules apply at two different granularities:
 So with `allowed_patterns=['*.py']`, `list_directory('.')` succeeds and shows
 only the `.py` entries; `read_file('notes.md')` is rejected.
 
-> Dotfiles and dot-directories are skipped by `search_files` and `find_files`
+> Dotfiles and dot-directories (`.git`, `.env`, `.github`, …) are skipped by
+> all three walkers — `list_directory`, `search_files`, and `find_files` —
 > regardless of patterns.
 
 ## Configuration

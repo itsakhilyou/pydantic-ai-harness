@@ -276,9 +276,14 @@ class FileSystemToolset(FunctionToolset[Any]):
         entries: list[str] = []
         for entry in sorted(resolved.iterdir()):
             try:
-                rel = str(entry.relative_to(self._real_root))
+                rel_path = entry.relative_to(self._real_root)
             except ValueError:  # pragma: no cover
                 continue
+            # Skip dotfiles and dot-directories, matching search_files and
+            # find_files so the three walkers agree on what exists.
+            if any(part.startswith('.') for part in rel_path.parts):
+                continue
+            rel = str(rel_path)
             # Apply the same allow/deny/protected filtering used for direct
             # access so a directory listing can't leak patterns the agent
             # couldn't otherwise read or write.

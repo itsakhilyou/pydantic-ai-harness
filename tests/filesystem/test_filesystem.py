@@ -413,6 +413,13 @@ class TestListDirectory:
         with pytest.raises(NotADirectoryError):
             await toolset.list_directory('hello.txt')
 
+    async def test_list_skips_hidden(self, toolset: FileSystemToolset) -> None:
+        # Dotfiles/dot-directories are hidden, matching find_files/search_files.
+        result = await toolset.list_directory('.')
+        assert 'hello.txt' in result
+        assert '.hidden' not in result
+        assert '.git' not in result
+
     async def test_list_shows_sizes(self, toolset: FileSystemToolset) -> None:
         result = await toolset.list_directory('.')
         assert 'bytes' in result
