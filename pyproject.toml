@@ -28,7 +28,10 @@ classifiers = [
     'Typing :: Typed',
 ]
 dependencies = [
-    'pydantic-ai-slim>=1.95.1',
+    "inline-snapshot>=0.33.0",
+    "pydantic-ai-slim[anthropic]>=1.95.1",
+    "ripgrep>=15.1.0",
+    "rpygrep>=0.2.1",
 ]
 
 [project.optional-dependencies]
@@ -109,7 +112,7 @@ quote-style = 'single'
 [tool.pyright]
 pythonVersion = '3.10'
 typeCheckingMode = 'strict'
-exclude = ['template', '.venv']
+exclude = ['template', '.venv', 'reference']
 executionEnvironments = [
     { root = 'tests', reportPrivateUsage = false },
 ]
