@@ -90,9 +90,8 @@ async def _read_file(environment: AbstractEnvironment, path: str, offset: int | 
 
     if result.first_line_exceeded:
         # Can't show even one line without blowing the byte cap, and we never split a
-        # line. pi points at a `bash sed` fallback; we have no shell tool yet, so we just
-        # report the size and omit it.
-        # TODO: add the sed/head-c hint once the shell tool lands (Slice 4).
+        # line, so we report the size and omit it. The model can fall back to the `shell`
+        # tool (`sed`/`head -c`) to read an oversized line in bounded chunks.
         line_size = format_size(len(lines[start].encode('utf-8')))
         return f'[Line {start_display} is {line_size}, exceeds the {format_size(DEFAULT_MAX_BYTES)} limit and was omitted.]'
 

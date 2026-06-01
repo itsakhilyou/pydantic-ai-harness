@@ -1,8 +1,8 @@
 """Docker-backed execution environment.
 
-Lifecycle (`setup`/`teardown`) is implemented via the `docker` Python SDK; tool methods
-(`read_file`, `write_file`, `ls`, `grep`, `glob`, `shell_command`) raise
-`NotImplementedError` for now and land in follow-up chunks.
+Lifecycle (`setup`/`teardown`) and all tool methods (`read_file`, `write_file`, `ls`,
+`grep`, `glob`, `shell_command`) are implemented via the `docker` Python SDK, running
+each operation inside the container with `docker exec`.
 
 Failure-handling patterns come from prior art -- see
 `agent_docs/environment-lifecycle.md` "Backend implementer's guide":
@@ -94,7 +94,7 @@ async def _run_blocking(fn: Callable[_P, _T], /, *args: _P.args, **kwargs: _P.kw
 
 @dataclass(kw_only=True)
 class DockerEnvironment(AbstractEnvironment):
-    """Docker-backed environment with lifecycle implemented; tool methods coming next.
+    """Docker-backed environment: lifecycle plus all tool methods run inside the container.
 
     Two modes determined at construction:
 

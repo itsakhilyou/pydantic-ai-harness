@@ -2,7 +2,7 @@
 
 Give an agent filesystem and shell access — over a pluggable backend, so the same tools work whether the agent runs against your local machine or an isolated container.
 
-> **Status: in development.** `read_file`, `write_file`/edit, explore (`ls`/`glob`/`grep`), and `shell` are complete and tested against `LocalEnvironment`. `DockerEnvironment` exists as an API skeleton — `environment='docker'` and `DockerEnvironment(...)` typecheck and wire through, but calling any tool today raises `NotImplementedError`. The real backend is coming next. This README describes the intended shape.
+> **Status: beta.** Both `LocalEnvironment` and `DockerEnvironment` implement the full tool surface (`read_file`, `write_file`/`edit_file`, `ls`/`glob`/`grep`, `shell`) and pass a shared cross-backend conformance suite. The public API may still change before a stable release.
 
 ## The idea
 
@@ -31,13 +31,7 @@ result = agent.run_sync('Read pyproject.toml and tell me the project name.')
 print(result.output)
 ```
 
-`ExecutionEnv()` defaults to `environment='local'`, which hands the agent your `cwd`. For container isolation (skeleton today; real implementation coming next), use the matching string:
-
-```python
-ExecutionEnv(environment='docker')
-```
-
-When you want to **configure** the backend — a different root, a specific Docker image, a custom backend — pass an `AbstractEnvironment` instance instead of a string:
+`ExecutionEnv()` defaults to a `LocalEnvironment` rooted at your `cwd`. To run against a different root, an isolated container, or a custom backend, pass an `AbstractEnvironment` instance:
 
 ```python
 from pydantic_ai_harness.environments import DockerEnvironment, LocalEnvironment
@@ -45,7 +39,7 @@ from pydantic_ai_harness.environments import DockerEnvironment, LocalEnvironment
 # Local rooted somewhere other than cwd:
 ExecutionEnv(environment=LocalEnvironment(root='/path/to/workspace'))
 
-# Docker with a chosen image (skeleton today; real backend coming):
+# Docker — operations run inside the container:
 ExecutionEnv(environment=DockerEnvironment(image='python:3.12-slim'))
 ```
 
@@ -56,7 +50,7 @@ The agent's tools (`read_file`, `write_file`/`edit_file`, `ls`/`glob`/`grep`, `s
 | Backend | What it is | Use for |
 |---|---|---|
 | `LocalEnvironment` | Operations run against your local filesystem, rooted at `root`. | Trusted, local development. |
-| `DockerEnvironment` *(skeleton; not yet usable)* | Operations run inside a container. The container is the isolation boundary. | Untrusted / model-generated code. |
+| `DockerEnvironment` | Operations run inside a container. The container is the isolation boundary. | Untrusted / model-generated code. |
 
 ## Security
 
