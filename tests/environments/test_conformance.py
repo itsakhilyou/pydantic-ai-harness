@@ -308,8 +308,13 @@ async def test_shell_no_state_persists_between_calls(environment: AbstractEnviro
 
 
 async def test_shell_timeout_sets_flag(environment: AbstractEnvironment) -> None:
+    """The contract-defined invariant is `timed_out=True`; `return_code` is intentionally
+    backend-specific (POSIX subprocess uses negative-signal convention, Docker exec reports
+    128+N), so we only assert the timeout flag and that the process didn't succeed."""
     result = await environment.shell_command('sleep 10', timeout=1)
-    assert result == snapshot(ShellCommandResult(stdout=b'', stderr=b'', return_code=-15, timed_out=True))
+    assert result.timed_out is True
+    assert result.return_code != 0
+    assert result.stdout == b''
 
 
 async def test_ls_includes_dotfiles(environment: AbstractEnvironment) -> None:

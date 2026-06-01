@@ -59,7 +59,6 @@ async def environment(request: pytest.FixtureRequest, tmp_path: Path) -> AsyncIt
             # `python:3.12-slim` doesn't ship `rg`; install before yielding so grep/glob
             # conformance can run. Vendoring rg into the container is tracked separately;
             # this is the interim path.
-            await docker_env.shell_command('mkdir -p /workspace')
             rg_install = await docker_env.shell_command('apt-get update -qq && apt-get install -y -qq ripgrep')
             assert rg_install.return_code == 0, f'apt-get install ripgrep failed: {rg_install.stderr!r}'
             yield docker_env

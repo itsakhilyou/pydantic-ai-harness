@@ -59,7 +59,21 @@ class _FakeClient:
                     raise result
                 return result
 
+        class _API:
+            """Minimal `client.api` surface: just enough to let `setup`'s internal mkdir succeed."""
+
+            def exec_create(self, container: str, cmd: list[str], **kwargs: Any) -> dict[str, str]:
+                client_self.calls.append(f'exec_create({container!r}, {cmd!r})')
+                return {'Id': 'fake-exec-id'}
+
+            def exec_start(self, exec_id: str, **kwargs: Any) -> tuple[bytes, bytes]:
+                return (b'', b'')
+
+            def exec_inspect(self, exec_id: str) -> dict[str, int]:
+                return {'ExitCode': 0}
+
         self.containers = _Containers()
+        self.api = _API()
 
     def close(self) -> None:
         self.closed = True

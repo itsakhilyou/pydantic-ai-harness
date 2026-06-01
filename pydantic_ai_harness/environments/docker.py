@@ -19,6 +19,7 @@ Failure-handling patterns come from prior art -- see
 
 import asyncio
 import contextlib
+import posixpath
 import shlex
 import socket
 import uuid
@@ -161,6 +162,15 @@ class DockerEnvironment(AbstractEnvironment):
             raise RuntimeError(f'docker run failed: {exc.explanation}') from exc
         self._container_id = container.id
 
+        # Ensure `root` exists in the container so `shell_command(workdir=root)` doesn't fail
+        # on images that don't ship `/workspace`. `mkdir -p` is a no-op when the dir exists.
+        mkdir_exit, _o, mkdir_err = await self._exec(['mkdir', '-p', '--', self.root])
+        if mkdir_exit != 0:
+            raise RuntimeError(
+                f'failed to create environment root {self.root!r} in container: '
+                f'{mkdir_err.decode(errors="replace").strip()}'
+            )
+
     async def teardown(self) -> None:
         """`container.remove(force=True)` in owned mode; no-op in attach mode.
 
@@ -193,12 +203,15 @@ class DockerEnvironment(AbstractEnvironment):
     def _resolve(self, path: str) -> str:
         """Resolve `path` against `root` and reject anything that escapes.
 
-        `PurePosixPath` because container paths are POSIX regardless of host. Same advisory
-        jail caveat as LocalEnvironment: jail is bypassable via the shell tool, symlinks, or
-        a TOCTOU race -- the container is the real boundary, the jail just keeps the model
-        from accidentally addressing absolute paths.
+        `PurePosixPath` because container paths are POSIX regardless of host. `posixpath.normpath`
+        collapses `..` and `.` syntactically -- without it, `is_relative_to` is purely lexical
+        and `/workspace/..` is "inside" `/workspace`. Same advisory jail caveat as
+        LocalEnvironment: jail is bypassable via the shell tool, symlinks, or a TOCTOU race --
+        the container is the real boundary, the jail just keeps the model from accidentally
+        addressing absolute paths.
         """
-        resolved = PurePosixPath(self.root, path)
+        normalized = posixpath.normpath(str(PurePosixPath(self.root, path)))
+        resolved = PurePosixPath(normalized)
         root = PurePosixPath(self.root)
         if not resolved.is_relative_to(root):
             raise PathEscapeError(f'{path!r} resolves outside the environment root {self.root!r}')
@@ -281,8 +294,13 @@ class DockerEnvironment(AbstractEnvironment):
         # The pre-check exits with sentinel codes (see module-top constants) so we map errors
         # without scraping stderr text. `cat`'s own exit is 0 for success or 1 for I/O error;
         # the pre-checks run before cat so the common cases become structured signals.
+        # Parent-component check first: if any immediate parent exists as a non-directory the
+        # path is fundamentally addressing through-a-file -- the ABC's NotADirectory case.
+        # (Deep-nesting `a/b/c/x` where `a` is a file collapses to NotFound today; expand to
+        # an ancestor walk if a test ever needs it.)
         script = (
-            f'[ -e "$1" ] || exit {_EXIT_NOT_FOUND};'
+            f'[ -e "$(dirname -- "$1")" ] && [ ! -d "$(dirname -- "$1")" ] && exit {_EXIT_NOT_A_DIRECTORY};'
+            f' [ -e "$1" ] || exit {_EXIT_NOT_FOUND};'
             f' [ -d "$1" ] && exit {_EXIT_IS_DIRECTORY};'
             f' [ -r "$1" ] || exit {_EXIT_PERMISSION_DENIED};'
             ' cat -- "$1"'
@@ -405,6 +423,11 @@ class DockerEnvironment(AbstractEnvironment):
         flags so a path starting with `-` cannot be parsed as one.
         """
         target = self._resolve(path)
+        # Pre-check existence so a missing path raises NotFound rather than getting buried in
+        # rg's stderr / exit 2 (which we'd otherwise have to scrape).
+        probe_exit, _o, _e = await self._exec(['/bin/sh', '-c', f'[ -e "$1" ] || exit {_EXIT_NOT_FOUND}', 'sh', target])
+        if probe_exit == _EXIT_NOT_FOUND:
+            raise EnvNotFoundError(f'{path!r} not found in the environment root {self.root!r}')
         argv = [
             'rg',
             '--json',
@@ -437,6 +460,14 @@ class DockerEnvironment(AbstractEnvironment):
         matched by the pattern are returned.
         """
         target = self._resolve(path)
+        # Pre-check existence + type: missing path -> NotFound, file path -> NotADirectory.
+        # Mirrors the ls pre-check; same sentinels.
+        probe_script = f'[ -e "$1" ] || exit {_EXIT_NOT_FOUND}; [ -d "$1" ] || exit {_EXIT_NOT_A_DIRECTORY}'
+        probe_exit, _o, _e = await self._exec(['/bin/sh', '-c', probe_script, 'sh', target])
+        if probe_exit == _EXIT_NOT_FOUND:
+            raise EnvNotFoundError(f'{path!r} not found in the environment root {self.root!r}')
+        if probe_exit == _EXIT_NOT_A_DIRECTORY:
+            raise EnvNotADirectoryError(f'{path!r} is not a directory in the environment root {self.root!r}')
         argv = [
             'rg',
             '--files',
@@ -489,7 +520,12 @@ class DockerEnvironment(AbstractEnvironment):
         # kwarg is typed. `exec_start` and `exec_inspect` in the same stub are fully typed.
         exec_create = client.api.exec_create  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
         try:
-            exec_info = await _run_blocking(exec_create, container_id, cmd=['/bin/sh', '-c', launcher])  # pyright: ignore[reportUnknownArgumentType]
+            exec_info = await _run_blocking(
+                exec_create,  # pyright: ignore[reportUnknownArgumentType]
+                container_id,
+                cmd=['/bin/sh', '-c', launcher],
+                workdir=self.root,
+            )
         except docker.errors.APIError as exc:
             raise EnvShellExecutionError(f'docker exec_create failed: {exc.explanation}') from exc
         exec_id = exec_info['Id']

@@ -45,9 +45,6 @@ async def env() -> AsyncIterator[DockerEnvironment]:
     """Start `python:3.12-slim` for one test and remove it on teardown."""
     environment = DockerEnvironment(image='python:3.12-slim')
     async with environment:
-        # `mkdir -p /workspace` so write_file's parent-resolution lands somewhere real; the
-        # python:3.12-slim image doesn't ship the dir.
-        await environment.shell_command('mkdir -p /workspace')
         yield environment
 
 
@@ -88,7 +85,6 @@ async def env_with_rg() -> AsyncIterator[DockerEnvironment]:
     per test; vendoring rg into the container is tracked separately so this is the interim path."""
     environment = DockerEnvironment(image='python:3.12-slim')
     async with environment:
-        await environment.shell_command('mkdir -p /workspace')
         rg_install = await environment.shell_command('apt-get update -qq && apt-get install -y -qq ripgrep')
         assert rg_install.return_code == 0, f'apt-get install ripgrep failed: {rg_install.stderr!r}'
         yield environment
