@@ -53,6 +53,9 @@ class AbstractEnvironment(ABC):
     root: str
     """The environment's root. Paths are resolved relative to it and confined to it."""
 
+    _started: bool = False
+    """Whether the environment is currently started."""
+
     @abstractmethod
     async def read_file(self, path: str) -> bytes:
         """Return a file's raw, undecoded bytes.
@@ -183,3 +186,36 @@ class AbstractEnvironment(ABC):
                 the spawn failed). Not raised for a non-zero exit or a timeout.
         """
         raise NotImplementedError  # pragma: no cover
+
+    async def _do_start(self) -> None:
+        """Allocate backend resources. Override in backends that hold a resource; default is a no-op."""
+
+    async def _do_stop(self) -> None:
+        """Release backend resources. Override in backends that hold a resource; default is a no-op."""
+
+    async def start(self) -> None:
+        """Start the environment. Idempotent: a second call while already started is a no-op."""
+        if self._started:
+            return
+
+        # No op method
+        try:
+            await self._do_start()
+        except:
+            # If we were unable to start then we need to fail fast here
+            raise
+        else:
+            self._started = True
+
+    async def stop(self) -> None:
+        """Stop the environment. Idempotent: calling while not started is a no-op."""
+        if not self._started:
+            return
+
+        try:
+            await self._do_stop()
+        except:
+            # If we were unable to stop then we need to fail fast here
+            raise
+        else:
+            self._started = False
