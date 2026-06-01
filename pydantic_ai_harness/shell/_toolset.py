@@ -232,7 +232,7 @@ class ShellToolset(FunctionToolset[Any]):
 
         Args:
             command: The shell command to run.
-            timeout_seconds: Maximum seconds to wait (default: default_timeout).
+            timeout_seconds: Maximum seconds to wait (default: 30).
 
         Returns:
             Labeled stdout/stderr output with exit code on non-zero exit.
