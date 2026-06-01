@@ -56,8 +56,14 @@ class FileSystem(AbstractCapability[Any]):
     """Maximum number of matches returned by `find_files`."""
 
     def __post_init__(self) -> None:
-        for name in ('max_read_lines', 'max_search_results', 'max_find_results'):
-            value = getattr(self, name)
+        # Runtime validation: dataclass field annotations are advisory, not enforced.
+        # A config-driven caller could pass a string that would otherwise propagate.
+        values: dict[str, Any] = {
+            'max_read_lines': self.max_read_lines,
+            'max_search_results': self.max_search_results,
+            'max_find_results': self.max_find_results,
+        }
+        for name, value in values.items():
             if not isinstance(value, int) or value <= 0:
                 raise ValueError(f'{name} must be a positive integer, got {value!r}')
 

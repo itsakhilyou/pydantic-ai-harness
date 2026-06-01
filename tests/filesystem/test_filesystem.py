@@ -849,6 +849,12 @@ class TestFileSystemCapability:
         with pytest.raises(ValueError, match='max_find_results must be a positive integer'):
             FileSystem(max_find_results=-1)
 
+    def test_non_integer_max_read_lines_rejected(self) -> None:
+        # Runtime validation: dataclass annotations are advisory, so a string
+        # slipped in from a config must be rejected, not propagated.
+        with pytest.raises(ValueError, match='max_read_lines must be a positive integer'):
+            FileSystem(max_read_lines='1000')  # type: ignore[arg-type]
+
     @pytest.mark.anyio(backends=['asyncio'])
     async def test_agent_integration(self, tmp_path: Path, anyio_backend: object) -> None:
         if str(anyio_backend) != 'asyncio':
