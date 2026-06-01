@@ -11,6 +11,9 @@ from collections.abc import AsyncIterator
 import docker
 import docker.errors
 import pytest
+from pydantic_ai import Agent, ModelResponse, TextPart
+from pydantic_ai.messages import ModelMessage, ToolCallPart, ToolReturnPart
+from pydantic_ai.models.function import AgentInfo, FunctionModel
 
 from pydantic_ai_harness.environments.docker import DockerEnvironment
 from pydantic_ai_harness.environments.exceptions import (
@@ -19,6 +22,7 @@ from pydantic_ai_harness.environments.exceptions import (
     EnvNotFoundError,
     EnvShellExecutionError,
 )
+from pydantic_ai_harness.execution_env import ExecutionEnv
 
 pytestmark = pytest.mark.anyio
 
@@ -175,3 +179,52 @@ async def test_cancel_kills_process_and_reraises(env: DockerEnvironment) -> None
     result = await env.shell_command('echo alive')
     assert result.stdout == b'alive\n'
     assert result.return_code == 0
+
+
+# --- container sharing scenarios ---------------------------------------------------------
+
+
+async def test_sequential_attach_sessions_share_state() -> None:
+    client = docker.from_env()
+    container = client.containers.run('python:3.12-slim', ['sleep', 'infinity'], detach=True)
+    try:
+        async with DockerEnvironment(container=container.id) as session_1:
+            await session_1.write_file('shared.txt', b'persisted')
+        async with DockerEnvironment(container=container.id) as session_2:
+            assert await session_2.read_file('shared.txt') == b'persisted'
+    finally:
+        container.remove(force=True)
+
+
+async def test_concurrent_envs_on_same_container_do_not_collide() -> None:
+    client = docker.from_env()
+    container = client.containers.run('python:3.12-slim', ['sleep', 'infinity'], detach=True)
+    try:
+        env1 = DockerEnvironment(container=container.id)
+        env2 = DockerEnvironment(container=container.id)
+        async with env1, env2:
+            await asyncio.gather(env1.write_file('a.txt', b'A'), env2.write_file('b.txt', b'B'))
+            a, b = await asyncio.gather(env1.read_file('a.txt'), env2.read_file('b.txt'))
+            assert (a, b) == (b'A', b'B')
+    finally:
+        container.remove(force=True)
+
+
+async def test_two_agents_share_one_docker_environment() -> None:
+    def writer(path: str, content: str) -> FunctionModel:
+        def model_fn(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            wrote = any(
+                isinstance(p, ToolReturnPart) and p.tool_name == 'write_file' for m in messages for p in m.parts
+            )
+            if wrote:
+                return ModelResponse(parts=[TextPart('done')])
+            return ModelResponse(parts=[ToolCallPart(tool_name='write_file', args={'path': path, 'data': content})])
+
+        return FunctionModel(model_fn)
+
+    async with DockerEnvironment(image='python:3.12-slim') as env:
+        a1 = Agent(writer('one.txt', 'AAA'), capabilities=[ExecutionEnv(environment=env)])
+        a2 = Agent(writer('two.txt', 'BBB'), capabilities=[ExecutionEnv(environment=env)])
+        await asyncio.gather(a1.run('write one'), a2.run('write two'))
+        assert await env.read_file('one.txt') == b'AAA'
+        assert await env.read_file('two.txt') == b'BBB'

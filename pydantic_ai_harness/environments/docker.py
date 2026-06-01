@@ -26,6 +26,7 @@ import uuid
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import PurePosixPath
 from typing import ParamSpec, TypeVar
 
@@ -42,10 +43,20 @@ from .exceptions import (
     EnvNotFoundError,
     EnvPermissionError,
     EnvReadError,
+    EnvSetupError,
     EnvShellExecutionError,
     EnvWriteError,
     PathEscapeError,
 )
+
+# Label keys for containers we create in owned mode. `prune_orphans` filters by the session
+# label; the created-at label lets the reaper honor an `older_than` cutoff.
+_SESSION_LABEL = 'com.pydantic.harness.session'
+_CREATED_LABEL = 'com.pydantic.harness.created'
+
+# Tools the harness assumes are present in the image. Probed once at `setup` so a broken
+# image fails immediately with a useful name, rather than per-method with cryptic exit codes.
+_REQUIRED_TOOLS = ('sh', 'cat', 'mkdir', 'kill', 'tar')
 
 _P = ParamSpec('_P')
 _T = TypeVar('_T')
@@ -89,8 +100,9 @@ class DockerEnvironment(AbstractEnvironment):
 
     - **Owned** (`image=...`): we create the container in `setup` and remove it in
       `teardown`. The container's lifetime is bound to the env's start/stop cycle.
-    - **Attach** (`container=...`): we use a container someone else created.
-      `setup`/`teardown` are no-ops; the harness never starts or stops a container it
+    - **Attach** (`container=...`): we use a container someone else created. `setup` opens
+      an SDK client and runs `mkdir -p root` + the tool probe against the user's container;
+      `teardown` closes the SDK client. The harness never starts or stops a container it
       didn't create.
 
     Exactly one of `image` / `container` must be set; passing both or neither raises.
@@ -118,6 +130,29 @@ class DockerEnvironment(AbstractEnvironment):
     cwd, which is brittle on macOS Docker Desktop and unsafe for remote daemons.
     """
 
+    environment: dict[str, str] | None = None
+    """Environment variables to set in the container.
+
+    Forwarded to `containers.run(environment=...)`. `None` defers to docker-py's default
+    (inherit from the image's `ENV`). Pass an empty dict to start with no extras.
+    """
+
+    user: str | None = None
+    """User to run the container as.
+
+    Forwarded to `containers.run(user=...)`. Accepts `'name'`, `'uid'`, or `'uid:gid'`.
+    `None` uses the image's `USER` directive (often root). Setting a non-root user may
+    make writes outside `root` fail; the harness does not chown `root` for you.
+    """
+
+    volumes: dict[str, dict[str, str]] | None = None
+    """Bind/volume mounts in docker-py's documented shape.
+
+    `{host_path_or_volume_name: {'bind': container_path, 'mode': 'rw' | 'ro'}}`. Forwarded
+    to `containers.run(volumes=...)`; we inherit docker-py's schema rather than invent one.
+    Malformed values raise at `setup` from docker-py itself.
+    """
+
     startup_timeout: float = 10.0
     """Absolute timeout for `setup` (`containers.run`), in seconds."""
 
@@ -128,7 +163,12 @@ class DockerEnvironment(AbstractEnvironment):
     """The container id we own (or that was attached); empty when no container is bound."""
 
     _client: DockerClient | None = field(init=False, default=None)
-    """The Docker SDK client; created in `setup`, closed in `teardown`. `None` in attach mode."""
+    """The Docker SDK client; created in `setup`, closed in `teardown` (both modes)."""
+
+    _session_id: str = field(init=False, default_factory=lambda: uuid.uuid4().hex)
+    """Per-instance UUID stamped on every owned container as a label so `prune_orphans`
+    can find leaked containers after a crash. Generated at construction so the value is
+    stable across `setup`/`teardown` cycles on the same instance."""
 
     def __post_init__(self) -> None:
         """Validate mode (image XOR container) and bind the attach-mode container id."""
@@ -142,63 +182,93 @@ class DockerEnvironment(AbstractEnvironment):
             self._container_id = self.container
 
     async def setup(self) -> None:
-        """`containers.run` in owned mode; no-op in attach mode."""
-        if self.image is None:
-            return
+        """Owned mode: `containers.run` with labels + user kwargs.
 
+        Attach mode: bind the SDK client to the user-supplied container. Both modes then `mkdir -p root` and run
+        the required-tools probe so tool methods can assume a working environment.
+        """
         client = await _run_blocking(docker.from_env)
         self._client = client
-        try:
-            # `containers.run(detach=True)` returns a Container as soon as the container is
-            # created. We bind `_container_id` from its `.id` before any other await -- the
-            # acquire-then-protect line.
-            container = await asyncio.wait_for(
-                _run_blocking(client.containers.run, self.image, ['sleep', 'infinity'], detach=True),
-                timeout=self.startup_timeout,
-            )
-        except docker.errors.ImageNotFound as exc:
-            raise RuntimeError(f'docker image not found: {exc.explanation}') from exc
-        except docker.errors.APIError as exc:
-            raise RuntimeError(f'docker run failed: {exc.explanation}') from exc
-        self._container_id = container.id
+        if self.image is not None:
+            labels = {
+                _SESSION_LABEL: self._session_id,
+                _CREATED_LABEL: datetime.now(timezone.utc).isoformat(),
+            }
+            try:
+                # `containers.run(detach=True)` returns a Container as soon as the container is
+                # created. We bind `_container_id` from its `.id` before any other await -- the
+                # acquire-then-protect line.
+                container = await asyncio.wait_for(
+                    _run_blocking(
+                        client.containers.run,
+                        self.image,
+                        ['sleep', 'infinity'],
+                        detach=True,
+                        environment=self.environment,
+                        user=self.user,
+                        volumes=self.volumes,
+                        labels=labels,
+                    ),
+                    timeout=self.startup_timeout,
+                )
+            except docker.errors.ImageNotFound as exc:
+                raise RuntimeError(f'docker image not found: {exc.explanation}') from exc
+            except docker.errors.APIError as exc:
+                raise RuntimeError(f'docker run failed: {exc.explanation}') from exc
+            self._container_id = container.id
 
-        # Ensure `root` exists in the container so `shell_command(workdir=root)` doesn't fail
-        # on images that don't ship `/workspace`. `mkdir -p` is a no-op when the dir exists.
+        # Both modes: ensure `root` exists and required tools are present. Attach mode runs
+        # these against a user-owned container -- `mkdir -p` is a no-op if the dir already
+        # exists, and the probe gives a clear failure if the user attached an image we can't drive.
         mkdir_exit, _o, mkdir_err = await self._exec(['mkdir', '-p', '--', self.root])
         if mkdir_exit != 0:
-            raise RuntimeError(
+            raise EnvSetupError(
                 f'failed to create environment root {self.root!r} in container: '
                 f'{mkdir_err.decode(errors="replace").strip()}'
             )
 
-    async def teardown(self) -> None:
-        """`container.remove(force=True)` in owned mode; no-op in attach mode.
+        probe = (
+            'for t in '
+            + ' '.join(_REQUIRED_TOOLS)
+            + '; do command -v "$t" >/dev/null 2>&1 || { printf %s "$t"; exit 1; }; done'
+        )
+        probe_exit, probe_out, _e = await self._exec(['sh', '-c', probe])
+        if probe_exit != 0:
+            missing = probe_out.decode(errors='replace').strip() or '<unknown>'
+            raise EnvSetupError(
+                f'container is missing required tool {missing!r}; DockerEnvironment requires {_REQUIRED_TOOLS} in PATH'
+            )
 
-        Swallows only `NotFound` (the idempotent already-gone case). Every other SDK
+    async def teardown(self) -> None:
+        """Close the SDK client, removing the container too in owned mode.
+
+        Owned mode runs `container.remove(force=True)` then closes the client. Attach mode
+        closes the client only; the container is user-owned and must outlive us. Swallows
+        only `NotFound` on remove (the idempotent already-gone case). Every other SDK
         error propagates so the caller can retry or escalate; the base class keeps
         `_started=True` on raise, so the resource is not silently forgotten.
         """
-        if self.image is None:
-            return
         client = self._client
         if client is None:  # pragma: no cover -- setup never completed
             return
-
-        container_id = self._container_id
-        if container_id is None:  # pragma: no cover -- setup never bound an id
-            return
         try:
-            container = await _run_blocking(client.containers.get, container_id)
-            await asyncio.wait_for(
-                _run_blocking(container.remove, force=True),
-                timeout=self.teardown_timeout,
-            )
-        except docker.errors.NotFound:
-            # Container is already gone: the state we wanted. Idempotent.
-            pass
-        self._container_id = None
-        await _run_blocking(client.close)
-        self._client = None
+            if self.image is not None:
+                container_id = self._container_id
+                if container_id is None:  # pragma: no cover -- setup never bound an id
+                    return
+                try:
+                    container = await _run_blocking(client.containers.get, container_id)
+                    await asyncio.wait_for(
+                        _run_blocking(container.remove, force=True),
+                        timeout=self.teardown_timeout,
+                    )
+                except docker.errors.NotFound:
+                    # Container is already gone: the state we wanted. Idempotent.
+                    pass
+                self._container_id = None
+        finally:
+            await _run_blocking(client.close)
+            self._client = None
 
     def _resolve(self, path: str) -> str:
         """Resolve `path` against `root` and reject anything that escapes.

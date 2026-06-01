@@ -49,6 +49,17 @@ class EnvShellExecutionError(ExecutionEnvironmentError):
     """Unexpected error executing a shell command."""
 
 
+class EnvSetupError(ExecutionEnvironmentError):
+    """Setup-time failure preparing the environment for use.
+
+    Raised when a backend can start a session but the resulting container/host
+    cannot serve as a working environment -- e.g. a required tool (`sh`, `cat`,
+    `mkdir`, `kill`, `tar`) is missing from the image, or the working root cannot
+    be created. Distinct from `EnvShellExecutionError` because it surfaces before
+    any user-facing operation runs.
+    """
+
+
 class EnvInvalidPatternError(ExecutionEnvironmentError):
     """The model supplied a malformed regex pattern to `grep`.
 

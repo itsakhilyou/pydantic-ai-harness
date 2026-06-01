@@ -12,6 +12,7 @@ once, in `tests/environments/`. The single end-to-end test below wires a real
 `LocalEnvironment` through an agent to prove the capability composes.
 """
 
+import asyncio
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -644,3 +645,24 @@ async def test_wrap_run_stops_env_when_handler_raises() -> None:
     with pytest.raises(_Boom):
         await cap.wrap_run(_ctx(), handler=boom)
     assert (env.setup_calls, env.teardown_calls) == (1, 1)
+
+
+async def test_two_agents_share_one_environment(tmp_path: Path) -> None:
+    def writer(path: str, content: str) -> FunctionModel:
+        def model_fn(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            wrote = any(
+                isinstance(p, ToolReturnPart) and p.tool_name == 'write_file' for m in messages for p in m.parts
+            )
+            if wrote:
+                return ModelResponse(parts=[TextPart('done')])
+            return ModelResponse(parts=[ToolCallPart(tool_name='write_file', args={'path': path, 'data': content})])
+
+        return FunctionModel(model_fn)
+
+    shared = LocalEnvironment(root=str(tmp_path))
+    async with shared:
+        a1 = Agent(writer('one.txt', 'AAA'), capabilities=[ExecutionEnv(environment=shared)])
+        a2 = Agent(writer('two.txt', 'BBB'), capabilities=[ExecutionEnv(environment=shared)])
+        await asyncio.gather(a1.run('write one'), a2.run('write two'))
+    assert (tmp_path / 'one.txt').read_text() == 'AAA'
+    assert (tmp_path / 'two.txt').read_text() == 'BBB'

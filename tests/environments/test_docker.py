@@ -45,8 +45,8 @@ class _FakeClient:
         client_self = self
 
         class _Containers:
-            def run(self, image: str, command: list[str], detach: bool) -> Any:
-                client_self.calls.append(f'run({image!r})')
+            def run(self, image: str, command: list[str], **kwargs: Any) -> Any:
+                client_self.calls.append(f'run({image!r}, kwargs={sorted(kwargs)!r})')
                 result = client_self.run_result
                 if isinstance(result, BaseException):
                     raise result
@@ -60,7 +60,7 @@ class _FakeClient:
                 return result
 
         class _API:
-            """Minimal `client.api` surface: just enough to let `setup`'s internal mkdir succeed."""
+            """Minimal `client.api` surface: just enough to let `setup`'s internal mkdir + tool probe succeed."""
 
             def exec_create(self, container: str, cmd: list[str], **kwargs: Any) -> dict[str, str]:
                 client_self.calls.append(f'exec_create({container!r}, {cmd!r})')
@@ -134,21 +134,24 @@ def test_container_mode_binds_attached_id() -> None:
 # --- attach mode: setup/teardown branch to no-op on `self.image is None` -----
 
 
-async def test_attach_mode_setup_runs_no_docker(fake_docker: _FakeClient) -> None:
-    """`start()` in attach mode calls `setup`, which returns immediately without invoking the SDK."""
+async def test_attach_mode_setup_runs_mkdir_and_probe(fake_docker: _FakeClient) -> None:
+    """Attach mode runs `mkdir -p root` + the tool probe via exec_create against the user's
+    container, but must not call `containers.run`/`get`/`remove`."""
     env = DockerEnvironment(container='abc123')
     await env.start()
     assert env._container_id == 'abc123'  # pyright: ignore[reportPrivateUsage]
     assert env._started is True  # pyright: ignore[reportPrivateUsage]
-    assert fake_docker.calls == [], 'attach-mode setup must not invoke the SDK'
+    assert not any(c.startswith(('run(', 'get(', 'remove(')) for c in fake_docker.calls)
 
 
-async def test_attach_mode_teardown_runs_no_docker(fake_docker: _FakeClient) -> None:
-    """`stop()` in attach mode must NEVER touch the user's container -- the load-bearing rule."""
+async def test_attach_mode_teardown_closes_client_only(fake_docker: _FakeClient) -> None:
+    """Attach-mode `stop()` must close the SDK client but never touch the user's container."""
     env = DockerEnvironment(container='abc123')
     await env.start()
+    fake_docker.calls.clear()
     await env.stop()
-    assert fake_docker.calls == [], 'attach mode must not invoke the SDK; user owns lifecycle'
+    assert not any(c.startswith(('run(', 'get(', 'remove(')) for c in fake_docker.calls)
+    assert fake_docker.closed is True
     assert env._started is False  # pyright: ignore[reportPrivateUsage]
 
 
