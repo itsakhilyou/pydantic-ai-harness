@@ -4,6 +4,9 @@ Each test takes the parametrized `environment` fixture and runs against every ba
 Files are seeded on the host `tmp_path` and exercised through `environment`; the two
 point at the same directory (see `conftest.py`). Backend-specific behavior (symlink
 resolution, POSIX permissions) lives in the per-backend test modules, not here.
+
+Assertions about backend-reported paths compare against `environment.root`, not `tmp_path`:
+Docker reports the in-container WORKDIR, not the host seed dir.
 """
 
 from pathlib import Path
@@ -110,8 +113,8 @@ async def test_grep_finds_matches_recursively(environment: AbstractEnvironment, 
     # The backend returns matches in filesystem walk order (unsorted) -- determinism is added at
     # the capability layer, not here -- so compare as a set, like the `ls` conformance test.
     assert {(m.path, m.lineno, m.line) for m in matches} == {
-        ('top.txt', 2, 'NEEDLE here\n'),
-        ('sub/deep.txt', 2, 'also NEEDLE\n'),
+        ('top.txt', 2, 'NEEDLE here'),
+        ('sub/deep.txt', 2, 'also NEEDLE'),
     }
 
 
@@ -146,7 +149,7 @@ async def test_grep_single_file(environment: AbstractEnvironment, tmp_path: Path
     # A file path (not a directory) exercises the is-a-file branch: search just that file.
     (tmp_path / 'only.txt').write_text('first\nNEEDLE on two\nthird\n')
     matches = await environment.grep('only.txt', 'NEEDLE')
-    assert matches == snapshot([AbstractMatch(path='only.txt', line='NEEDLE on two\n', lineno=2)])
+    assert matches == snapshot([AbstractMatch(path='only.txt', line='NEEDLE on two', lineno=2)])
 
 
 # --- grep regex subset: backend-portable dialect (every backend must agree) ---
@@ -303,9 +306,9 @@ async def test_shell_is_shell_interpreted(environment: AbstractEnvironment, tmp_
     assert result == snapshot(ShellCommandResult(stdout=b'a\nb\n', stderr=b'', return_code=0, timed_out=False))
 
 
-async def test_shell_runs_in_root(environment: AbstractEnvironment, tmp_path: Path) -> None:
+async def test_shell_runs_in_root(environment: AbstractEnvironment) -> None:
     result = await environment.shell_command('pwd', timeout=1)
-    assert result.stdout == f'{tmp_path.resolve()}\n'.encode()
+    assert result.stdout == f'{environment.root}\n'.encode()
 
 
 async def test_shell_no_state_persists_between_calls(environment: AbstractEnvironment, tmp_path: Path) -> None:
@@ -318,3 +321,23 @@ async def test_shell_no_state_persists_between_calls(environment: AbstractEnviro
 async def test_shell_timeout_sets_flag(environment: AbstractEnvironment, tmp_path: Path) -> None:
     result = await environment.shell_command('sleep 10', timeout=1)
     assert result == snapshot(ShellCommandResult(stdout=b'', stderr=b'', return_code=-15, timed_out=True))
+
+
+async def test_ls_includes_dotfiles(environment: AbstractEnvironment, tmp_path: Path) -> None:
+    (tmp_path / '.env').write_bytes(b'SECRET=x')
+    (tmp_path / 'visible.txt').write_bytes(b'')
+    listing = await environment.ls('.')
+    assert {f.name for f in listing} == {'.env', 'visible.txt'}
+
+
+async def test_write_creates_intermediate_directories(environment: AbstractEnvironment) -> None:
+    await environment.write_file('pkg/sub/new.txt', b'hello')
+    assert await environment.read_file('pkg/sub/new.txt') == b'hello'
+
+
+async def test_glob_excludes_dotfiles(environment: AbstractEnvironment, tmp_path: Path) -> None:
+    (tmp_path / 'visible.py').write_text('')
+    (tmp_path / '.hidden.py').write_text('')
+    (tmp_path / '.cache').mkdir()
+    (tmp_path / '.cache' / 'inside.py').write_text('')
+    assert await environment.glob('.', '*.py') == ['visible.py']

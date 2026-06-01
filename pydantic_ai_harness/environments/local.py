@@ -113,7 +113,8 @@ def _parse_ripgrep_json(stdout: bytes, root: Path) -> list[AbstractMatch]:
         line_text: str = data['lines']['text']
         lineno: int = data['line_number']
         rel_path = str(Path(path_text).relative_to(root))
-        matches.append(AbstractMatch(path=rel_path, line=line_text, lineno=lineno))
+        # rstrip('\n'), not rstrip(): preserve trailing whitespace that was part of the line.
+        matches.append(AbstractMatch(path=rel_path, line=line_text.rstrip('\n'), lineno=lineno))
     return matches
 
 
@@ -179,6 +180,10 @@ class LocalEnvironment(AbstractEnvironment):
     `agent_docs/confinement-security-research.md` for the full rationale and references.)
     """
 
+    def __post_init__(self) -> None:
+        """Canonicalize `root` so it equals `pwd` output across symlinks and macOS /private."""
+        self.root = str(Path(self.root).resolve())
+
     async def read_file(self, path: str) -> bytes:
         """Read a file from the local filesystem."""
         root = Path(self.root).resolve()
@@ -214,8 +219,9 @@ class LocalEnvironment(AbstractEnvironment):
             raise PathEscapeError(f'{path!r} resolves outside the environment root {self.root!r}')
 
         try:
+            # mkdir-parents per the ABC contract; a NotADirectoryError here falls through to EnvWriteError.
+            resolved_path.parent.mkdir(parents=True, exist_ok=True)
             resolved_path.write_bytes(data)
-        # If file isn't present we should create it so we need a test to make sure that is the case
         except PermissionError as e:
             raise EnvPermissionError(f'{path!r} is not writable by the environment root {self.root!r}: {str(e)}')
         except OSError as e:
@@ -289,15 +295,16 @@ class LocalEnvironment(AbstractEnvironment):
 
         results: list[str] = []
 
-        # rglob, not glob: a bare `*.py` matches at any depth, so the model can't fall into the
-        # silent-empty trap where `*.py` finds nothing in subdirectories (raw glob's `*` stops at
-        # `/`). The model learns this recursion from the `pattern` param description on the
-        # capability's glob tool -- this comment is for the maintainer, that one is for the model.
-        # Files only (is_file): directories are not glob results, matching grep's file orientation.
-        # Returned in filesystem walk order; the capability sorts for determinism (see grep/ls).
+        # rglob: bare `*.py` matches at any depth so the model can't hit the silent-empty trap.
+        # Files only; directories are not glob results. Dotfile exclusion is contract -- rglob
+        # itself does NOT skip dotfiles, so we filter any path with a leading-dot component.
         for match in resolved_path.rglob(pattern):
-            if match.is_file():
-                results.append(str(match.relative_to(root)))
+            if not match.is_file():
+                continue
+            rel = match.relative_to(root)
+            if any(part.startswith('.') for part in rel.parts):
+                continue
+            results.append(str(rel))
 
         return results
 

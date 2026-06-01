@@ -16,6 +16,10 @@ For any code change:
 - New or changed capability API: `capability-authoring.md`
 - New or changed tests: `testing-capabilities.md`
 - Unsure whether behavior belongs in harness or Pydantic AI core: `core-boundary.md`
+- Filesystem/shell access policy, ACLs, glob, or "where does confinement go?": `policy-layering.md`
+- Backend start/stop, container sharing across runs, attach mode: `environment-lifecycle.md`
+- Read-only / no-shell agent mode (primitives ready, API pending): `read-only-mode-status.md`
+- Cross-backend contract decisions (ls/write_file/glob/root + framework survey): `contract-decisions.md`
 - Review, pre-PR check, or final self-check: `review-checklist.md`
 
 ## Exemplar

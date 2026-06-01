@@ -25,7 +25,7 @@ class AbstractMatch:
     """The path to the file."""
 
     line: str
-    """The line's text."""
+    """The line's text, without a trailing newline."""
 
     lineno: int
     """The line's number."""
@@ -53,7 +53,7 @@ class AbstractEnvironment(ABC):
     """Abstract base class for all execution environments."""
 
     root: str
-    """The environment's root. Paths are resolved relative to it and confined to it."""
+    """The environment's canonical absolute root. Equal to what `shell_command('pwd')` reports."""
 
     _started: bool = False
     """Whether the environment is currently started."""
@@ -80,7 +80,7 @@ class AbstractEnvironment(ABC):
 
     @abstractmethod
     async def write_file(self, path: str, data: bytes) -> None:
-        """Create or overwrite a file with raw bytes.
+        """Create or overwrite a file with raw bytes. Missing intermediate directories are created.
 
         Args:
             path: File path, resolved against and confined to `root`.
@@ -88,14 +88,17 @@ class AbstractEnvironment(ABC):
 
         Raises:
             PathEscapeError: `path` resolves outside `root`.
-            EnvPermissionError: The backend may not write `path`.
-            EnvWriteError: Any other I/O failure (nothing builtin leaks).
+            EnvPermissionError: The backend may not write `path` (or create parents).
+            EnvWriteError: Any other I/O failure (e.g. writing onto an existing directory).
         """
         raise NotImplementedError  # pragma: no cover
 
     @abstractmethod
     async def ls(self, path: str) -> list[AbstractFile]:
         """List the contents of a directory.
+
+        Includes dotfiles. Symlinks classified by entry (a
+        symlink to a directory has `is_directory=False`).
 
         Args:
             path: Directory path, resolved against and confined to `root`.
@@ -148,6 +151,9 @@ class AbstractEnvironment(ABC):
         recursion. A bare pattern like `*.py` matches at **any depth**. Backends that shell out must
         constrain `find`/native globbing to match these semantics rather than expose their own dialect;
         for anything more, the model uses `shell`.
+
+        Dotfiles are excluded for `*` patterns: `*.py` does not match `.hidden.py`, and
+        `**/*.py` does not descend into `.git/`.
 
         Args:
             path: Directory path, resolved against and confined to `root`.
