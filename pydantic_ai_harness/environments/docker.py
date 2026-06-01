@@ -121,6 +121,11 @@ class DockerEnvironment(AbstractEnvironment):
 
     Used for sharing a container managed out-of-band (CI fixture, devcontainer, sidecar).
     The harness will not start or stop a container it didn't create.
+
+    Reaping caveat: owned mode runs the container with an init (`init=True`) so killed
+    descendants are reaped. Attach mode can't change the user's PID 1 -- if it isn't an
+    init (e.g. `sleep infinity`), processes killed on `shell_command` timeout linger as
+    zombies. Attach to a container started with `--init` to avoid this.
     """
 
     root: str = '/workspace'
@@ -212,6 +217,11 @@ class DockerEnvironment(AbstractEnvironment):
                             self.image,
                             ['sleep', 'infinity'],
                             detach=True,
+                            # `init=True` runs tini as PID 1, which reaps orphaned zombies. Our
+                            # `sleep infinity` PID 1 never calls `wait()`, so a timed-out command
+                            # that backgrounds a child (`sleep 30 & wait`) leaves the killed child
+                            # as an unreaped zombie that accumulates over the container's lifetime.
+                            init=True,
                             environment=self.environment,
                             user=self.user,
                             volumes=self.volumes,
