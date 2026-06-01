@@ -25,6 +25,3 @@ wheels/
 # Hypothesis
 .hypothesis/
 .vscode/
-
-# Local-only agent research/study docs
-agent_docs/
