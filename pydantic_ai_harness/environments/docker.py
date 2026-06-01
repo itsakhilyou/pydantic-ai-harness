@@ -358,15 +358,22 @@ class DockerEnvironment(AbstractEnvironment):
         """
         sock = await _run_blocking(client.api.exec_start, exec_id, socket=True, demux=True)
         raw = sock._sock  # pyright: ignore[reportPrivateUsage, reportAttributeAccessIssue, reportUnknownMemberType, reportUnknownVariableType]
+        drained: list[bytes] = []
         try:
-            await _run_blocking(raw.sendall, data)  # pyright: ignore[reportUnknownArgumentType, reportUnknownMemberType]
-            await _run_blocking(raw.shutdown, socket.SHUT_WR)  # pyright: ignore[reportUnknownArgumentType, reportUnknownMemberType]
-            drained: list[bytes] = []
-            while True:
-                chunk: bytes = await _run_blocking(raw.recv, 65536)  # pyright: ignore[reportUnknownArgumentType, reportUnknownMemberType]
-                if not chunk:
-                    break
-                drained.append(chunk)
+            # A pre-check in the target script can exit before it reaches `cat`, closing the
+            # remote read end; for a large `data` the `sendall` (or a mid-drain `recv`) then
+            # raises a broken-pipe/reset socket error. That's not a transport failure to surface
+            # raw -- the exec's non-zero exit code, which the caller reads via `exec_inspect`,
+            # already encodes the real cause (e.g. target is a directory). Suppress the socket
+            # error and fall through so that clean signal wins.
+            with contextlib.suppress(BrokenPipeError, ConnectionResetError, OSError):
+                await _run_blocking(raw.sendall, data)  # pyright: ignore[reportUnknownArgumentType, reportUnknownMemberType]
+                await _run_blocking(raw.shutdown, socket.SHUT_WR)  # pyright: ignore[reportUnknownArgumentType, reportUnknownMemberType]
+                while True:
+                    chunk: bytes = await _run_blocking(raw.recv, 65536)  # pyright: ignore[reportUnknownArgumentType, reportUnknownMemberType]
+                    if not chunk:
+                        break
+                    drained.append(chunk)
         finally:
             sock.close()  # pyright: ignore[reportUnknownMemberType]
         # `cat > path` doesn't emit on stdout; anything in `drained` is the multiplexed stream
@@ -461,11 +468,14 @@ class DockerEnvironment(AbstractEnvironment):
         )
 
     async def ls(self, path: str) -> list[AbstractFile]:
-        """List directory contents via `ls -1AF -- <path>` and parse the indicator suffix.
+        """List directory contents via `ls -1Ap -- <path>` and read the directory suffix.
 
-        `-A` includes dotfiles (excludes `.`/`..`); `-1` one entry per line; `-F` appends a
-        type indicator (`/` directory, `@` symlink, `*` executable, `=` socket, `|` FIFO).
-        Symlinks classify by entry (a symlink to a directory gets `@`, not `/`) -- matches
+        `-A` includes dotfiles (excludes `.`/`..`); `-1` one entry per line; `-p` appends a
+        trailing `/` to directories and nothing else. `/` is the one byte that can never appear
+        in a filename, so the suffix is unambiguous -- unlike `-F`, whose `@*=|` indicators
+        collide with real filenames ending in those characters (a regular file named `data@`
+        would be misread). `-p` does not append `/` to a symlink that points at a directory
+        (verified on GNU coreutils and busybox), so symlinks classify as themselves and match
         LocalEnvironment's `is_dir(follow_symlinks=False)` semantics exactly.
         """
         resolved = self._resolve(path)
@@ -475,7 +485,7 @@ class DockerEnvironment(AbstractEnvironment):
             f'[ -e "$1" ] || exit {_EXIT_NOT_FOUND};'
             f' [ -d "$1" ] || exit {_EXIT_NOT_A_DIRECTORY};'
             f' [ -r "$1" ] || exit {_EXIT_PERMISSION_DENIED};'
-            ' ls -1AF -- "$1"'
+            ' ls -1Ap -- "$1"'
         )
         exit_code, stdout, stderr = await self._exec(['/bin/sh', '-c', script, 'sh', resolved])
         if exit_code == _EXIT_NOT_FOUND:
@@ -495,12 +505,11 @@ class DockerEnvironment(AbstractEnvironment):
             line = raw_line.decode()
             if not line:
                 continue
-            # Strip the type indicator: `/` directory, `@` symlink, anything else (executable,
-            # socket, FIFO) treated as a file. Only `/` flips is_directory.
+            # `-p` only ever appends `/`, and only to directories; a trailing `/` is the sole
+            # indicator and can't be part of a real filename. Everything else (files, symlinks,
+            # executables, sockets, FIFOs) is is_directory=False with its name kept verbatim.
             if line.endswith('/'):
                 entries.append(AbstractFile(name=line[:-1], is_directory=True))
-            elif line[-1] in '@*=|':
-                entries.append(AbstractFile(name=line[:-1], is_directory=False))
             else:
                 entries.append(AbstractFile(name=line, is_directory=False))
         return entries
@@ -633,6 +642,11 @@ class DockerEnvironment(AbstractEnvironment):
             stdout_bytes, stderr_bytes = await asyncio.wait_for(asyncio.shield(exec_task), timeout=timeout)
         except asyncio.TimeoutError:
             await self._kill_remote_exec(client, container_id, pidfile)
+            # No secondary timeout on this await: the kill delivers SIGKILL, which is uncatchable,
+            # so once it lands the remote process dies and `exec_start` returns. The only way this
+            # blocks is if the kill exec itself never ran (daemon paused/down) -- but that same
+            # failure would already have wedged this exec's I/O, so a wrapper timeout would just
+            # trade one hang for an orphaned task with no result to return.
             stdout_bytes, stderr_bytes = await exec_task
             timed_out = True
         except asyncio.CancelledError:

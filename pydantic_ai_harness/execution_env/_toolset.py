@@ -269,7 +269,10 @@ async def _glob(environment: AbstractEnvironment, path: str, pattern: str) -> li
     except PathEscapeError as e:
         get_current_span().add_event('path_escape_attempt', {'path': path})
         raise ModelRetry(str(e)) from e
-    except (EnvNotFoundError, EnvPermissionError, EnvNotADirectoryError) as e:
+    except (EnvNotFoundError, EnvPermissionError, EnvNotADirectoryError, EnvInvalidPatternError) as e:
+        # EnvInvalidPatternError is model-fixable here too -- a malformed glob means the model
+        # wrote something the globset engine rejected; route to ModelRetry like grep does so the
+        # model is told what was wrong and can retry with a corrected pattern.
         raise ModelRetry(str(e)) from e
     except (EnvReadError,):
         # TODO: This should be a ToolFailed error when I merge that in

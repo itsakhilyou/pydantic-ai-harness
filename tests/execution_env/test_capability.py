@@ -437,6 +437,7 @@ async def test_glob_sorts_paths() -> None:
         EnvNotFoundError('not found'),
         EnvPermissionError('not readable'),
         EnvNotADirectoryError('is a file'),
+        EnvInvalidPatternError('bad glob'),
         PathEscapeError('outside root'),
     ],
 )

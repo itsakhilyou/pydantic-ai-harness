@@ -17,6 +17,7 @@ from inline_snapshot import snapshot
 
 from pydantic_ai_harness.environments.abstract import AbstractMatch
 from pydantic_ai_harness.environments.exceptions import (
+    EnvInvalidPatternError,
     EnvPermissionError,
     EnvReadError,
     EnvShellExecutionError,
@@ -314,3 +315,31 @@ async def test_cancellation_kills_the_tree(tmp_path: Path) -> None:
 
     await asyncio.sleep(1)
     assert not marker.exists()
+
+
+async def test_glob_invalid_pattern_raises_model_fixable(tmp_path: Path) -> None:
+    # An unterminated character class can't compile in rg's globset engine: rg exits 2 with no
+    # stdout, which the shared helper maps to EnvInvalidPatternError (model-fixable, not infra).
+    (tmp_path / 'a.py').write_text('x')
+    env = LocalEnvironment(root=str(tmp_path))
+    with pytest.raises(EnvInvalidPatternError):
+        await env.glob('.', '[')
+
+
+async def test_glob_walk_error_raises_read_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # rg exit 2 WITH stdout means a partial walk that hit an I/O error mid-stream (not a bad
+    # pattern); the helper surfaces it as EnvReadError. Forced via a fake proc since a real rg
+    # I/O failure is not reproducible on demand.
+    class _FakeProc:
+        returncode = 2
+
+        async def communicate(self) -> tuple[bytes, bytes]:
+            return (b'partial\n', b'walk error')
+
+    async def fake_exec(*_args: object, **_kwargs: object) -> _FakeProc:
+        return _FakeProc()
+
+    monkeypatch.setattr(asyncio, 'create_subprocess_exec', fake_exec)
+    env = LocalEnvironment(root=str(tmp_path))
+    with pytest.raises(EnvReadError, match='walk error'):
+        await env.glob('.', '*.py')

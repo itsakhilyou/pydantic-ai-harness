@@ -118,13 +118,18 @@ async def test_glob_returns_matching_files_at_any_depth(env_with_rg: DockerEnvir
 
 
 async def test_ls_returns_entries_with_type_info(env: DockerEnvironment) -> None:
-    """`ls -1AF` parsing: dotfiles included, dirs flagged, symlink-to-dir classified as itself."""
+    """`ls -1Ap` parsing: dotfiles included, dirs flagged, symlink-to-dir classified as itself."""
     await env.write_file('visible.txt', b'')
     await env.write_file('.hidden', b'')
     await env.shell_command('mkdir -p /workspace/subdir && ln -sfn /workspace/subdir /workspace/link')
+    # A regular file whose name ends in an `ls -F` indicator char must keep its name intact:
+    # `-F` would have appended nothing (regular file), so stripping the trailing `@` under the
+    # old parser misreported the name. `-p` only marks directories, so `at@` survives verbatim.
+    await env.write_file('at@', b'')
     entries = {f.name: f.is_directory for f in await env.ls('.')}
     assert entries.get('visible.txt') is False
     assert entries.get('.hidden') is False
+    assert entries.get('at@') is False
     assert entries.get('subdir') is True
     # Symlink to a directory classifies as the symlink itself (`is_directory=False`), matching
     # LocalEnvironment's `is_dir(follow_symlinks=False)` semantics.
