@@ -4,9 +4,9 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from .code_mode import CodeMode
-    from .execution_env import ExecutionEnv
+    from .execution_environment import ExecutionEnvironment
 
-__all__ = ['CodeMode', 'ExecutionEnv']
+__all__ = ['CodeMode', 'ExecutionEnvironment']
 
 
 def __getattr__(name: str) -> object:
@@ -14,8 +14,8 @@ def __getattr__(name: str) -> object:
         from .code_mode import CodeMode
 
         return CodeMode
-    if name == 'ExecutionEnv':
-        from .execution_env import ExecutionEnv
+    if name == 'ExecutionEnvironment':
+        from .execution_environment import ExecutionEnvironment
 
-        return ExecutionEnv
+        return ExecutionEnvironment
     raise AttributeError(f'module {__name__!r} has no attribute {name!r}')

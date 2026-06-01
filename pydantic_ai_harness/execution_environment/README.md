@@ -6,10 +6,10 @@ Give an agent filesystem and shell access — over a pluggable backend, so the s
 
 ## The idea
 
-A coding agent needs to do four things: read files, write/edit files, explore (list/search), and run shell commands. *Where* those happen — your laptop, a Docker container, a remote VM — should not change the agent's tools. `ExecutionEnv` is the capability that exposes those tools; an `Environment` is the swappable backend that actually performs them.
+A coding agent needs to do four things: read files, write/edit files, explore (list/search), and run shell commands. *Where* those happen — your laptop, a Docker container, a remote VM — should not change the agent's tools. `ExecutionEnvironment` is the capability that exposes those tools; an `Environment` is the swappable backend that actually performs them.
 
 ```
-ExecutionEnv (capability)  ──provides tools to──▶  Agent
+ExecutionEnvironment (capability)  ──provides tools to──▶  Agent
       │ delegates to
       ▼
 AbstractEnvironment  ◀── LocalEnvironment | DockerEnvironment | …
@@ -23,24 +23,24 @@ The common case is one line — the agent runs against your **current working di
 
 ```python
 from pydantic_ai import Agent
-from pydantic_ai_harness import ExecutionEnv
+from pydantic_ai_harness import ExecutionEnvironment
 
-agent = Agent('anthropic:claude-sonnet-4-6', capabilities=[ExecutionEnv()])
+agent = Agent('anthropic:claude-sonnet-4-6', capabilities=[ExecutionEnvironment()])
 
 result = agent.run_sync('Read pyproject.toml and tell me the project name.')
 print(result.output)
 ```
 
-`ExecutionEnv()` defaults to a `LocalEnvironment` rooted at your `cwd`. To run against a different root, an isolated container, or a custom backend, pass an `AbstractEnvironment` instance:
+`ExecutionEnvironment()` defaults to a `LocalEnvironment` rooted at your `cwd`. To run against a different root, an isolated container, or a custom backend, pass an `AbstractEnvironment` instance:
 
 ```python
 from pydantic_ai_harness.environments import DockerEnvironment, LocalEnvironment
 
 # Local rooted somewhere other than cwd:
-ExecutionEnv(environment=LocalEnvironment(root='/path/to/workspace'))
+ExecutionEnvironment(environment=LocalEnvironment(root='/path/to/workspace'))
 
 # Docker — operations run inside the container:
-ExecutionEnv(environment=DockerEnvironment(image='python:3.12-slim'))
+ExecutionEnvironment(environment=DockerEnvironment(image='python:3.12-slim'))
 ```
 
 The agent's tools (`read_file`, `write_file`/`edit_file`, `ls`/`glob`/`grep`, `shell`) are the same on every backend — only the backend changes.

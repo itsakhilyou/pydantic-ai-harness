@@ -1,4 +1,4 @@
-"""Capability-layer tests for ExecutionEnv: error routing, truncation, and edit logic.
+"""Capability-layer tests for ExecutionEnvironment: error routing, truncation, and edit logic.
 
 These test the *capability*, not any backend, so they drive in-memory fakes:
 
@@ -44,8 +44,8 @@ from pydantic_ai_harness.environments.exceptions import (
     PathEscapeError,
 )
 from pydantic_ai_harness.environments.local import LocalEnvironment
-from pydantic_ai_harness.execution_env import ExecutionEnv
-from pydantic_ai_harness.execution_env._truncate import DEFAULT_MAX_LINES
+from pydantic_ai_harness.execution_environment import ExecutionEnvironment
+from pydantic_ai_harness.execution_environment._truncate import DEFAULT_MAX_LINES
 
 
 @dataclass(kw_only=True)
@@ -112,7 +112,7 @@ def _ctx() -> RunContext[None]:
 
 async def _call_read_file(environment: AbstractEnvironment, path: str = 'f.txt') -> object:
     """Invoke the read_file tool through its toolset."""
-    toolset = ExecutionEnv(environment=environment).get_toolset()
+    toolset = ExecutionEnvironment(environment=environment).get_toolset()
     ctx = _ctx()
     tools = await toolset.get_tools(ctx)
     return await toolset.call_tool('read_file', {'path': path}, ctx, tools['read_file'])
@@ -120,7 +120,7 @@ async def _call_read_file(environment: AbstractEnvironment, path: str = 'f.txt')
 
 async def _read(data: bytes, *, offset: int | None = None, limit: int | None = None) -> str:
     """Invoke read_file with preset bytes and optional offset/limit, return the text."""
-    toolset = ExecutionEnv(environment=_StoreEnvironment(root='/x', data=data)).get_toolset()
+    toolset = ExecutionEnvironment(environment=_StoreEnvironment(root='/x', data=data)).get_toolset()
     ctx = _ctx()
     tools = await toolset.get_tools(ctx)
     args: dict[str, object] = {'path': 'f.txt'}
@@ -133,7 +133,7 @@ async def _read(data: bytes, *, offset: int | None = None, limit: int | None = N
 
 async def _write(environment: AbstractEnvironment, *, data: str = 'hi', path: str = 'f.txt') -> object:
     """Invoke the write_file tool through its toolset."""
-    toolset = ExecutionEnv(environment=environment).get_toolset()
+    toolset = ExecutionEnvironment(environment=environment).get_toolset()
     ctx = _ctx()
     tools = await toolset.get_tools(ctx)
     return await toolset.call_tool('write_file', {'path': path, 'data': data}, ctx, tools['write_file'])
@@ -148,7 +148,7 @@ async def _edit(
     path: str = 'f.txt',
 ) -> object:
     """Invoke the edit_file tool through its toolset."""
-    toolset = ExecutionEnv(environment=environment).get_toolset()
+    toolset = ExecutionEnvironment(environment=environment).get_toolset()
     ctx = _ctx()
     tools = await toolset.get_tools(ctx)
     args: dict[str, object] = {'path': path, 'old_string': old_string, 'new_string': new_string}
@@ -159,7 +159,7 @@ async def _edit(
 
 async def _ls(environment: AbstractEnvironment, *, path: str = 'd', limit: int | None = None) -> object:
     """Invoke the ls tool through its toolset."""
-    toolset = ExecutionEnv(environment=environment).get_toolset()
+    toolset = ExecutionEnvironment(environment=environment).get_toolset()
     ctx = _ctx()
     tools = await toolset.get_tools(ctx)
     args: dict[str, object] = {'path': path}
@@ -380,7 +380,7 @@ async def test_ls_infra_error_propagates() -> None:
 
 async def _grep(environment: AbstractEnvironment, *, path: str = 'd', pattern: str = 'x') -> object:
     """Invoke the grep tool through its toolset."""
-    toolset = ExecutionEnv(environment=environment).get_toolset()
+    toolset = ExecutionEnvironment(environment=environment).get_toolset()
     ctx = _ctx()
     tools = await toolset.get_tools(ctx)
     return await toolset.call_tool('grep', {'path': path, 'pattern': pattern}, ctx, tools['grep'])
@@ -420,7 +420,7 @@ async def test_grep_infra_error_propagates() -> None:
 
 async def _glob(environment: AbstractEnvironment, *, path: str = 'd', pattern: str = '*.py') -> object:
     """Invoke the glob tool through its toolset."""
-    toolset = ExecutionEnv(environment=environment).get_toolset()
+    toolset = ExecutionEnvironment(environment=environment).get_toolset()
     ctx = _ctx()
     tools = await toolset.get_tools(ctx)
     return await toolset.call_tool('glob', {'path': path, 'pattern': pattern}, ctx, tools['glob'])
@@ -476,7 +476,7 @@ def _shell_env(
 
 async def _shell(environment: AbstractEnvironment, *, command: str = 'echo hi', timeout: float | None = None) -> object:
     """Invoke the shell tool through its toolset."""
-    toolset = ExecutionEnv(environment=environment).get_toolset()
+    toolset = ExecutionEnvironment(environment=environment).get_toolset()
     ctx = _ctx()
     tools = await toolset.get_tools(ctx)
     args: dict[str, object] = {'command': command}
@@ -533,7 +533,7 @@ async def test_shell_infra_error_propagates_not_model_retry() -> None:
 # --- end-to-end: capability through a real backend + agent --------------------
 
 
-async def test_execution_env_capability_read_file(tmp_path: Path) -> None:
+async def test_execution_environment_capability_read_file(tmp_path: Path) -> None:
     file_name = 'test.txt'
     (tmp_path / file_name).write_text('Hello, world!')
 
@@ -546,7 +546,7 @@ async def test_execution_env_capability_read_file(tmp_path: Path) -> None:
         return ModelResponse(parts=[ToolCallPart(tool_name='read_file', args={'path': file_name})])
 
     agent = Agent(
-        FunctionModel(model_fn), capabilities=[ExecutionEnv(environment=LocalEnvironment(root=str(tmp_path)))]
+        FunctionModel(model_fn), capabilities=[ExecutionEnvironment(environment=LocalEnvironment(root=str(tmp_path)))]
     )
     result = await agent.run(f'Read the file {file_name} and return the contents.')
 
@@ -560,10 +560,10 @@ async def test_execution_env_capability_read_file(tmp_path: Path) -> None:
 
 
 def test_default_is_local_environment_rooted_at_cwd() -> None:
-    """`ExecutionEnv()` with no args creates a `LocalEnvironment` rooted at the current
+    """`ExecutionEnvironment()` with no args creates a `LocalEnvironment` rooted at the current
     working directory -- the no-arg behavior advertised in the docstring. Resolved via
     `default_factory`, so cwd is read at instance creation, not class definition."""
-    cap = ExecutionEnv[None]()
+    cap = ExecutionEnvironment[None]()
     assert isinstance(cap.environment, LocalEnvironment)
     assert cap.environment.root == os.getcwd()
 
@@ -574,14 +574,14 @@ def test_docker_environment_can_be_passed_as_instance() -> None:
     from pydantic_ai_harness.environments.docker import DockerEnvironment
 
     docker = DockerEnvironment(image='python:3.12-slim')
-    cap = ExecutionEnv[None](environment=docker)
+    cap = ExecutionEnvironment[None](environment=docker)
     assert cap.environment is docker
 
 
 def test_passed_instance_is_used_as_is() -> None:
     """A user-supplied `AbstractEnvironment` is used verbatim (the power-user / configured path)."""
     custom = LocalEnvironment(root='/tmp')
-    cap = ExecutionEnv[None](environment=custom)
+    cap = ExecutionEnvironment[None](environment=custom)
     assert cap.environment is custom
 
 
@@ -610,7 +610,7 @@ async def _trivial_handler() -> AgentRunResult[None]:
 async def test_wrap_run_owns_lifecycle_when_env_not_started() -> None:
     """No outer `async with`: `wrap_run` must start before the handler and stop after."""
     env = _LifecycleSpyEnvironment(root='/x', data=b'')
-    cap = ExecutionEnv[None](environment=env)
+    cap = ExecutionEnvironment[None](environment=env)
 
     async def handler() -> AgentRunResult[None]:
         # During the handler the env should already be started, and stop hasn't been called yet.
@@ -625,7 +625,7 @@ async def test_wrap_run_owns_lifecycle_when_env_not_started() -> None:
 async def test_wrap_run_skips_lifecycle_when_env_already_started() -> None:
     """Outer `async with` started the env: `wrap_run` must not touch start/stop at all."""
     env = _LifecycleSpyEnvironment(root='/x', data=b'')
-    cap = ExecutionEnv[None](environment=env)
+    cap = ExecutionEnvironment[None](environment=env)
 
     async with env:
         assert (env.setup_calls, env.teardown_calls) == (1, 0)
@@ -640,7 +640,7 @@ async def test_wrap_run_skips_lifecycle_when_env_already_started() -> None:
 async def test_wrap_run_stops_env_when_handler_raises() -> None:
     """A handler exception must still pair with stop() -- the finally branch is load-bearing."""
     env = _LifecycleSpyEnvironment(root='/x', data=b'')
-    cap = ExecutionEnv[None](environment=env)
+    cap = ExecutionEnvironment[None](environment=env)
 
     class _Boom(Exception):
         pass
@@ -667,8 +667,8 @@ async def test_two_agents_share_one_environment(tmp_path: Path) -> None:
 
     shared = LocalEnvironment(root=str(tmp_path))
     async with shared:
-        a1 = Agent(writer('one.txt', 'AAA'), capabilities=[ExecutionEnv(environment=shared)])
-        a2 = Agent(writer('two.txt', 'BBB'), capabilities=[ExecutionEnv(environment=shared)])
+        a1 = Agent(writer('one.txt', 'AAA'), capabilities=[ExecutionEnvironment(environment=shared)])
+        a2 = Agent(writer('two.txt', 'BBB'), capabilities=[ExecutionEnvironment(environment=shared)])
         await asyncio.gather(a1.run('write one'), a2.run('write two'))
     assert (tmp_path / 'one.txt').read_text() == 'AAA'
     assert (tmp_path / 'two.txt').read_text() == 'BBB'

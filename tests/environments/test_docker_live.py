@@ -22,7 +22,7 @@ from pydantic_ai_harness.environments.exceptions import (
     EnvNotFoundError,
     EnvShellExecutionError,
 )
-from pydantic_ai_harness.execution_env import ExecutionEnv
+from pydantic_ai_harness.execution_environment import ExecutionEnvironment
 
 pytestmark = pytest.mark.anyio
 
@@ -36,7 +36,7 @@ def _docker_available() -> bool:
     """`True` iff a Docker daemon is reachable. Used to skip the whole module otherwise."""
     try:
         docker.from_env().ping()  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
-    except (docker.errors.DockerException, OSError):
+    except (docker.errors.DockerException, OSError):  # pragma: no cover -- only hit without a daemon; CI provides one
         return False
     return True
 
@@ -241,8 +241,8 @@ async def test_two_agents_share_one_docker_environment() -> None:
         return FunctionModel(model_fn)
 
     async with DockerEnvironment(image='python:3.12-slim') as env:
-        a1 = Agent(writer('one.txt', 'AAA'), capabilities=[ExecutionEnv(environment=env)])
-        a2 = Agent(writer('two.txt', 'BBB'), capabilities=[ExecutionEnv(environment=env)])
+        a1 = Agent(writer('one.txt', 'AAA'), capabilities=[ExecutionEnvironment(environment=env)])
+        a2 = Agent(writer('two.txt', 'BBB'), capabilities=[ExecutionEnvironment(environment=env)])
         await asyncio.gather(a1.run('write one'), a2.run('write two'))
         assert await env.read_file('one.txt') == b'AAA'
         assert await env.read_file('two.txt') == b'BBB'

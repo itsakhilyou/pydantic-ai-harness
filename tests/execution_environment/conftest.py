@@ -1,4 +1,4 @@
-"""Shared fixtures for execution_env capability tests."""
+"""Shared fixtures for execution_environment capability tests."""
 
 import pytest
 

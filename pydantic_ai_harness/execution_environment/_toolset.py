@@ -1,6 +1,6 @@
 """Tool implementations and toolset builder for the execution environment.
 
-The capability (`ExecutionEnv`) stays thin: it owns the generic `AgentDepsT` and delegates to
+The capability (`ExecutionEnvironment`) stays thin: it owns the generic `AgentDepsT` and delegates to
 `build_toolset` here. Each tool's real logic lives in a module-level `_*` helper so its try/except
 branches are its own -- mccabe rolls *nested* function complexity into the enclosing builder, so the
 nested tool wrappers must stay branchless one-liners or `build_toolset` blows the C901 limit.
@@ -333,7 +333,7 @@ def build_toolset(
 ) -> FunctionToolset[AgentDepsT]:
     """Define the tools (closing over `environment`) and register them on `toolset`.
 
-    Takes the toolset as an argument so `AgentDepsT` is bound by the caller (`ExecutionEnv.get_toolset`
+    Takes the toolset as an argument so `AgentDepsT` is bound by the caller (`ExecutionEnvironment.get_toolset`
     creates the `FunctionToolset[AgentDepsT]`), keeping the generic parameter with the capability while
     the tool definitions live here. Every tool body delegates to a module-level `_*` helper so this
     builder stays branchless (see module docstring on C901).

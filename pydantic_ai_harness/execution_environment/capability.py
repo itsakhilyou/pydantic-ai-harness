@@ -26,11 +26,11 @@ def _default_environment() -> AbstractEnvironment:
 
 
 @dataclass
-class ExecutionEnv(AbstractCapability[AgentDepsT]):
+class ExecutionEnvironment(AbstractCapability[AgentDepsT]):
     """Capability that exposes the execution environment to the agent.
 
     Defaults to running against your current working directory via `LocalEnvironment`,
-    so `ExecutionEnv()` "just works" for the common case. Pass an `AbstractEnvironment`
+    so `ExecutionEnvironment()` "just works" for the common case. Pass an `AbstractEnvironment`
     instance to configure the backend (e.g. `LocalEnvironment(root=...)`,
     `DockerEnvironment(image=...)`, or a custom backend).
 

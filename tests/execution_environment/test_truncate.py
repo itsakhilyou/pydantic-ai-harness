@@ -4,7 +4,7 @@ These pin the line/byte boundary behavior so the off-by-one and byte-accounting
 decisions never silently regress. Pure-sync -- no agent, no event loop.
 """
 
-from pydantic_ai_harness.execution_env._truncate import (
+from pydantic_ai_harness.execution_environment._truncate import (
     DEFAULT_MAX_BYTES,
     DEFAULT_MAX_LINES,
     format_size,

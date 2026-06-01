@@ -147,6 +147,7 @@ source = ['.', '/home/runner/work/pydantic-ai-harness/pydantic-ai-harness']
 [tool.coverage.report]
 fail_under = 100
 show_missing = true
+skip_covered = true
 exclude_lines = [
     'pragma: no cover',
     'pragma: lax no cover',

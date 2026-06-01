@@ -35,7 +35,7 @@ def _docker_available() -> bool:
     """`True` iff a Docker daemon is reachable. Used to skip the docker param locally."""
     try:
         docker.from_env().ping()  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
-    except (docker.errors.DockerException, OSError):
+    except (docker.errors.DockerException, OSError):  # pragma: no cover -- only hit without a daemon; CI provides one
         return False
     return True
 
@@ -52,7 +52,7 @@ async def environment(request: pytest.FixtureRequest, tmp_path: Path) -> AsyncIt
         async with env:
             yield env
     elif request.param == 'docker':
-        if not _docker_available():
+        if not _docker_available():  # pragma: no cover -- only hit without a daemon; CI provides one
             pytest.skip('no Docker daemon')
         docker_env = DockerEnvironment(image='python:3.12-slim')
         async with docker_env:
