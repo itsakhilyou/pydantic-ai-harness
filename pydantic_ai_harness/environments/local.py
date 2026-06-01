@@ -75,6 +75,18 @@ async def _terminate_and_drain(proc: asyncio.subprocess.Process) -> tuple[bytes,
     return stdout, stderr
 
 
+def _resolve_under_root(root: Path, path: str) -> Path:
+    # Canonicalize `path` under `root` with `os.path.realpath` instead of `Path.resolve()` to dodge a
+    # cross-version behavior split on symlink cycles. On Python <=3.12, `Path.resolve(strict=False)`
+    # calls `stat()` internally to force ELOOP detection and raises `RuntimeError("Symlink loop from
+    # ...")` -- which is neither an `OSError` nor raised inside the per-method `try`, so it escapes
+    # uncaught. On 3.13+, `resolve()` was reimplemented on top of `realpath` and returns a best-effort
+    # path without raising. Calling `os.path.realpath` directly gives us that 3.13+ behavior on every
+    # supported interpreter (>=3.10): a loop resolves silently here and instead surfaces as an
+    # `OSError(ELOOP)` at read/scandir time, where the normal error mapping turns it into `EnvReadError`.
+    return Path(os.path.realpath(Path(root, path)))
+
+
 @dataclass(kw_only=True)
 class LocalEnvironment(AbstractEnvironment):
     """Filesystem/shell environment backed by the local machine's filesystem.
@@ -95,7 +107,7 @@ class LocalEnvironment(AbstractEnvironment):
     async def read_file(self, path: str) -> bytes:
         """Read a file from the local filesystem."""
         root = Path(self.root).resolve()
-        resolved_path = Path(root, path).resolve()
+        resolved_path = _resolve_under_root(root, path)
 
         # Advisory jail with a KNOWN TOCTOU race: the resolve()+containment check
         # and the read_bytes() below are two separate steps. A symlink swapped in
@@ -121,7 +133,7 @@ class LocalEnvironment(AbstractEnvironment):
     async def write_file(self, path: str, data: bytes) -> None:
         """Write a file to the local filesystem."""
         root = Path(self.root).resolve()
-        resolved_path = Path(root, path).resolve()
+        resolved_path = _resolve_under_root(root, path)
 
         if not resolved_path.is_relative_to(root):
             raise PathEscapeError(f'{path!r} resolves outside the environment root {self.root!r}')
@@ -138,7 +150,7 @@ class LocalEnvironment(AbstractEnvironment):
     async def ls(self, path: str) -> list[AbstractFile]:
         """List the contents of a directory."""
         root = Path(self.root).resolve()
-        resolved_path = Path(root, path).resolve()
+        resolved_path = _resolve_under_root(root, path)
 
         if not resolved_path.is_relative_to(root):
             raise PathEscapeError(f'{path!r} resolves outside the environment root {self.root!r}')
@@ -164,7 +176,7 @@ class LocalEnvironment(AbstractEnvironment):
     async def grep(self, path: str, pattern: str) -> list[AbstractMatch]:
         """Search files for a regex pattern by invoking `rg` (ripgrep) as a subprocess."""
         root = Path(self.root).resolve()
-        resolved_path = Path(root, path).resolve()
+        resolved_path = _resolve_under_root(root, path)
 
         if not resolved_path.is_relative_to(root):
             raise PathEscapeError(f'{path!r} resolves outside the environment root {self.root!r}')
@@ -187,7 +199,7 @@ class LocalEnvironment(AbstractEnvironment):
     async def glob(self, path: str, pattern: str) -> list[str]:
         """Glob a directory for a pattern."""
         root = Path(self.root).resolve()
-        resolved_path = Path(root, path).resolve()
+        resolved_path = _resolve_under_root(root, path)
 
         if not resolved_path.is_relative_to(root):
             raise PathEscapeError(f'{path!r} resolves outside the environment root {self.root!r}')
