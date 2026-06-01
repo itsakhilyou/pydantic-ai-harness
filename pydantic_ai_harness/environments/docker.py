@@ -18,15 +18,12 @@ Failure-handling patterns come from prior art -- see
 
 import asyncio
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
 
 import docker
 import docker.errors
+from docker import DockerClient
 
 from .abstract import AbstractEnvironment, AbstractFile, AbstractMatch, ShellCommandResult
-
-if TYPE_CHECKING:
-    from docker import DockerClient
 
 
 @dataclass(kw_only=True)
@@ -75,7 +72,7 @@ class DockerEnvironment(AbstractEnvironment):
     _container_id: str = field(init=False, default='')
     """The container id we own (or that was attached); empty when no container is bound."""
 
-    _client: 'DockerClient | None' = field(init=False, default=None)
+    _client: DockerClient | None = field(init=False, default=None)
     """The Docker SDK client; created in `setup`, closed in `teardown`. `None` in attach mode."""
 
     def __post_init__(self) -> None:
@@ -97,9 +94,9 @@ class DockerEnvironment(AbstractEnvironment):
         client = await asyncio.to_thread(docker.from_env)
         self._client = client
         try:
-            # `containers.run(detach=True)` returns a Container object as soon as the
-            # container is created. We bind `_container_id` from its `.id` before any
-            # other await -- this is the acquire-then-protect line.
+            # `containers.run(detach=True)` returns a Container as soon as the container is
+            # created. We bind `_container_id` from its `.id` before any other await -- the
+            # acquire-then-protect line.
             container = await asyncio.wait_for(
                 asyncio.to_thread(client.containers.run, self.image, ['sleep', 'infinity'], detach=True),
                 timeout=self.startup_timeout,
