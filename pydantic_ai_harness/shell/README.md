@@ -39,7 +39,9 @@ print(result.output)
 | `stop_command` | Terminate a background command and return its final output. |
 
 Output is labelled with `[stdout]` / `[stderr]` markers and an `[exit code: N]`
-line on non-zero exit, then truncated to `max_output_chars`.
+line on non-zero exit. When it exceeds `max_output_chars` the **tail** is kept
+(the head is dropped), so errors, stack traces, and the `[stderr]` section —
+which all land at the end — survive truncation.
 
 ## Command controls
 

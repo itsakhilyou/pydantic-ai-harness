@@ -138,17 +138,17 @@ class ShellToolset(FunctionToolset[Any]):
         if self._allowed_commands and executable not in self._allowed_commands:
             raise PermissionError(f'Command {executable!r} is not in the allowed list.')
 
-    def _truncate(self, text: str, *, stderr_text: str = '') -> str:
-        """Truncate output, reserving space for stderr when both streams are present."""
+    def _truncate(self, text: str) -> str:
+        """Truncate output to the configured cap, keeping the tail.
+
+        The most useful output — errors, stack traces, exit info, and the
+        `[stderr]` section (which callers append last) — lands at the end, so
+        the head is dropped and the final `max_output_chars` are kept.
+        """
         if len(text) <= self._max_output_chars:
             return text
-        if not stderr_text:
-            return text[: self._max_output_chars] + f'\n[... output truncated at {self._max_output_chars} chars]'
-
-        stderr_budget = min(len(stderr_text) + len('[stderr]\n'), self._max_output_chars // 3)
-        stdout_budget = self._max_output_chars - stderr_budget
-        truncated = text[:stdout_budget] + f'\n[... stdout truncated at {stdout_budget} chars]'
-        return truncated
+        marker = f'[... output truncated, showing last {self._max_output_chars} chars]\n'
+        return marker + text[-self._max_output_chars :]
 
     def _wrap_command_for_cwd(self, command: str) -> str:
         """Append pwd sentinel to command for cwd tracking.
@@ -293,7 +293,7 @@ class ShellToolset(FunctionToolset[Any]):
             parts.append(f'[stderr]\n{stderr}')
         output = '\n'.join(parts) if parts else '(no output)'
 
-        output = self._truncate(output, stderr_text=stderr)
+        output = self._truncate(output)
         exit_code = proc.returncode if proc.returncode is not None else 0
 
         if self._persist_cwd and exit_code == 0 and new_cwd is not None:

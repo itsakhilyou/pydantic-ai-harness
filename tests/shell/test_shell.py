@@ -304,8 +304,8 @@ class TestTruncation:
             allow_interactive=False,
         )
         result = ts._truncate('x' * 20)
-        assert result.startswith('x' * 10)
-        assert 'truncated at 10 chars' in result
+        assert result.endswith('x' * 10)
+        assert 'truncated, showing last 10 chars' in result
 
     def test_exactly_at_limit_not_truncated(self, shell_dir: Path) -> None:
         ts = ShellToolset(
@@ -334,42 +334,28 @@ class TestTruncation:
             allow_interactive=False,
         )
         result = ts._truncate('x' * 11)
-        assert result.startswith('x' * 10)
-        assert 'truncated at 10 chars' in result
+        assert result.endswith('x' * 10)
+        assert 'truncated, showing last 10 chars' in result
 
-    def test_smart_truncation_with_stderr(self, shell_dir: Path) -> None:
-        """When stderr_text is provided and output is over limit, use smart truncation."""
+    def test_keeps_tail_not_head(self, shell_dir: Path) -> None:
+        """The tail (where errors and the [stderr] section land) is preserved."""
         ts = ShellToolset(
             cwd=shell_dir,
             allowed_commands=[],
             denied_commands=[],
             denied_operators=[],
             default_timeout=10.0,
-            max_output_chars=100,
+            max_output_chars=20,
             persist_cwd=False,
             allow_interactive=False,
         )
-        long_text = 'x' * 200
-        result = ts._truncate(long_text, stderr_text='error msg')
-        assert 'stdout truncated' in result
-        assert len(result) < 200
+        text = 'HEAD' + 'x' * 100 + 'TAIL_ERROR'
+        result = ts._truncate(text)
+        assert result.endswith('TAIL_ERROR')
+        assert 'HEAD' not in result
+        assert 'truncated' in result
 
-    def test_smart_truncation_not_triggered_under_limit(self, shell_dir: Path) -> None:
-        """When under limit, stderr_text parameter is irrelevant."""
-        ts = ShellToolset(
-            cwd=shell_dir,
-            allowed_commands=[],
-            denied_commands=[],
-            denied_operators=[],
-            default_timeout=10.0,
-            max_output_chars=100,
-            persist_cwd=False,
-            allow_interactive=False,
-        )
-        result = ts._truncate('short', stderr_text='error')
-        assert result == 'short'
-
-    def test_truncation_without_stderr_uses_basic(self, shell_dir: Path) -> None:
+    def test_truncation_marker_wording(self, shell_dir: Path) -> None:
         ts = ShellToolset(
             cwd=shell_dir,
             allowed_commands=[],
@@ -381,23 +367,7 @@ class TestTruncation:
             allow_interactive=False,
         )
         result = ts._truncate('x' * 20)
-        assert 'output truncated at 10 chars' in result
-        assert 'stdout truncated' not in result
-
-    def test_truncation_with_stderr_uses_smart(self, shell_dir: Path) -> None:
-        ts = ShellToolset(
-            cwd=shell_dir,
-            allowed_commands=[],
-            denied_commands=[],
-            denied_operators=[],
-            default_timeout=10.0,
-            max_output_chars=10,
-            persist_cwd=False,
-            allow_interactive=False,
-        )
-        result = ts._truncate('x' * 20, stderr_text='err')
-        assert 'stdout truncated' in result
-        assert 'output truncated' not in result
+        assert 'output truncated, showing last 10 chars' in result
 
 
 class TestCwdSentinel:
@@ -495,7 +465,7 @@ class TestRunCommand:
             allow_interactive=False,
         )
         result = await ts.run_command(f'{sys.executable} -c "print(\'x\' * 200)"')
-        assert 'truncated at 50 chars' in result
+        assert 'truncated, showing last 50 chars' in result
 
     async def test_persist_cwd(self, shell_dir: Path) -> None:
         ts = ShellToolset(
