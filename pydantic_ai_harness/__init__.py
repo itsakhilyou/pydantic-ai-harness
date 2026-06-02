@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from .code_mode import CodeMode
     from .filesystem import FileSystem
+    from .logfire import ManagedPrompt
     from .shell import Shell
     from .step_persistence import (
         ContinuableSnapshot,
@@ -31,6 +32,7 @@ __all__ = [
     'FileStepStore',
     'FileSystem',
     'InMemoryStepStore',
+    'ManagedPrompt',
     'RunRecord',
     'Shell',
     'SqliteStepStore',
@@ -73,6 +75,10 @@ def __getattr__(name: str) -> object:
         from .filesystem import FileSystem
 
         return FileSystem
+    if name == 'ManagedPrompt':
+        from .logfire import ManagedPrompt
+
+        return ManagedPrompt
     if name == 'Shell':
         from .shell import Shell
 
