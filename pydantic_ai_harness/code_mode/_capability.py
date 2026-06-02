@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import KW_ONLY, dataclass, field
 
 from pydantic_ai import AbstractToolset
 from pydantic_ai.capabilities import AbstractCapability, CapabilityOrdering
@@ -57,6 +57,10 @@ class CodeMode(AbstractCapability[AgentDepsT]):
 
     max_retries: int = 3
     """Maximum number of retries for the `run_code` tool (syntax errors count as retries)."""
+
+    _: KW_ONLY
+    # Everything below is keyword-only: the option list keeps growing, so new
+    # config must be passed by name rather than relying on positional order.
 
     os_access: CodeModeOS | None = None
     """Host-backed OS access for sandboxed code.
