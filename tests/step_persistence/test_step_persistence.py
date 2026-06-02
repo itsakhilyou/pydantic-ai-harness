@@ -1054,6 +1054,28 @@ class TestCapabilityHookBranches:
         events = await store.list_events(run_id='r1')
         assert [e.kind for e in events] == ['run_completed']
 
+    async def test_after_run_saves_fallback_snapshot_when_no_node_snapshot(self) -> None:
+        """With no `CallToolsNode` snapshot taken, `after_run` saves the final valid history."""
+        store = InMemoryStepStore()
+        cap: StepPersistence[None] = StepPersistence(store=store)
+        ctx = build_run_context(deps=None, run_id='r1', run_step=3)
+
+        valid: list[ModelMessage] = [
+            ModelRequest(parts=[UserPromptPart(content='hi')]),
+            ModelResponse(parts=[TextPart(content='done')]),
+        ]
+        result: AgentRunResult[str] = AgentRunResult(
+            output='out',
+            _state=GraphAgentState(message_history=valid, run_id='r1'),
+        )
+
+        await cap.after_run(ctx, result=result)
+
+        snap = await store.latest_snapshot(run_id='r1')
+        assert snap is not None
+        assert snap.step_index == 3
+        assert len(snap.messages) == 2
+
     async def test_on_model_request_error_records_event_and_reraises(self) -> None:
         store = InMemoryStepStore()
         cap: StepPersistence[None] = StepPersistence(store=store)

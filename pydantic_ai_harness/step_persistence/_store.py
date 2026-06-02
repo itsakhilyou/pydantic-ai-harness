@@ -608,9 +608,16 @@ class SqliteStepStore:
     used, the default `media_store` is a `SqliteMediaStore` against the same
     file (sibling `media` table), so a single-file deployment is the default.
 
-    Concurrency: WAL mode is enabled on every connection. Concurrent readers
-    + a single writer are safe; this matches the access pattern of one
-    capability per `Agent.run`.
+    A caller-owned `connection=` **must** be created with
+    `check_same_thread=False`. Store methods dispatch SQL onto worker threads
+    via `anyio.to_thread`, so the stdlib default (`check_same_thread=True`)
+    raises `sqlite3.ProgrammingError` on first use. The `database=` path sets
+    this internally; `connection=` cannot, so it is the caller's responsibility.
+
+    Concurrency: WAL mode is enabled on connections opened from a `database=`
+    path (a caller-owned `connection=` keeps whatever journal mode the caller
+    set). Concurrent readers + a single writer are safe; this matches the
+    access pattern of one capability per `Agent.run`.
 
     Schema:
 

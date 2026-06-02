@@ -303,6 +303,13 @@ class SqliteMediaStore:
     lifecycle; when a path is passed each call opens a short-lived connection
     inside the worker thread (safe across event-loop threads).
 
+    A caller-owned connection **must** be created with
+    `check_same_thread=False`. Store methods dispatch SQL onto worker threads
+    via `anyio.to_thread`, so the stdlib default (`check_same_thread=True`)
+    raises `sqlite3.ProgrammingError` on first use. The path form sets this
+    internally; a passed-in connection cannot, so it is the caller's
+    responsibility.
+
     The table layout is:
 
     ```sql

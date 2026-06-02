@@ -15,7 +15,7 @@ from pydantic_ai.models import ModelRequestContext
 from pydantic_ai.run import AgentRunResult
 from pydantic_ai.tools import AgentDepsT, RunContext, ToolDefinition
 
-from pydantic_ai_harness.step_persistence._context import current_run_id
+from pydantic_ai_harness.step_persistence._context import current_run_id, snapshot_saved
 from pydantic_ai_harness.step_persistence._helpers import is_provider_valid
 from pydantic_ai_harness.step_persistence._store import InMemoryStepStore, StepStore
 from pydantic_ai_harness.step_persistence._types import (
@@ -38,9 +38,9 @@ class StepPersistence(AbstractCapability[AgentDepsT]):
     The capability emits a `StepEvent` at every interesting boundary
     (run/model-request/tool-call start, completion, failure), records a
     `ToolEffectRecord` per tool call so the orchestrator can decide whether
-    replay is safe, and saves a `ContinuableSnapshot` only at boundaries
-    where the message history is provider-valid (after a `CallToolsNode`
-    and at `after_run`).
+    replay is safe, and saves a `ContinuableSnapshot` at every
+    provider-valid boundary — the end of each `CallToolsNode` — plus a
+    fallback save at `after_run` if the run reached no such boundary.
 
     A run that crashes between `before_tool_execute` and `after_tool_execute`
     leaves a visible event trail and a `started` tool-effect record, but no
@@ -196,9 +196,11 @@ class StepPersistence(AbstractCapability[AgentDepsT]):
     ) -> AgentRunResult[Any]:
         """Push this run's id onto the contextvar so nested delegates can read it."""
         token = current_run_id.set(self._effective_run_id(ctx))
+        saved_token = snapshot_saved.set(False)
         try:
             return await handler()
         finally:
+            snapshot_saved.reset(saved_token)
             current_run_id.reset(token)
 
     async def before_run(self, ctx: RunContext[AgentDepsT]) -> None:
@@ -235,19 +237,28 @@ class StepPersistence(AbstractCapability[AgentDepsT]):
         *,
         result: AgentRunResult[Any],
     ) -> AgentRunResult[Any]:
-        """Save a final continuable snapshot and emit `run_completed`."""
-        messages = result.all_messages()
-        if is_provider_valid(messages):
-            await self.store.save_snapshot(
-                ContinuableSnapshot(
-                    run_id=self._effective_run_id(ctx),
-                    step_index=ctx.run_step,
-                    messages=list(messages),
-                    conversation_id=ctx.conversation_id,
-                    parent_run_id=self.parent_run_id,
-                    agent_name=self.agent_name,
+        """Emit `run_completed`, saving a final snapshot only as a fallback.
+
+        The terminal `CallToolsNode` already saved the final provider-valid
+        snapshot via `after_node_run`, carrying the correct `step_index`. By
+        `after_run`, `ctx.run_step` is reset to 0, so re-saving here would both
+        duplicate the tail and stamp a misleading `step_index`. We only save
+        when the run produced no snapshot at all (no provider-valid node
+        boundary was reached), as a last-resort capture of the final state.
+        """
+        if not snapshot_saved.get():
+            messages = result.all_messages()
+            if is_provider_valid(messages):
+                await self.store.save_snapshot(
+                    ContinuableSnapshot(
+                        run_id=self._effective_run_id(ctx),
+                        step_index=ctx.run_step,
+                        messages=list(messages),
+                        conversation_id=ctx.conversation_id,
+                        parent_run_id=self.parent_run_id,
+                        agent_name=self.agent_name,
+                    )
                 )
-            )
         await self.store.append_event(self._make_event(ctx, kind='run_completed'))
         return result
 
@@ -411,4 +422,5 @@ class StepPersistence(AbstractCapability[AgentDepsT]):
                         agent_name=self.agent_name,
                     )
                 )
+                snapshot_saved.set(True)
         return result
