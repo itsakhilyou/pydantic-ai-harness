@@ -86,13 +86,12 @@ async def _maybe_externalize_binary(
     media_type_value = node.get('media_type')
     media_type = media_type_value if isinstance(media_type_value, str) else None
     uri = await media_store.put(raw, context=MediaContext(media_type=media_type))
-    return {
-        _EXTERNAL_MARKER: True,
-        'uri': uri,
-        'media_type': node.get('media_type'),
-        'identifier': node.get('identifier'),
-        'vendor_metadata': node.get('vendor_metadata'),
-    }
+    # Preserve every field except the externalized `data`, so the round-trip
+    # survives new `BinaryContent` fields added by pydantic_ai upstream.
+    marker = {key: value for key, value in node.items() if key != 'data'}
+    marker[_EXTERNAL_MARKER] = True
+    marker['uri'] = uri
+    return marker
 
 
 async def restore_media(node: object, *, media_store: MediaStore) -> object:
@@ -122,10 +121,8 @@ async def _restore_external(node: dict[str, object], media_store: MediaStore) ->
     if not isinstance(uri_value, str):
         raise ValueError(f'externalized media marker missing string uri: {node!r}')
     raw = await media_store.get(uri_value)
-    return {
-        'data': base64.b64encode(raw).decode('ascii'),
-        'media_type': node.get('media_type'),
-        'vendor_metadata': node.get('vendor_metadata'),
-        'kind': 'binary',
-        'identifier': node.get('identifier'),
-    }
+    # Inverse of `_maybe_externalize_binary`: drop the marker keys, restore `data`,
+    # keep every other field the original part carried.
+    restored = {key: value for key, value in node.items() if key not in (_EXTERNAL_MARKER, 'uri')}
+    restored['data'] = base64.b64encode(raw).decode('ascii')
+    return restored

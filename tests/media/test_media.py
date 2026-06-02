@@ -257,6 +257,38 @@ class TestExternalizeRestoreWalker:
         with pytest.raises(ValueError, match='missing string uri'):
             await restore_media(bad_node, media_store=store)
 
+    async def test_round_trip_preserves_unknown_binary_fields(self, tmp_path: Path) -> None:
+        """A field the walker doesn't know about survives externalize -> restore."""
+        import base64
+        import json as _json
+
+        store = DiskMediaStore(tmp_path)
+        big = base64.b64encode(b'\x01' * 70_000).decode('ascii')
+        node = {
+            'kind': 'binary',
+            'data': big,
+            'media_type': 'image/png',
+            'identifier': 'abc',
+            'vendor_metadata': {'x': 1},
+            'future_field': 'keep-me',
+        }
+        externalized = await externalize_media(node, media_store=store, threshold_bytes=64 * 1024)
+        assert '"data"' not in _json.dumps(externalized)  # bytes field went external
+        restored = await restore_media(externalized, media_store=store)
+        assert restored == node
+
+    async def test_restore_raises_when_blob_is_missing(self, tmp_path: Path) -> None:
+        """A well-formed marker whose blob was pruned surfaces the store's error."""
+        store = DiskMediaStore(tmp_path)
+        marker = {
+            '__harness_external_media__': True,
+            'uri': 'media+sha256://' + '0' * 64,
+            'kind': 'binary',
+            'media_type': 'image/png',
+        }
+        with pytest.raises(FileNotFoundError):
+            await restore_media(marker, media_store=store)
+
     async def test_walker_passes_through_scalars(self, tmp_path: Path) -> None:
         store = DiskMediaStore(tmp_path)
         for value in [None, 1, 'foo', True]:
@@ -348,6 +380,36 @@ class TestS3MediaStoreWithMockTransport:
         assert request.headers['authorization'].startswith('AWS4-HMAC-SHA256 ')
         assert request.headers['x-amz-content-sha256']
         assert request.headers['content-type'] == 'image/png'
+
+    async def test_wire_path_matches_signed_path_for_reserved_chars(self) -> None:
+        """A key_prefix with reserved chars must be percent-encoded identically on the wire.
+
+        Otherwise the signed canonical path and the path S3 receives diverge ->
+        SignatureDoesNotMatch. The wire `raw_path` must equal `_canonical_uri(path)`.
+        """
+        from pydantic_ai_harness.media._s3 import _canonical_uri  # pyright: ignore[reportPrivateUsage]
+
+        captured: list[Request] = []
+
+        async def handler(request: Request) -> Response:
+            captured.append(request)
+            return Response(200)
+
+        async with AsyncClient(transport=MockTransport(handler)) as client:
+            store = S3MediaStore(
+                bucket='my-bucket',
+                endpoint='https://acct.r2.cloudflarestorage.com',
+                region='auto',
+                access_key_id='k',
+                secret_access_key='s',
+                key_prefix='runs(2024)/tenant@acme/',
+                client=client,
+            )
+            uri = await store.put(b'payload')
+
+        expected_path = _canonical_uri(store._object_path(uri, MediaContext()))  # pyright: ignore[reportPrivateUsage]
+        assert '%28' in expected_path and '%40' in expected_path  # ( and @ encoded
+        assert captured[0].url.raw_path.decode('ascii') == expected_path
 
     async def test_put_propagates_metadata_as_signed_x_amz_meta_headers(self) -> None:
         captured: list[Request] = []

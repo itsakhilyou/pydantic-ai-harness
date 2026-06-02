@@ -248,7 +248,12 @@ class S3MediaStore:
             content_type=content_type,
             extra_signed_headers=meta_headers,
         )
-        url = f'{self._endpoint}{path}'
+        # The signature covers `_canonical_uri(path)` (each segment percent-encoded).
+        # Send that exact byte sequence as the wire path via `raw_path`, otherwise
+        # httpx applies its own (looser) path encoding and a custom key_prefix /
+        # key_strategy emitting reserved chars (`@`, `(`, `=`, ...) would diverge
+        # from the signed path -> SignatureDoesNotMatch.
+        url = httpx.URL(self._endpoint).copy_with(raw_path=_canonical_uri(path).encode('ascii'))
         if self._client is not None:
             return await self._client.request(method, url, content=body, headers=headers)
         async with httpx.AsyncClient() as client:
