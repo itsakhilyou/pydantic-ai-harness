@@ -35,9 +35,16 @@ class CodeMode(AbstractCapability[AgentDepsT]):
     agent = Agent('openai:gpt-5', capabilities=[CodeMode(tools=['search', 'fetch'])])
     ```
 
-    Pass `mount` for host filesystem access and/or `os_access` for environment/clock
-    (plus filesystem) access -- without them, `pathlib`/`os` I/O and
-    `datetime.now()` are unavailable inside `run_code`:
+    By default, sandboxed code cannot touch the host -- no filesystem, environment
+    variables, or clock. Two parameters open it up:
+
+    - `mount` shares specific host directories: reach for it when the agent reads or
+      writes real files.
+    - `os_access` routes the sandbox's OS calls to a handler you provide: reach for it
+      when the agent needs environment variables, the clock, or filesystem behavior you
+      control.
+
+    Both expose the real host to model-written code, so grant only what the task needs.
 
     ```python
     from pydantic_monty import MountDir
@@ -59,21 +66,12 @@ class CodeMode(AbstractCapability[AgentDepsT]):
     """Maximum number of retries for the `run_code` tool (syntax errors count as retries)."""
 
     _: KW_ONLY
-    # Everything below is keyword-only: the option list keeps growing, so new
-    # config must be passed by name rather than relying on positional order.
 
     os_access: CodeModeOS | None = None
-    """Host-backed OS access for sandboxed code.
-
-    Pass a `pydantic_monty.AbstractOS` instance or a raw OS callback
-    `(function_name, args, kwargs) -> result`. When set, `pathlib.Path`, `os`,
-    `datetime.datetime.now()`, and `datetime.date.today()` calls inside `run_code`
-    are routed to it instead of being unavailable. Fixed at construction, so build
-    `CodeMode` per request to scope access.
-    """
+    """Give sandboxed code environment variables, the clock, and file I/O through a handler you provide; unset, they are unavailable."""
 
     mount: CodeModeMount | None = None
-    """Host directory mount(s) exposed inside the sandbox as `pydantic_monty.MountDir`."""
+    """Host directories to expose to sandboxed `pathlib` code; each mount's `mode` controls whether writes reach the host."""
 
     def get_ordering(self) -> CapabilityOrdering:
         """CodeMode wraps around ToolSearch so that search_tools stays native."""

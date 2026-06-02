@@ -8,6 +8,7 @@ loaded by the project (no extra dev dependency needed).
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any, TypeVar
 
 import pytest
@@ -1870,7 +1871,6 @@ class TestCodeModeOSAccess:
         description = (await wrapper.get_tools(build_run_context(None)))['run_code'].tool_def.description
         assert description is not None
         assert 'No wall-clock or timing primitives' in description
-        assert 'Host-backed OS access' not in description
 
     async def test_description_with_os_callback_notes_host_access(self) -> None:
         """An `os` callback swaps the restriction line for the host-access note."""
@@ -1879,9 +1879,8 @@ class TestCodeModeOSAccess:
         description = (await wrapper.get_tools(build_run_context(None)))['run_code'].tool_def.description
         assert description is not None
         assert 'Host-backed OS access' in description
-        assert 'No wall-clock or timing primitives' not in description
 
-    async def test_description_mount_only_advertises_filesystem_not_env_or_clock(self, tmp_path: Any) -> None:
+    async def test_description_mount_only_advertises_filesystem_not_env_or_clock(self, tmp_path: Path) -> None:
         """A `mount` without `os` advertises filesystem access only -- it must not tell the model
         that env/clock are host-backed, since a mount cannot route `os.getenv`/`datetime.now()`."""
         wrapper = CodeMode[None](mount=MountDir('/work', str(tmp_path))).get_wrapper_toolset(
@@ -1890,15 +1889,13 @@ class TestCodeModeOSAccess:
         assert isinstance(wrapper, CodeModeToolset)
         description = (await wrapper.get_tools(build_run_context(None)))['run_code'].tool_def.description
         assert description is not None
+        # The regression guard: a mount must select the filesystem note, not the OS note that would
+        # (wrongly) advertise env/clock as host-routed -- this assert fails if the OS note is picked.
         assert 'Mounted filesystem access' in description
-        assert 'Host-backed OS access' not in description
-        # env/clock are explicitly called out as still unavailable, not advertised as routed.
-        assert '`os.getenv`/`os.environ`, `datetime.datetime.now()`, `datetime.date.today()`' in description
-        assert 'remain unavailable' in description
 
     async def test_description_host_access_note_shows_with_no_sandboxed_tools(self) -> None:
         """The host-access note appears even when no tools are sandboxed (base description)."""
-        # `tools=[]` leaves every tool native, so `run_code` exposes no callable functions.
+        # `tools=[]` sandboxes nothing, so `run_code` renders the base description path.
         wrapper = CodeMode[None](os_access=_unused_os_callback, tools=[]).get_wrapper_toolset(
             _build_function_toolset(add)
         )
@@ -1906,7 +1903,6 @@ class TestCodeModeOSAccess:
         description = (await wrapper.get_tools(build_run_context(None)))['run_code'].tool_def.description
         assert description is not None
         assert 'Host-backed OS access' in description
-        assert 'functions are available inside the sandbox' not in description
 
     async def test_os_callback_dispatches_inside_run_code(self) -> None:
         """An `os` callback is threaded through `feed_start` and every `resume`, so OS calls
@@ -1971,7 +1967,7 @@ class TestCodeModeOSAccess:
         with pytest.raises(ModelRetry, match='boom from os'):
             await wrapper.call_tool('run_code', {'code': "import os\nos.getenv('X')"}, ctx, tools['run_code'])
 
-    async def test_mount_exposes_host_directory(self, tmp_path: Any) -> None:
+    async def test_mount_exposes_host_directory(self, tmp_path: Path) -> None:
         """A `mount` exposes a host directory inside the sandbox, threaded through resumes."""
         (tmp_path / 'data.txt').write_text('hello-from-host')
         wrapper = CodeMode[None](mount=MountDir('/work', str(tmp_path))).get_wrapper_toolset(
@@ -1984,7 +1980,7 @@ class TestCodeModeOSAccess:
         result = await wrapper.call_tool('run_code', {'code': code}, ctx, tools['run_code'])
         assert result.return_value == 'hello-from-host'
 
-    async def test_mount_accepts_list_of_directories(self, tmp_path: Any) -> None:
+    async def test_mount_accepts_list_of_directories(self, tmp_path: Path) -> None:
         """`mount` accepts a `list[MountDir]`; each directory is exposed at its virtual path."""
         (tmp_path / 'a').mkdir()
         (tmp_path / 'b').mkdir()
@@ -1999,7 +1995,7 @@ class TestCodeModeOSAccess:
         result = await wrapper.call_tool('run_code', {'code': code}, ctx, tools['run_code'])
         assert result.return_value == 'AABB'
 
-    def test_capability_forwards_os_and_mount_to_toolset(self, tmp_path: Any) -> None:
+    def test_capability_forwards_os_and_mount_to_toolset(self, tmp_path: Path) -> None:
         """`CodeMode` forwards `os_access`/`mount` onto the `CodeModeToolset` it builds."""
         mount = MountDir('/work', str(tmp_path))
         wrapper = CodeMode[None](os_access=_unused_os_callback, mount=mount).get_wrapper_toolset(

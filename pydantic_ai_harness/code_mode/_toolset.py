@@ -51,14 +51,12 @@ from typing_extensions import NotRequired, TypedDict
 # Type alias for the dispatch callback passed to _execution_loop.
 _DispatchFn = Callable[[str, dict[str, Any]], Coroutine[Any, Any, Any]]
 
-# A raw OS callback: `(function_name, args, kwargs) -> result`. Return
-# `pydantic_monty.NOT_HANDLED` to fall back to the sandbox's default handling.
+# A raw OS callback. Return `pydantic_monty.NOT_HANDLED` to defer the call to the
+# sandbox's default, which leaves it unavailable.
 CodeModeOSCallback = Callable[[OsFunction, tuple[Any, ...], dict[str, Any]], Any]
-# What `CodeMode.os_access` accepts: either an `AbstractOS` instance or a raw callback.
-# The sandbox's `feed_start`/`resume` accept both interchangeably, so no normalization.
+# Accepted by `CodeMode.os_access`: a ready-made OS implementation or a raw callback.
 CodeModeOS = AbstractOS | CodeModeOSCallback
-# What `CodeMode.mount` accepts: one or more host-directory mounts (matches the
-# sandbox's `feed_start`/`resume` `mount=` parameter type exactly).
+# Accepted by `CodeMode.mount`: one or more host-directory mounts.
 CodeModeMount = MountDir | list[MountDir]
 
 
@@ -235,15 +233,10 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
     """Maximum number of retries for the `run_code` tool (syntax errors count as retries)."""
 
     os_access: CodeModeOS | None = None
-    """Host-backed OS access exposed to sandboxed code.
-
-    Either a `pydantic_monty.AbstractOS` instance or a raw OS callback
-    `(function_name, args, kwargs) -> result`. When set, `pathlib.Path`, `os`,
-    `datetime.datetime.now()`, and `datetime.date.today()` calls inside the
-    sandbox are routed to it instead of being unavailable."""
+    """Give sandboxed code environment variables, the clock, and file I/O through a handler you provide; unset, they are unavailable."""
 
     mount: CodeModeMount | None = None
-    """Host directory mount(s) exposed inside the sandbox as `pydantic_monty.MountDir`."""
+    """Host directories to expose to sandboxed `pathlib` code; each mount's `mode` controls whether writes reach the host."""
 
     # init=False so `replace()` in `for_run` produces a fresh instance with _repl=None,
     # giving each agent run isolated REPL state. Lazy-initialized on first call_tool.

@@ -142,39 +142,56 @@ for msg in result.all_messages():
 
 ## Filesystem and OS access
 
-The sandbox has no filesystem or clock by default: the `os` and `pathlib` modules import, but their
-I/O, `datetime.now()`, and `date.today()` are unavailable. Pass `os` and/or `mount` to back them with
-a host-controlled implementation.
+Sandboxed code runs with no access to the host's files, environment, or clock. Two parameters grant
+it -- reach for them when the agent's task genuinely needs the host.
+
+**`mount` -- share host directories.** Reach for this when the agent works with real files: analyzing
+a dataset you've dropped in a folder and writing a report back, editing a checkout, or processing a
+batch of documents. Sandboxed `pathlib` code reads and writes under the mounted path. (For
+environment variables or the clock, use `os_access` instead.)
 
 ```python
-from pydantic_monty import NOT_HANDLED, MountDir, OSAccess
+from pydantic_monty import MountDir
 
 from pydantic_ai_harness import CodeMode
 
-# Expose a host directory at /work inside the sandbox:
-CodeMode(mount=MountDir('/work', '/tmp/agent-workspace'))
+# The agent can read /work/data.csv and write /work/summary.md back to the host:
+CodeMode(mount=MountDir('/work', '/tmp/agent-workspace', mode='read-write'))
+```
 
-# Supply environment/clock via an AbstractOS instance:
-CodeMode(os_access=OSAccess(environ={'STAGE': 'prod'}))
+**`os_access` -- answer the sandbox's OS calls yourself.** Reach for this when the agent needs
+environment variables, the current date and time, or filesystem behavior you control. Hand it a
+ready-made OS implementation, or a callback that decides each call -- so you can inject just the
+secrets it needs, pin "now" for reproducible runs, or route file access to your own store.
+
+```python
+from pydantic_monty import NOT_HANDLED, OSAccess
+
+from pydantic_ai_harness import CodeMode
+
+# Give the agent a fixed set of environment values:
+CodeMode(os_access=OSAccess(environ={'API_BASE': 'https://api.example.com'}))
 
 
-# ...or a raw `(function_name, args, kwargs)` callback; return NOT_HANDLED to defer to Monty:
+# ...or intercept each call to decide what the agent may see:
+allowed_env = {'API_KEY': 'sk-...'}
+
+
 def my_os(fn, args, kwargs):
-    return 'secret-value' if fn == 'os.getenv' else NOT_HANDLED
+    if fn == 'os.getenv':
+        return allowed_env.get(args[0], NOT_HANDLED)  # only allow-listed keys; the rest stay hidden
+    return NOT_HANDLED
 
 
 CodeMode(os_access=my_os)
 ```
 
-`os_access` takes a `pydantic_monty.AbstractOS` or that callback and routes environment, clock, and
-filesystem calls; `mount` takes one or more `MountDir` and exposes host filesystem paths only (a
-mount alone does **not** enable `os.getenv` or `datetime.now()`). Both are fixed when the capability
-is built, so construct `CodeMode` per request to scope access. `run_code`'s description reflects
-exactly what's enabled; `asyncio.sleep` and `time` stay unavailable either way.
+Both expose the real host to model-written code, so grant only what the task needs. Access is fixed
+when the capability is built, so construct `CodeMode` per request to scope it.
 
 A `MountDir` defaults to copy-on-write `mode='overlay'`: the sandbox reads host files and sees its
-own writes, but those writes do **not** reach the host directory. Pass `MountDir(..., mode='read-write')`
-to persist writes to the host, or `mode='read-only'` to forbid them.
+own writes, but those writes do **not** reach the host. Pass `mode='read-write'` to persist them, or
+`mode='read-only'` to forbid writes.
 
 > Monty-specific: these hooks use Monty's `AbstractOS`/`MountDir` types.
 
@@ -195,8 +212,8 @@ Code runs inside [Monty](https://github.com/pydantic/monty), a sandboxed Python 
 CodeMode(
     tools: ToolSelector = 'all',        # 'all', list[str], callable, or dict
     max_retries: int = 3,               # retries on sandbox execution errors
-    os_access: CodeModeOS | None = None,   # AbstractOS instance or (fn, args, kwargs) callback
-    mount: CodeModeMount | None = None,    # MountDir | list[MountDir] of host directories
+    os_access: CodeModeOS | None = None,   # host handler for env vars, clock, and file I/O
+    mount: CodeModeMount | None = None,    # host directories to share with the sandbox
 )
 ```
 
