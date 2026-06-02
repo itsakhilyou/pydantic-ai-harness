@@ -4,6 +4,8 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from .code_mode import CodeMode
+    from .filesystem import FileSystem
+    from .shell import Shell
     from .step_persistence import (
         ContinuableSnapshot,
         EventKind,
@@ -27,8 +29,10 @@ __all__ = [
     'ContinuableSnapshot',
     'EventKind',
     'FileStepStore',
+    'FileSystem',
     'InMemoryStepStore',
     'RunRecord',
+    'Shell',
     'SqliteStepStore',
     'StepEvent',
     'StepPersistence',
@@ -65,6 +69,14 @@ def __getattr__(name: str) -> object:
         from .code_mode import CodeMode
 
         return CodeMode
+    if name == 'FileSystem':
+        from .filesystem import FileSystem
+
+        return FileSystem
+    if name == 'Shell':
+        from .shell import Shell
+
+        return Shell
     if name in _STEP_PERSISTENCE_NAMES:
         from . import step_persistence
 
