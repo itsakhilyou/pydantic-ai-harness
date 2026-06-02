@@ -9,7 +9,7 @@ from pydantic_ai.capabilities import AbstractCapability, CapabilityOrdering
 from pydantic_ai.capabilities._tool_search import ToolSearch as _ToolSearch
 from pydantic_ai.tools import AgentDepsT, ToolSelector
 
-from pydantic_ai_harness.code_mode._toolset import CodeModeToolset, MontyMount, MontyOS
+from pydantic_ai_harness.code_mode._toolset import CodeModeMount, CodeModeOS, CodeModeToolset
 
 
 @dataclass
@@ -35,7 +35,7 @@ class CodeMode(AbstractCapability[AgentDepsT]):
     agent = Agent('openai:gpt-5', capabilities=[CodeMode(tools=['search', 'fetch'])])
     ```
 
-    Pass `mount` for host filesystem access and/or `os` for environment/clock
+    Pass `mount` for host filesystem access and/or `os_access` for environment/clock
     (plus filesystem) access -- without them, `pathlib`/`os` I/O and
     `datetime.now()` are unavailable inside `run_code`:
 
@@ -58,17 +58,17 @@ class CodeMode(AbstractCapability[AgentDepsT]):
     max_retries: int = 3
     """Maximum number of retries for the `run_code` tool (syntax errors count as retries)."""
 
-    os: MontyOS | None = None
+    os_access: CodeModeOS | None = None
     """Host-backed OS access for sandboxed code.
 
-    Pass a `pydantic_monty.AbstractOS` instance or a raw Monty OS callback
+    Pass a `pydantic_monty.AbstractOS` instance or a raw OS callback
     `(function_name, args, kwargs) -> result`. When set, `pathlib.Path`, `os`,
     `datetime.datetime.now()`, and `datetime.date.today()` calls inside `run_code`
     are routed to it instead of being unavailable. Fixed at construction, so build
     `CodeMode` per request to scope access.
     """
 
-    mount: MontyMount | None = None
+    mount: CodeModeMount | None = None
     """Host directory mount(s) exposed inside the sandbox as `pydantic_monty.MountDir`."""
 
     def get_ordering(self) -> CapabilityOrdering:
@@ -81,6 +81,6 @@ class CodeMode(AbstractCapability[AgentDepsT]):
             wrapped=toolset,
             tool_selector=self.tools,
             max_retries=self.max_retries,
-            os=self.os,
+            os_access=self.os_access,
             mount=self.mount,
         )

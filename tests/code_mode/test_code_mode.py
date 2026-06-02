@@ -1861,7 +1861,7 @@ def _unused_os_callback(fn: OsFunction, args: tuple[Any, ...], kwargs: dict[str,
 
 
 class TestCodeModeOSAccess:
-    """`CodeMode(os=...)` / `mount=...` give sandboxed code host-backed OS access."""
+    """`CodeMode(os_access=...)` / `mount=...` give sandboxed code host-backed OS access."""
 
     async def test_description_default_keeps_no_wallclock_restriction(self) -> None:
         """Without `os`/`mount`, the description keeps the no-wall-clock restriction."""
@@ -1874,7 +1874,7 @@ class TestCodeModeOSAccess:
 
     async def test_description_with_os_callback_notes_host_access(self) -> None:
         """An `os` callback swaps the restriction line for the host-access note."""
-        wrapper = CodeMode[None](os=_unused_os_callback).get_wrapper_toolset(_build_function_toolset(add))
+        wrapper = CodeMode[None](os_access=_unused_os_callback).get_wrapper_toolset(_build_function_toolset(add))
         assert isinstance(wrapper, CodeModeToolset)
         description = (await wrapper.get_tools(build_run_context(None)))['run_code'].tool_def.description
         assert description is not None
@@ -1899,7 +1899,9 @@ class TestCodeModeOSAccess:
     async def test_description_host_access_note_shows_with_no_sandboxed_tools(self) -> None:
         """The host-access note appears even when no tools are sandboxed (base description)."""
         # `tools=[]` leaves every tool native, so `run_code` exposes no callable functions.
-        wrapper = CodeMode[None](os=_unused_os_callback, tools=[]).get_wrapper_toolset(_build_function_toolset(add))
+        wrapper = CodeMode[None](os_access=_unused_os_callback, tools=[]).get_wrapper_toolset(
+            _build_function_toolset(add)
+        )
         assert isinstance(wrapper, CodeModeToolset)
         description = (await wrapper.get_tools(build_run_context(None)))['run_code'].tool_def.description
         assert description is not None
@@ -1915,7 +1917,7 @@ class TestCodeModeOSAccess:
                 return 'envval'
             return NOT_HANDLED  # pragma: no cover - sandbox only calls os.getenv here
 
-        wrapper = CodeMode[None](os=os_cb).get_wrapper_toolset(_build_function_toolset(add))
+        wrapper = CodeMode[None](os_access=os_cb).get_wrapper_toolset(_build_function_toolset(add))
         assert isinstance(wrapper, CodeModeToolset)
         ctx = await build_ctx(None, wrapper)
         tools = await wrapper.get_tools(ctx)
@@ -1934,7 +1936,7 @@ class TestCodeModeOSAccess:
                 return 'persisted'
             return NOT_HANDLED  # pragma: no cover - sandbox only calls os.getenv here
 
-        wrapper = CodeMode[None](os=os_cb).get_wrapper_toolset(_build_function_toolset(add))
+        wrapper = CodeMode[None](os_access=os_cb).get_wrapper_toolset(_build_function_toolset(add))
         assert isinstance(wrapper, CodeModeToolset)
         ctx = await build_ctx(None, wrapper)
         tools = await wrapper.get_tools(ctx)
@@ -1946,7 +1948,7 @@ class TestCodeModeOSAccess:
 
     async def test_abstract_os_instance_dispatches_inside_run_code(self) -> None:
         """An `AbstractOS` instance is accepted as the `os` value and dispatches OS calls."""
-        wrapper = CodeMode[None](os=OSAccess(environ={'THING': 'fromabs'})).get_wrapper_toolset(
+        wrapper = CodeMode[None](os_access=OSAccess(environ={'THING': 'fromabs'})).get_wrapper_toolset(
             _build_function_toolset(add)
         )
         assert isinstance(wrapper, CodeModeToolset)
@@ -1962,7 +1964,7 @@ class TestCodeModeOSAccess:
         def os_cb(fn: OsFunction, args: tuple[Any, ...], kwargs: dict[str, Any]) -> Any:
             raise ValueError('boom from os')
 
-        wrapper = CodeMode[None](os=os_cb).get_wrapper_toolset(_build_function_toolset(add))
+        wrapper = CodeMode[None](os_access=os_cb).get_wrapper_toolset(_build_function_toolset(add))
         assert isinstance(wrapper, CodeModeToolset)
         ctx = await build_ctx(None, wrapper)
         tools = await wrapper.get_tools(ctx)
@@ -1998,11 +2000,13 @@ class TestCodeModeOSAccess:
         assert result.return_value == 'AABB'
 
     def test_capability_forwards_os_and_mount_to_toolset(self, tmp_path: Any) -> None:
-        """`CodeMode` forwards `os`/`mount` onto the `CodeModeToolset` it builds."""
+        """`CodeMode` forwards `os_access`/`mount` onto the `CodeModeToolset` it builds."""
         mount = MountDir('/work', str(tmp_path))
-        wrapper = CodeMode[None](os=_unused_os_callback, mount=mount).get_wrapper_toolset(_build_function_toolset(add))
+        wrapper = CodeMode[None](os_access=_unused_os_callback, mount=mount).get_wrapper_toolset(
+            _build_function_toolset(add)
+        )
         assert isinstance(wrapper, CodeModeToolset)
-        assert wrapper.os is _unused_os_callback
+        assert wrapper.os_access is _unused_os_callback
         assert wrapper.mount is mount
 
 

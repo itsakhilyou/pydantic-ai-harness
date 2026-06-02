@@ -155,7 +155,7 @@ from pydantic_ai_harness import CodeMode
 CodeMode(mount=MountDir('/work', '/tmp/agent-workspace'))
 
 # Supply environment/clock via an AbstractOS instance:
-CodeMode(os=OSAccess(environ={'STAGE': 'prod'}))
+CodeMode(os_access=OSAccess(environ={'STAGE': 'prod'}))
 
 
 # ...or a raw `(function_name, args, kwargs)` callback; return NOT_HANDLED to defer to Monty:
@@ -163,10 +163,10 @@ def my_os(fn, args, kwargs):
     return 'secret-value' if fn == 'os.getenv' else NOT_HANDLED
 
 
-CodeMode(os=my_os)
+CodeMode(os_access=my_os)
 ```
 
-`os` takes a `pydantic_monty.AbstractOS` or that callback and routes environment, clock, and
+`os_access` takes a `pydantic_monty.AbstractOS` or that callback and routes environment, clock, and
 filesystem calls; `mount` takes one or more `MountDir` and exposes host filesystem paths only (a
 mount alone does **not** enable `os.getenv` or `datetime.now()`). Both are fixed when the capability
 is built, so construct `CodeMode` per request to scope access. `run_code`'s description reflects
@@ -184,9 +184,9 @@ Code runs inside [Monty](https://github.com/pydantic/monty), a sandboxed Python 
 
 - No class definitions
 - No third-party imports (allowed stdlib: `sys`, `typing`, `asyncio`, `math`, `json`, `re`, `datetime`, `os`, `pathlib`)
-- No wall-clock or timing primitives by default (`asyncio.sleep`, `datetime.now()`, `date.today()`, `time`) -- `datetime.now()`/`date.today()` become available with an `os` handler (above); `asyncio.sleep`/`time` never do
+- No wall-clock or timing primitives by default (`asyncio.sleep`, `datetime.now()`, `date.today()`, `time`) -- `datetime.now()`/`date.today()` become available with an `os_access` handler (above); `asyncio.sleep`/`time` never do
 - No `import *`
-- Filesystem I/O needs an `os` handler or a `mount`; `os.getenv`/`os.environ` need an `os` handler
+- Filesystem I/O needs an `os_access` handler or a `mount`; `os.getenv`/`os.environ` need an `os_access` handler
 - Tools requiring approval or with deferred execution are excluded from the sandbox
 
 ## API
@@ -195,8 +195,8 @@ Code runs inside [Monty](https://github.com/pydantic/monty), a sandboxed Python 
 CodeMode(
     tools: ToolSelector = 'all',        # 'all', list[str], callable, or dict
     max_retries: int = 3,               # retries on sandbox execution errors
-    os: MontyOS | None = None,          # AbstractOS instance or (fn, args, kwargs) callback
-    mount: MontyMount | None = None,    # MountDir | list[MountDir] of host directories
+    os_access: CodeModeOS | None = None,   # AbstractOS instance or (fn, args, kwargs) callback
+    mount: CodeModeMount | None = None,    # MountDir | list[MountDir] of host directories
 )
 ```
 

@@ -51,15 +51,15 @@ from typing_extensions import NotRequired, TypedDict
 # Type alias for the dispatch callback passed to _execution_loop.
 _DispatchFn = Callable[[str, dict[str, Any]], Coroutine[Any, Any, Any]]
 
-# A raw Monty OS callback: `(function_name, args, kwargs) -> result`. Return
-# `pydantic_monty.NOT_HANDLED` to fall back to Monty's default handling.
-MontyOSCallback = Callable[[OsFunction, tuple[Any, ...], dict[str, Any]], Any]
-# What `CodeMode.os` accepts: either an `AbstractOS` instance or a raw callback.
-# Monty's `feed_start`/`resume` accept both interchangeably, so no normalization.
-MontyOS = AbstractOS | MontyOSCallback
-# What `CodeMode.mount` accepts: one or more host-directory mounts (matches Monty's
-# `feed_start`/`resume` `mount=` parameter type exactly).
-MontyMount = MountDir | list[MountDir]
+# A raw OS callback: `(function_name, args, kwargs) -> result`. Return
+# `pydantic_monty.NOT_HANDLED` to fall back to the sandbox's default handling.
+CodeModeOSCallback = Callable[[OsFunction, tuple[Any, ...], dict[str, Any]], Any]
+# What `CodeMode.os_access` accepts: either an `AbstractOS` instance or a raw callback.
+# The sandbox's `feed_start`/`resume` accept both interchangeably, so no normalization.
+CodeModeOS = AbstractOS | CodeModeOSCallback
+# What `CodeMode.mount` accepts: one or more host-directory mounts (matches the
+# sandbox's `feed_start`/`resume` `mount=` parameter type exactly).
+CodeModeMount = MountDir | list[MountDir]
 
 
 class _RunCodeArguments(TypedDict):
@@ -238,15 +238,15 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
     max_retries: int = 3
     """Maximum number of retries for the `run_code` tool (syntax errors count as retries)."""
 
-    os: MontyOS | None = None
+    os_access: CodeModeOS | None = None
     """Host-backed OS access exposed to sandboxed code.
 
-    Either a `pydantic_monty.AbstractOS` instance or a raw Monty OS callback
+    Either a `pydantic_monty.AbstractOS` instance or a raw OS callback
     `(function_name, args, kwargs) -> result`. When set, `pathlib.Path`, `os`,
     `datetime.datetime.now()`, and `datetime.date.today()` calls inside the
     sandbox are routed to it instead of being unavailable."""
 
-    mount: MontyMount | None = None
+    mount: CodeModeMount | None = None
     """Host directory mount(s) exposed inside the sandbox as `pydantic_monty.MountDir`."""
 
     # init=False so `replace()` in `for_run` produces a fresh instance with _repl=None,
@@ -302,7 +302,7 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
         callable_defs, sanitized_to_original = self._partition_callable_tools(sandboxed_tools)
 
         description = self._build_description(
-            callable_defs, has_os=self.os is not None, has_mount=self.mount is not None
+            callable_defs, has_os=self.os_access is not None, has_mount=self.mount is not None
         )
 
         if _RUN_CODE_TOOL_NAME in native_tools:
@@ -466,7 +466,7 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
         capture = _PrintCapture()
 
         try:
-            monty_state = self._repl.feed_start(code, print_callback=capture, os=self.os, mount=self.mount)
+            monty_state = self._repl.feed_start(code, print_callback=capture, os=self.os_access, mount=self.mount)
             completed = await _execution_loop(
                 monty_state,
                 dispatch=dispatch_tool_call,
@@ -474,7 +474,7 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
                 sanitized_to_original=sanitized_to_original,
                 sequential_tools=sequential_tools,
                 global_sequential=global_sequential,
-                os=self.os,
+                os=self.os_access,
                 mount=self.mount,
             )
         except MontySyntaxError as e:
@@ -649,8 +649,8 @@ async def _execution_loop(
     sanitized_to_original: dict[str, str],
     sequential_tools: set[str],
     global_sequential: bool,
-    os: MontyOS | None,
-    mount: MontyMount | None,
+    os: CodeModeOS | None,
+    mount: CodeModeMount | None,
 ) -> MontyComplete:
     """Drive the Monty REPL via the synchronous snapshot API until completion.
 
@@ -723,8 +723,8 @@ async def _handle_function_snapshot(
     global_sequential: bool,
     pending: dict[int, asyncio.Task[Any] | Coroutine[Any, Any, Any]],
     pre_resolved: dict[int, ExternalResult],
-    os: MontyOS | None,
-    mount: MontyMount | None,
+    os: CodeModeOS | None,
+    mount: CodeModeMount | None,
 ) -> FunctionSnapshot | FutureSnapshot | NameLookupSnapshot | MontyComplete:
     """Handle a single FunctionSnapshot from the Monty execution loop."""
     fn_name = snapshot.function_name
@@ -768,8 +768,8 @@ async def _resolve_future_snapshot(
     pending: dict[int, asyncio.Task[Any] | Coroutine[Any, Any, Any]],
     pre_resolved: dict[int, ExternalResult],
     global_sequential: bool,
-    os: MontyOS | None,
-    mount: MontyMount | None,
+    os: CodeModeOS | None,
+    mount: CodeModeMount | None,
 ) -> FunctionSnapshot | FutureSnapshot | NameLookupSnapshot | MontyComplete:
     """Resolve pending tool calls at a FutureSnapshot."""
     pending_ids = snapshot.pending_call_ids
