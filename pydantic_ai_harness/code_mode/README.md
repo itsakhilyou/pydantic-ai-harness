@@ -142,9 +142,9 @@ for msg in result.all_messages():
 
 ## Filesystem and OS access
 
-The sandbox has no filesystem or clock by default: `os`/`pathlib` import, but their I/O,
-`datetime.now()`, and `date.today()` are unavailable. Pass `os` and/or `mount` to back them with a
-host-controlled implementation.
+The sandbox has no filesystem or clock by default: the `os` and `pathlib` modules import, but their
+I/O, `datetime.now()`, and `date.today()` are unavailable. Pass `os` and/or `mount` to back them with
+a host-controlled implementation.
 
 ```python
 from pydantic_monty import NOT_HANDLED, MountDir, OSAccess
@@ -171,6 +171,10 @@ filesystem calls; `mount` takes one or more `MountDir` and exposes host filesyst
 mount alone does **not** enable `os.getenv` or `datetime.now()`). Both are fixed when the capability
 is built, so construct `CodeMode` per request to scope access. `run_code`'s description reflects
 exactly what's enabled; `asyncio.sleep` and `time` stay unavailable either way.
+
+A `MountDir` defaults to copy-on-write `mode='overlay'`: the sandbox reads host files and sees its
+own writes, but those writes do **not** reach the host directory. Pass `MountDir(..., mode='read-write')`
+to persist writes to the host, or `mode='read-only'` to forbid them.
 
 > Monty-specific: these hooks use Monty's `AbstractOS`/`MountDir` types.
 

@@ -65,7 +65,7 @@ class CodeMode(AbstractCapability[AgentDepsT]):
     `(function_name, args, kwargs) -> result`. When set, `pathlib.Path`, `os`,
     `datetime.datetime.now()`, and `datetime.date.today()` calls inside `run_code`
     are routed to it instead of being unavailable. Fixed at construction, so build
-    `CodeMode` per request to scope access per request.
+    `CodeMode` per request to scope access.
     """
 
     mount: MontyMount | None = None
