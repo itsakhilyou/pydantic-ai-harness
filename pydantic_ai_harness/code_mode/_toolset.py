@@ -124,23 +124,19 @@ Returns the last expression's value directly. If `print()` was also called, retu
 """
 
 
-def _os_access_restriction(*, has_os: bool, has_mount: bool) -> str:
-    """Pick the OS/filesystem restriction line for the `run_code` description.
+def _base_description(*, has_os: bool, has_mount: bool) -> str:
+    """Assemble the `run_code` base description with the right OS-access restriction line.
 
     `os` routes environment, clock, and filesystem calls; a `mount` alone only
     exposes filesystem paths, so a mount-only sandbox must not advertise env or
     clock access (the model would generate calls that fail and burn retries).
     """
     if has_os:
-        return _OS_ENABLED_NOTE
-    if has_mount:
-        return _MOUNT_ONLY_NOTE
-    return _NO_OS_RESTRICTION
-
-
-def _base_description(*, has_os: bool, has_mount: bool) -> str:
-    """Assemble the `run_code` base description with the right OS-access line."""
-    restriction = _os_access_restriction(has_os=has_os, has_mount=has_mount)
+        restriction = _OS_ENABLED_NOTE
+    elif has_mount:
+        restriction = _MOUNT_ONLY_NOTE
+    else:
+        restriction = _NO_OS_RESTRICTION
     return f'{_RUN_CODE_DESCRIPTION_HEAD}\n{restriction}\n{_RUN_CODE_DESCRIPTION_TAIL}'
 
 
@@ -474,7 +470,7 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
                 sanitized_to_original=sanitized_to_original,
                 sequential_tools=sequential_tools,
                 global_sequential=global_sequential,
-                os=self.os_access,
+                os_access=self.os_access,
                 mount=self.mount,
             )
         except MontySyntaxError as e:
@@ -649,7 +645,7 @@ async def _execution_loop(
     sanitized_to_original: dict[str, str],
     sequential_tools: set[str],
     global_sequential: bool,
-    os: CodeModeOS | None,
+    os_access: CodeModeOS | None,
     mount: CodeModeMount | None,
 ) -> MontyComplete:
     """Drive the Monty REPL via the synchronous snapshot API until completion.
@@ -680,7 +676,7 @@ async def _execution_loop(
     try:
         while not isinstance(monty_state, MontyComplete):
             if isinstance(monty_state, NameLookupSnapshot):
-                monty_state = monty_state.resume(os=os, mount=mount)
+                monty_state = monty_state.resume(os=os_access, mount=mount)
             elif isinstance(monty_state, FunctionSnapshot):
                 monty_state = await _handle_function_snapshot(
                     monty_state,
@@ -691,7 +687,7 @@ async def _execution_loop(
                     global_sequential=global_sequential,
                     pending=pending,
                     pre_resolved=pre_resolved,
-                    os=os,
+                    os_access=os_access,
                     mount=mount,
                 )
             else:
@@ -700,7 +696,7 @@ async def _execution_loop(
                     pending=pending,
                     pre_resolved=pre_resolved,
                     global_sequential=global_sequential,
-                    os=os,
+                    os_access=os_access,
                     mount=mount,
                 )
     finally:
@@ -723,19 +719,19 @@ async def _handle_function_snapshot(
     global_sequential: bool,
     pending: dict[int, asyncio.Task[Any] | Coroutine[Any, Any, Any]],
     pre_resolved: dict[int, ExternalResult],
-    os: CodeModeOS | None,
+    os_access: CodeModeOS | None,
     mount: CodeModeMount | None,
 ) -> FunctionSnapshot | FutureSnapshot | NameLookupSnapshot | MontyComplete:
     """Handle a single FunctionSnapshot from the Monty execution loop."""
     fn_name = snapshot.function_name
 
     if fn_name not in callable_defs:
-        return snapshot.resume({'exception': NameError(f'Unknown function: {fn_name}')}, os=os, mount=mount)
+        return snapshot.resume({'exception': NameError(f'Unknown function: {fn_name}')}, os=os_access, mount=mount)
 
     if snapshot.args:
         return snapshot.resume(
             {'exception': TypeError(f'{fn_name}() does not accept positional arguments; use keyword arguments')},
-            os=os,
+            os=os_access,
             mount=mount,
         )
 
@@ -749,8 +745,8 @@ async def _handle_function_snapshot(
             pre_resolved[cid] = await _resolve_coro(pending.pop(cid))
         outcome = await _resolve_coro(dispatch(original_name, snapshot.kwargs))
         if 'return_value' in outcome:
-            return snapshot.resume({'return_value': outcome['return_value']}, os=os, mount=mount)
-        return snapshot.resume({'exception': outcome['exception']}, os=os, mount=mount)
+            return snapshot.resume({'return_value': outcome['return_value']}, os=os_access, mount=mount)
+        return snapshot.resume({'exception': outcome['exception']}, os=os_access, mount=mount)
 
     # Deferred execution — store for later resolution at FutureSnapshot.
     if global_sequential:
@@ -759,7 +755,7 @@ async def _handle_function_snapshot(
     else:
         # Eagerly schedule as a Task for concurrent execution.
         pending[snapshot.call_id] = asyncio.ensure_future(dispatch(original_name, snapshot.kwargs))
-    return snapshot.resume({'future': ...}, os=os, mount=mount)
+    return snapshot.resume({'future': ...}, os=os_access, mount=mount)
 
 
 async def _resolve_future_snapshot(
@@ -768,13 +764,13 @@ async def _resolve_future_snapshot(
     pending: dict[int, asyncio.Task[Any] | Coroutine[Any, Any, Any]],
     pre_resolved: dict[int, ExternalResult],
     global_sequential: bool,
-    os: CodeModeOS | None,
+    os_access: CodeModeOS | None,
     mount: CodeModeMount | None,
 ) -> FunctionSnapshot | FutureSnapshot | NameLookupSnapshot | MontyComplete:
     """Resolve pending tool calls at a FutureSnapshot."""
     pending_ids = snapshot.pending_call_ids
     if not pending_ids:  # pragma: no cover
-        return snapshot.resume(results={}, os=os, mount=mount)
+        return snapshot.resume(results={}, os=os_access, mount=mount)
 
     results: dict[int, ExternalResult] = {}
     for cid in pending_ids:
@@ -793,7 +789,7 @@ async def _resolve_future_snapshot(
         for cid, outcome in zip(gather_ids, settled):
             results[cid] = _settle_outcome(outcome)
 
-    return snapshot.resume(results=results, os=os, mount=mount)
+    return snapshot.resume(results=results, os=os_access, mount=mount)
 
 
 async def _resolve_coro(
