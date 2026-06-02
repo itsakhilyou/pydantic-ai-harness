@@ -5,9 +5,9 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
 
 from pydantic_ai.capabilities import AbstractCapability
+from pydantic_ai.tools import AgentDepsT
 from pydantic_ai.toolsets import AgentToolset
 
 from pydantic_ai_harness.shell._toolset import ShellToolset
@@ -27,7 +27,7 @@ _DEFAULT_DENIED_COMMANDS: list[str] = [
 
 
 @dataclass
-class Shell(AbstractCapability[Any]):
+class Shell(AbstractCapability[AgentDepsT]):
     """Shell command execution for agents.
 
     Commands execute in a subprocess rooted at `cwd`. Use `allowed_commands`
@@ -62,9 +62,9 @@ class Shell(AbstractCapability[Any]):
     allow_interactive: bool = False
     """If True, allow interactive commands (vi, nano, ssh, etc.). Blocked by default."""
 
-    def get_toolset(self) -> AgentToolset[Any] | None:
+    def get_toolset(self) -> AgentToolset[AgentDepsT]:
         """Build and return the shell toolset."""
-        return ShellToolset(
+        return ShellToolset[AgentDepsT](
             cwd=Path(self.cwd),
             allowed_commands=self.allowed_commands,
             denied_commands=self.denied_commands,

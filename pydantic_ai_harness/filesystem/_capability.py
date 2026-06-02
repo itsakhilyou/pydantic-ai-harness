@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from pydantic_ai.capabilities import AbstractCapability
+from pydantic_ai.tools import AgentDepsT
 from pydantic_ai.toolsets import AgentToolset
 
 from pydantic_ai_harness.filesystem._toolset import FileSystemToolset
@@ -23,7 +24,7 @@ _DEFAULT_PROTECTED: list[str] = [
 
 
 @dataclass
-class FileSystem(AbstractCapability[Any]):
+class FileSystem(AbstractCapability[AgentDepsT]):
     """File system access scoped to a root directory.
 
     All paths are resolved relative to `root_dir`. Traversal above the root
@@ -67,9 +68,9 @@ class FileSystem(AbstractCapability[Any]):
             if not isinstance(value, int) or value <= 0:
                 raise ValueError(f'{name} must be a positive integer, got {value!r}')
 
-    def get_toolset(self) -> AgentToolset[Any]:
+    def get_toolset(self) -> AgentToolset[AgentDepsT]:
         """Build and return the filesystem toolset."""
-        return FileSystemToolset(
+        return FileSystemToolset[AgentDepsT](
             root_dir=Path(self.root_dir),
             allowed_patterns=self.allowed_patterns,
             denied_patterns=self.denied_patterns,

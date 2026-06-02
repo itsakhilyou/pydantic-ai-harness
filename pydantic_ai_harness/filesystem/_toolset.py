@@ -3,14 +3,40 @@
 from __future__ import annotations
 
 import fnmatch
+import functools
 import hashlib
 import os
 import re
-from collections.abc import Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from pathlib import Path
-from typing import Any
+from typing import Concatenate, ParamSpec
 
+from pydantic_ai.exceptions import ModelRetry
+from pydantic_ai.tools import AgentDepsT
 from pydantic_ai.toolsets import FunctionToolset
+
+_P = ParamSpec('_P')
+
+# Errors that mean "the model asked for something the tool couldn't do" — a
+# missing file, a denied path, a stale edit. pyai only feeds `ModelRetry` back
+# to the model; any other exception aborts the whole run. `_recoverable`
+# converts these so the agent can correct itself and continue.
+_RECOVERABLE_ERRORS = (PermissionError, FileNotFoundError, NotADirectoryError, IsADirectoryError, ValueError)
+
+
+def _recoverable(
+    fn: Callable[Concatenate[FileSystemToolset, _P], Awaitable[str]],
+) -> Callable[Concatenate[FileSystemToolset, _P], Awaitable[str]]:
+    """Surface model-correctable tool errors as `ModelRetry`."""
+
+    @functools.wraps(fn)
+    async def wrapper(self: FileSystemToolset, *args: _P.args, **kwargs: _P.kwargs) -> str:
+        try:
+            return await fn(self, *args, **kwargs)
+        except _RECOVERABLE_ERRORS as e:
+            raise ModelRetry(str(e)) from e
+
+    return wrapper
 
 
 def _format_lines(lines: Sequence[str], offset: int, limit: int) -> str:
@@ -47,7 +73,7 @@ def _content_hash(content: str) -> str:
     return hashlib.sha256(content.encode('utf-8')).hexdigest()[:12]
 
 
-class FileSystemToolset(FunctionToolset[Any]):
+class FileSystemToolset(FunctionToolset[AgentDepsT]):
     """Toolset providing filesystem operations scoped to a root directory.
 
     Security model:
@@ -88,9 +114,22 @@ class FileSystemToolset(FunctionToolset[Any]):
         self.add_function(self.create_directory, name='create_directory')
         self.add_function(self.file_info, name='file_info')
 
+    def _matches(self, path: str, pattern: str) -> bool:
+        """Glob-match a relative path, treating a leading `**/` as 'any directory, including the root'.
+
+        `fnmatch` has no recursive `**`, so a bare `**/secrets*` would miss a
+        root-level `secrets.yaml` — there's no leading directory to match.
+        Retrying with the `**/` prefix stripped covers the zero-directory case.
+        """
+        if fnmatch.fnmatch(path, pattern):
+            return True
+        if pattern.startswith('**/'):
+            return fnmatch.fnmatch(path, pattern[3:])
+        return False
+
     def _first_matching_pattern(self, path: str, patterns: list[str]) -> str | None:
         """Return the first pattern that matches path, or None."""
-        return next((p for p in patterns if fnmatch.fnmatch(path, p)), None)
+        return next((p for p in patterns if self._matches(path, p)), None)
 
     def _resolve_path(self, path: str) -> Path:
         """Resolve path relative to root, rejecting traversal.
@@ -126,7 +165,7 @@ class FileSystemToolset(FunctionToolset[Any]):
                 raise PermissionError(f'Path {path!r} is denied by pattern {matched!r}.')
 
         if check_allowed and self._allowed_patterns:
-            if not any(fnmatch.fnmatch(path, p) for p in self._allowed_patterns):
+            if not any(self._matches(path, p) for p in self._allowed_patterns):
                 raise PermissionError(f'Path {path!r} does not match any allowed pattern.')
 
     def _is_accessible(self, path: str, *, write: bool = False) -> bool:
@@ -142,15 +181,27 @@ class FileSystemToolset(FunctionToolset[Any]):
         if self._denied_patterns:
             if self._first_matching_pattern(path, self._denied_patterns) is not None:
                 return False
-        if self._allowed_patterns and not any(fnmatch.fnmatch(path, p) for p in self._allowed_patterns):
+        if self._allowed_patterns and not any(self._matches(path, p) for p in self._allowed_patterns):
             return False
         return True
 
-    def _safe_resolve(self, path: str, *, write: bool = False, check_allowed: bool = True) -> Path:
-        """Resolve and access-check a path in one step."""
-        self._check_access(path, write=write, check_allowed=check_allowed)
-        return self._resolve_path(path)
+    def _relative_to_root(self, resolved: Path) -> str:
+        """Canonical path of a resolved location relative to the real root."""
+        return str(resolved.relative_to(self._real_root))
 
+    def _safe_resolve(self, path: str, *, write: bool = False, check_allowed: bool = True) -> Path:
+        """Resolve and access-check a path in one step.
+
+        Resolution happens first so the access check matches patterns against
+        the canonical path relative to the root, collapsing `.`/`..`/`//`
+        segments that would otherwise slip past a literal pattern (e.g.
+        `config/./secret.txt` evading a `config/secret.txt` deny rule).
+        """
+        resolved = self._resolve_path(path)
+        self._check_access(self._relative_to_root(resolved), write=write, check_allowed=check_allowed)
+        return resolved
+
+    @_recoverable
     async def read_file(self, path: str, *, offset: int = 0, limit: int | None = None) -> str:
         """Read a text file with line numbers.
 
@@ -182,6 +233,7 @@ class FileSystemToolset(FunctionToolset[Any]):
         header = f'[{path} | {len(lines)} lines | hash:{content_hash}]\n'
         return header + _format_lines(lines, offset, limit)
 
+    @_recoverable
     async def write_file(self, path: str, content: str, *, expected_hash: str | None = None) -> str:
         """Create or overwrite a file with conflict detection.
 
@@ -214,6 +266,7 @@ class FileSystemToolset(FunctionToolset[Any]):
         lines = len(content.splitlines())
         return f'Wrote {len(content)} chars ({lines} lines) to {path}. [hash:{new_hash}]'
 
+    @_recoverable
     async def edit_file(self, path: str, old_text: str, new_text: str, *, expected_hash: str | None = None) -> str:
         """Edit a file by exact string replacement with conflict detection.
 
@@ -257,6 +310,7 @@ class FileSystemToolset(FunctionToolset[Any]):
         new_hash = _content_hash(new_content)
         return f'Edited {path}. [hash:{new_hash}]'
 
+    @_recoverable
     async def list_directory(self, path: str = '.') -> str:
         """List the contents of a directory.
 
@@ -299,6 +353,7 @@ class FileSystemToolset(FunctionToolset[Any]):
                 entries.append(f'{rel}  ({size} bytes)')
         return '\n'.join(entries) if entries else '(empty directory)'
 
+    @_recoverable
     async def search_files(self, pattern: str, *, path: str = '.', include_glob: str | None = None) -> str:
         """Search file contents using a regular expression.
 
@@ -359,6 +414,7 @@ class FileSystemToolset(FunctionToolset[Any]):
 
         return '\n'.join(results) if results else 'No matches found.'
 
+    @_recoverable
     async def find_files(self, pattern: str, *, path: str = '.') -> str:
         """Find files by glob pattern (name matching, not content search).
 
@@ -398,6 +454,7 @@ class FileSystemToolset(FunctionToolset[Any]):
 
         return '\n'.join(matches) if matches else 'No matches found.'
 
+    @_recoverable
     async def create_directory(self, path: str) -> str:
         """Create a directory and any missing parents.
 
@@ -411,6 +468,7 @@ class FileSystemToolset(FunctionToolset[Any]):
         resolved.mkdir(parents=True, exist_ok=True)
         return f'Created directory: {path}'
 
+    @_recoverable
     async def file_info(self, path: str) -> str:
         """Get metadata about a file or directory.
 

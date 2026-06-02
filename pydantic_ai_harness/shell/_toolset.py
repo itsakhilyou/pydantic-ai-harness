@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import functools
 import os
 import re
 import shlex
@@ -9,17 +10,42 @@ import signal
 import subprocess
 import tempfile
 import uuid
-from collections.abc import Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from pathlib import Path
-from typing import Any
+from typing import Any, Concatenate, ParamSpec
 
 import anyio
 import anyio.abc
-from pydantic_ai.toolsets import FunctionToolset
+from pydantic_ai import RunContext
+from pydantic_ai.exceptions import ModelRetry
+from pydantic_ai.tools import AgentDepsT
+from pydantic_ai.toolsets import AbstractToolset, FunctionToolset
 
-_PWD_SENTINEL = '__HARNESS_PWD__'
 _IO_DRAIN_TIMEOUT: float = 2.0
 _KILL_GRACE_PERIOD: float = 2.0
+
+_P = ParamSpec('_P')
+
+
+def _recoverable(
+    fn: Callable[Concatenate[ShellToolset, _P], Awaitable[str]],
+) -> Callable[Concatenate[ShellToolset, _P], Awaitable[str]]:
+    """Convert model-correctable errors into `ModelRetry`.
+
+    pyai only feeds `ModelRetry` back to the model as a retry prompt; any other
+    exception propagates and aborts the whole run. A denied command is something
+    the model can recover from (pick an allowed one), so surface it as a retry
+    instead of crashing the agent.
+    """
+
+    @functools.wraps(fn)
+    async def wrapper(self: ShellToolset, *args: _P.args, **kwargs: _P.kwargs) -> str:
+        try:
+            return await fn(self, *args, **kwargs)
+        except PermissionError as e:
+            raise ModelRetry(str(e)) from e
+
+    return wrapper
 
 
 def _is_interactive_command(command: str) -> bool:
@@ -55,7 +81,7 @@ class _BackgroundProcess:
         self.exit_code: int | None = None
 
 
-class ShellToolset(FunctionToolset[Any]):
+class ShellToolset(FunctionToolset[AgentDepsT]):
     """Gives an agent the ability to execute shell commands.
 
     Supports synchronous execution (run_command) and background processes
@@ -79,6 +105,9 @@ class ShellToolset(FunctionToolset[Any]):
     ) -> None:
         super().__init__()
         self._cwd = cwd.resolve()
+        # The configured starting directory, never mutated by persist_cwd, so
+        # `for_run` can hand each run a fresh instance rooted back here.
+        self._initial_cwd = self._cwd
         self._allowed_commands = list(allowed_commands)
         self._denied_commands = list(denied_commands)
         self._denied_operators = list(denied_operators)
@@ -95,6 +124,26 @@ class ShellToolset(FunctionToolset[Any]):
         self.add_function(self.start_command, name='start_command')
         self.add_function(self.check_command, name='check_command')
         self.add_function(self.stop_command, name='stop_command')
+
+    async def for_run(self, ctx: RunContext[AgentDepsT]) -> AbstractToolset[AgentDepsT]:
+        """Return a fresh instance per run so cwd and background processes are isolated.
+
+        `get_toolset` builds one shared instance at agent construction (see
+        `AbstractToolset.for_run`, which defaults to returning `self`). This
+        toolset holds mutable per-run state (`_cwd`, `_background`), so without
+        an override two concurrent runs would corrupt each other's cwd and kill
+        each other's background processes.
+        """
+        return ShellToolset(
+            cwd=self._initial_cwd,
+            allowed_commands=self._allowed_commands,
+            denied_commands=self._denied_commands,
+            denied_operators=self._denied_operators,
+            default_timeout=self._default_timeout,
+            max_output_chars=self._max_output_chars,
+            persist_cwd=self._persist_cwd,
+            allow_interactive=self._allow_interactive,
+        )
 
     async def __aexit__(self, *args: Any) -> None:
         """Terminate all remaining background processes and clean up temp files."""
@@ -150,33 +199,34 @@ class ShellToolset(FunctionToolset[Any]):
         marker = f'[... output truncated, showing last {self._max_output_chars} chars]\n'
         return marker + text[-self._max_output_chars :]
 
-    def _wrap_command_for_cwd(self, command: str) -> str:
-        """Append pwd sentinel to command for cwd tracking.
+    def _build_cwd_capture(self, command: str) -> tuple[str, Path | None]:
+        """Wrap a command to record its final working directory out-of-band.
 
-        Commands containing ';' are returned unwrapped because the separator
-        breaks the '&&' success-gating of the sentinel echo.
+        `pwd` is written to a private temp file whose random path the agent's
+        command can't address, so command output can never spoof the tracked
+        cwd — unlike parsing a sentinel out of stdout, where any command that
+        prints the sentinel string (or one using `;` to skip success-gating)
+        could redirect the cwd. Returns the wrapped command plus the temp-file
+        path, or the command unchanged and `None` when cwd tracking is off.
         """
-        if ';' in command:
-            return command
-        return f'{command} && echo {_PWD_SENTINEL}$(pwd)'
+        if not self._persist_cwd:
+            return command, None
+        fd, name = tempfile.mkstemp(prefix='harness_cwd_')
+        os.close(fd)
+        wrapped = f'{command}\n__harness_ec=$?\npwd > {shlex.quote(name)}\nexit $__harness_ec'
+        return wrapped, Path(name)
 
-    def _extract_cwd_from_output(self, stdout: str) -> tuple[str, Path | None]:
-        """Extract and strip pwd sentinel from stdout.
-
-        Returns (cleaned_stdout, new_cwd_or_none).
-        """
-        sentinel_idx = stdout.rfind(_PWD_SENTINEL)
-        if sentinel_idx == -1:
-            return stdout, None
-        after_sentinel = stdout[sentinel_idx + len(_PWD_SENTINEL) :]
-        path_str = after_sentinel.strip().split('\n', maxsplit=1)[0].strip()
-        cleaned = stdout[:sentinel_idx].rstrip('\n')
-        if not path_str:
-            return cleaned, None
-        new_cwd = Path(path_str)
-        if new_cwd.is_dir():
-            return cleaned, new_cwd
-        return cleaned, None
+    def _apply_captured_cwd(self, cwd_file: Path) -> None:
+        """Update the persistent cwd from the capture file, ignoring junk."""
+        try:
+            recorded = cwd_file.read_text(encoding='utf-8').strip()
+        except OSError:  # pragma: no cover
+            return
+        if not recorded:
+            return
+        candidate = Path(recorded)
+        if candidate.is_dir():
+            self._cwd = candidate
 
     async def _kill_process_group(self, proc: anyio.abc.Process) -> None:
         """SIGTERM the process group, escalating to SIGKILL after the grace period."""
@@ -227,6 +277,7 @@ class ShellToolset(FunctionToolset[Any]):
                 tg.start_soon(_drain_stdout)
                 tg.start_soon(_drain_stderr)
 
+    @_recoverable
     async def run_command(self, command: str, *, timeout_seconds: float | None = None) -> str:
         """Execute a shell command and return its output.
 
@@ -240,69 +291,69 @@ class ShellToolset(FunctionToolset[Any]):
         self._check_command(command)
         timeout = timeout_seconds if timeout_seconds is not None else self._default_timeout
 
-        actual_command = self._wrap_command_for_cwd(command) if self._persist_cwd else command
-
-        proc = await anyio.open_process(
-            actual_command,
-            cwd=self._cwd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            start_new_session=True,
-        )
-        stdout_chunks: list[bytes] = []
-        stderr_chunks: list[bytes] = []
+        actual_command, cwd_file = self._build_cwd_capture(command)
         try:
-            assert proc.stdout is not None
-            assert proc.stderr is not None
-
-            async def _read_stdout() -> None:
+            proc = await anyio.open_process(
+                actual_command,
+                cwd=self._cwd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                start_new_session=True,
+            )
+            stdout_chunks: list[bytes] = []
+            stderr_chunks: list[bytes] = []
+            try:
                 assert proc.stdout is not None
-                async for chunk in proc.stdout:
-                    stdout_chunks.append(chunk)
-
-            async def _read_stderr() -> None:
                 assert proc.stderr is not None
-                async for chunk in proc.stderr:
-                    stderr_chunks.append(chunk)
 
-            with anyio.fail_after(timeout):
-                async with anyio.create_task_group() as tg:
-                    tg.start_soon(_read_stdout)
-                    tg.start_soon(_read_stderr)
-                await proc.wait()
-        except TimeoutError:
-            await self._kill_process_group(proc)
-            with anyio.CancelScope(shield=True):
-                await proc.wait()
-                await self._drain_with_timeout(stdout_chunks, stderr_chunks, proc)
-            return f'[Command timed out after {timeout}s]'
+                async def _read_stdout() -> None:
+                    assert proc.stdout is not None
+                    async for chunk in proc.stdout:
+                        stdout_chunks.append(chunk)
+
+                async def _read_stderr() -> None:
+                    assert proc.stderr is not None
+                    async for chunk in proc.stderr:
+                        stderr_chunks.append(chunk)
+
+                with anyio.fail_after(timeout):
+                    async with anyio.create_task_group() as tg:
+                        tg.start_soon(_read_stdout)
+                        tg.start_soon(_read_stderr)
+                    await proc.wait()
+            except TimeoutError:
+                await self._kill_process_group(proc)
+                with anyio.CancelScope(shield=True):
+                    await proc.wait()
+                    await self._drain_with_timeout(stdout_chunks, stderr_chunks, proc)
+                return f'[Command timed out after {timeout}s]'
+            finally:
+                await proc.aclose()
+
+            stdout = b''.join(stdout_chunks).decode('utf-8', errors='replace')
+            stderr = b''.join(stderr_chunks).decode('utf-8', errors='replace')
+
+            parts: list[str] = []
+            if stdout:
+                parts.append(f'[stdout]\n{stdout}')
+            if stderr:
+                parts.append(f'[stderr]\n{stderr}')
+            output = '\n'.join(parts) if parts else '(no output)'
+
+            output = self._truncate(output)
+            exit_code = proc.returncode if proc.returncode is not None else 0
+
+            if cwd_file is not None and exit_code == 0:
+                self._apply_captured_cwd(cwd_file)
+
+            if exit_code != 0:
+                return f'{output}\n[exit code: {exit_code}]'
+            return output
         finally:
-            await proc.aclose()
+            if cwd_file is not None:
+                cwd_file.unlink(missing_ok=True)
 
-        stdout = b''.join(stdout_chunks).decode('utf-8', errors='replace')
-        stderr = b''.join(stderr_chunks).decode('utf-8', errors='replace')
-
-        new_cwd: Path | None = None
-        if self._persist_cwd:
-            stdout, new_cwd = self._extract_cwd_from_output(stdout)
-
-        parts: list[str] = []
-        if stdout:
-            parts.append(f'[stdout]\n{stdout}')
-        if stderr:
-            parts.append(f'[stderr]\n{stderr}')
-        output = '\n'.join(parts) if parts else '(no output)'
-
-        output = self._truncate(output)
-        exit_code = proc.returncode if proc.returncode is not None else 0
-
-        if self._persist_cwd and exit_code == 0 and new_cwd is not None:
-            self._cwd = new_cwd
-
-        if exit_code != 0:
-            return f'{output}\n[exit code: {exit_code}]'
-        return output
-
+    @_recoverable
     async def start_command(self, command: str) -> str:
         """Start a long-running command in the background (e.g. a server or watcher).
 

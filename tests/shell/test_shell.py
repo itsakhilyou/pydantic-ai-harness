@@ -3,21 +3,35 @@
 from __future__ import annotations
 
 import os
+import shlex
 import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import anyio
 import pytest
-from pydantic_ai import Agent
+from pydantic_ai import Agent, RunContext
+from pydantic_ai.exceptions import ModelRetry
 from pydantic_ai.models.test import TestModel
+from pydantic_ai.usage import RunUsage
 
 from pydantic_ai_harness.shell import Shell
 from pydantic_ai_harness.shell._toolset import (
-    _PWD_SENTINEL,
     ShellToolset,
     _is_interactive_command,
 )
+
+
+def _run_context() -> RunContext[None]:
+    """Minimal `RunContext` for invoking `for_run` directly in tests."""
+    return RunContext[None](
+        deps=None,
+        model=TestModel(),
+        usage=RunUsage(),
+        prompt=None,
+        messages=[],
+        run_step=0,
+    )
 
 
 def _parse_command_id(result: str) -> str:
@@ -95,7 +109,7 @@ def shell_dir(tmp_path: Path) -> Path:
 
 
 @pytest.fixture
-def toolset(shell_dir: Path) -> ShellToolset:
+def toolset(shell_dir: Path) -> ShellToolset[None]:
     return ShellToolset(
         cwd=shell_dir,
         allowed_commands=[],
@@ -108,8 +122,22 @@ def toolset(shell_dir: Path) -> ShellToolset:
     )
 
 
+@pytest.fixture
+def persist_toolset(shell_dir: Path) -> ShellToolset[None]:
+    return ShellToolset(
+        cwd=shell_dir,
+        allowed_commands=[],
+        denied_commands=[],
+        denied_operators=[],
+        default_timeout=10.0,
+        max_output_chars=50_000,
+        persist_cwd=True,
+        allow_interactive=False,
+    )
+
+
 class TestCommandValidation:
-    async def test_denied_command_blocked(self, toolset: ShellToolset) -> None:
+    async def test_denied_command_blocked(self, toolset: ShellToolset[None]) -> None:
         with pytest.raises(PermissionError, match="'rm' is denied"):
             toolset._check_command('rm -rf /')
 
@@ -154,7 +182,7 @@ class TestCommandValidation:
                 allow_interactive=False,
             )
 
-    async def test_interactive_blocked_by_default(self, toolset: ShellToolset) -> None:
+    async def test_interactive_blocked_by_default(self, toolset: ShellToolset[None]) -> None:
         with pytest.raises(PermissionError, match='Interactive commands'):
             toolset._check_command('vim file.txt')
 
@@ -198,10 +226,10 @@ class TestCommandValidation:
         )
         ts._check_command('echo hello')
 
-    async def test_unparseable_command_allowed(self, toolset: ShellToolset) -> None:
+    async def test_unparseable_command_allowed(self, toolset: ShellToolset[None]) -> None:
         toolset._check_command("echo 'unterminated")
 
-    async def test_empty_command_allowed(self, toolset: ShellToolset) -> None:
+    async def test_empty_command_allowed(self, toolset: ShellToolset[None]) -> None:
         toolset._check_command('')
 
     async def test_denied_operator_substring_match(self, shell_dir: Path) -> None:
@@ -244,7 +272,7 @@ class TestCommandValidation:
         )
         ts._check_command('')
 
-    def test_first_denied_operator_match(self, toolset: ShellToolset) -> None:
+    def test_first_denied_operator_match(self, toolset: ShellToolset[None]) -> None:
         ts = ShellToolset(
             cwd=Path('/tmp'),
             allowed_commands=[],
@@ -257,7 +285,7 @@ class TestCommandValidation:
         )
         assert ts._first_denied_operator('echo hi | cat') == '|'
 
-    def test_first_denied_operator_no_match(self, toolset: ShellToolset) -> None:
+    def test_first_denied_operator_no_match(self, toolset: ShellToolset[None]) -> None:
         ts = ShellToolset(
             cwd=Path('/tmp'),
             allowed_commands=[],
@@ -270,12 +298,12 @@ class TestCommandValidation:
         )
         assert ts._first_denied_operator('echo hello') is None
 
-    def test_first_denied_operator_empty_list(self, toolset: ShellToolset) -> None:
+    def test_first_denied_operator_empty_list(self, toolset: ShellToolset[None]) -> None:
         assert toolset._first_denied_operator('echo hi | cat') is None
 
 
 class TestTruncation:
-    def test_within_limit(self, toolset: ShellToolset) -> None:
+    def test_within_limit(self, toolset: ShellToolset[None]) -> None:
         assert toolset._truncate('short') == 'short'
 
     def test_at_limit(self, shell_dir: Path) -> None:
@@ -370,86 +398,114 @@ class TestTruncation:
         assert 'output truncated, showing last 10 chars' in result
 
 
-class TestCwdSentinel:
-    def test_wrap_command_appends_sentinel(self, toolset: ShellToolset) -> None:
-        result = toolset._wrap_command_for_cwd('echo hello')
-        assert _PWD_SENTINEL in result
-        assert result == f'echo hello && echo {_PWD_SENTINEL}$(pwd)'
+class TestCwdCapture:
+    """The persistent-cwd mechanism records `pwd` out-of-band via a private temp
+    file, so command output can never spoof the tracked directory."""
 
-    def test_extract_cwd_no_sentinel(self, toolset: ShellToolset) -> None:
-        cleaned, cwd = toolset._extract_cwd_from_output('just some output')
-        assert cleaned == 'just some output'
-        assert cwd is None
+    def test_capture_disabled_returns_command_unchanged(self, toolset: ShellToolset[None]) -> None:
+        wrapped, cwd_file = toolset._build_cwd_capture('echo hi')
+        assert wrapped == 'echo hi'
+        assert cwd_file is None
 
-    def test_extract_cwd_with_valid_path(self, toolset: ShellToolset, shell_dir: Path) -> None:
-        stdout = f'some output\n{_PWD_SENTINEL}{shell_dir}\n'
-        cleaned, cwd = toolset._extract_cwd_from_output(stdout)
-        assert 'some output' in cleaned
-        assert _PWD_SENTINEL not in cleaned
-        assert cwd == shell_dir
+    def test_capture_records_pwd_out_of_band(self, persist_toolset: ShellToolset[None]) -> None:
+        wrapped, cwd_file = persist_toolset._build_cwd_capture('echo hi')
+        assert cwd_file is not None
+        try:
+            # pwd is redirected to the private temp file, never echoed to stdout
+            assert f'pwd > {shlex.quote(str(cwd_file))}' in wrapped
+            assert wrapped.startswith('echo hi')
+        finally:
+            cwd_file.unlink(missing_ok=True)
 
-    def test_extract_cwd_invalid_path(self, toolset: ShellToolset) -> None:
-        stdout = f'output\n{_PWD_SENTINEL}/nonexistent_dir_xyz_999\n'
-        cleaned, cwd = toolset._extract_cwd_from_output(stdout)
-        assert _PWD_SENTINEL not in cleaned
-        assert cwd is None
+    def test_apply_valid_dir_updates_cwd(
+        self, persist_toolset: ShellToolset[None], shell_dir: Path, tmp_path: Path
+    ) -> None:
+        capture = tmp_path / 'cwd'
+        capture.write_text(f'{shell_dir / "subdir"}\n')
+        persist_toolset._apply_captured_cwd(capture)
+        assert persist_toolset._cwd == shell_dir / 'subdir'
 
-    def test_extract_cwd_empty_path(self, toolset: ShellToolset) -> None:
-        stdout = f'output\n{_PWD_SENTINEL}\n'
-        _, cwd = toolset._extract_cwd_from_output(stdout)
-        assert cwd is None
+    def test_apply_empty_file_keeps_cwd(self, persist_toolset: ShellToolset[None], tmp_path: Path) -> None:
+        original = persist_toolset._cwd
+        capture = tmp_path / 'cwd'
+        capture.write_text('')
+        persist_toolset._apply_captured_cwd(capture)
+        assert persist_toolset._cwd == original
 
-    def test_extract_cwd_strips_sentinel_from_output(self, toolset: ShellToolset, shell_dir: Path) -> None:
-        """Sentinel line should never appear in output shown to model."""
-        stdout = f'line1\nline2\n{_PWD_SENTINEL}{shell_dir}\n'
-        cleaned, _ = toolset._extract_cwd_from_output(stdout)
-        assert _PWD_SENTINEL not in cleaned
-        assert 'line1' in cleaned
-        assert 'line2' in cleaned
+    def test_apply_non_dir_keeps_cwd(self, persist_toolset: ShellToolset[None], tmp_path: Path) -> None:
+        original = persist_toolset._cwd
+        capture = tmp_path / 'cwd'
+        capture.write_text(str(tmp_path / 'does_not_exist'))
+        persist_toolset._apply_captured_cwd(capture)
+        assert persist_toolset._cwd == original
 
-    def test_extract_cwd_uses_rfind(self, toolset: ShellToolset, shell_dir: Path) -> None:
-        """If sentinel appears multiple times, use the LAST one (rfind)."""
-        stdout = f'{_PWD_SENTINEL}/fake\nmore output\n{_PWD_SENTINEL}{shell_dir}\n'
-        _, cwd = toolset._extract_cwd_from_output(stdout)
-        assert cwd == shell_dir
 
-    def test_extract_cwd_cleaned_rstrip(self, toolset: ShellToolset, shell_dir: Path) -> None:
-        stdout = f'content\n\n{_PWD_SENTINEL}{shell_dir}\n'
-        cleaned, _ = toolset._extract_cwd_from_output(stdout)
-        assert not cleaned.endswith('\n')
-        assert 'content' in cleaned
+class TestForRunIsolation:
+    """B3: `get_toolset` builds one shared instance at agent construction, so
+    `for_run` must hand each run a fresh copy — otherwise concurrent runs share
+    `_cwd`/`_background` and corrupt each other."""
 
-    def test_extract_cwd_split_maxsplit(self, toolset: ShellToolset, shell_dir: Path) -> None:
-        stdout = f'{_PWD_SENTINEL}{shell_dir}\nextra_line\n'
-        _, cwd = toolset._extract_cwd_from_output(stdout)
-        assert cwd == shell_dir
+    async def test_for_run_returns_fresh_instance(self, persist_toolset: ShellToolset[None]) -> None:
+        run1 = await persist_toolset.for_run(_run_context())
+        run2 = await persist_toolset.for_run(_run_context())
+        assert run1 is not persist_toolset
+        assert run2 is not run1
+
+    async def test_persist_cwd_isolated_across_runs(self, persist_toolset: ShellToolset[None], shell_dir: Path) -> None:
+        run1 = await persist_toolset.for_run(_run_context())
+        assert isinstance(run1, ShellToolset)
+        await run1.run_command('cd subdir')
+        assert run1._cwd == shell_dir / 'subdir'
+        # A second run must start back at the configured root, not inherit run1's cd.
+        run2 = await persist_toolset.for_run(_run_context())
+        assert isinstance(run2, ShellToolset)
+        assert run2._cwd == shell_dir
+
+
+class TestPersistCwdHardening:
+    """B4: regression tests for the old stdout-sentinel footguns — a command's
+    output spoofing the cwd, and `;` silently disabling tracking."""
+
+    async def test_cd_persists_even_with_semicolon(self, persist_toolset: ShellToolset[None]) -> None:
+        # The old mechanism skipped tracking whenever ';' appeared, silently
+        # dropping a real `cd`. The out-of-band capture records it regardless.
+        await persist_toolset.run_command('cd subdir ; true')
+        result = await persist_toolset.run_command('pwd')
+        assert 'subdir' in result
+
+    async def test_output_cannot_spoof_cwd(self, persist_toolset: ShellToolset[None], shell_dir: Path) -> None:
+        # The old mechanism parsed cwd from stdout, so a command printing the
+        # sentinel string could redirect the tracked cwd with no real cd.
+        spoof = f'true ; echo __HARNESS_PWD__{shell_dir / "subdir"}'
+        await persist_toolset.run_command(spoof)
+        assert persist_toolset._cwd == shell_dir
 
 
 class TestRunCommand:
-    async def test_basic_echo(self, toolset: ShellToolset) -> None:
+    async def test_basic_echo(self, toolset: ShellToolset[None]) -> None:
         result = await toolset.run_command('echo hello')
         assert '[stdout]' in result
         assert 'hello' in result
 
-    async def test_stderr_output(self, toolset: ShellToolset) -> None:
+    async def test_stderr_output(self, toolset: ShellToolset[None]) -> None:
         result = await toolset.run_command('echo error >&2')
         assert '[stderr]' in result
         assert 'error' in result
 
-    async def test_mixed_output(self, toolset: ShellToolset) -> None:
+    async def test_mixed_output(self, toolset: ShellToolset[None]) -> None:
         result = await toolset.run_command('echo out && echo err >&2')
         assert '[stdout]' in result
         assert '[stderr]' in result
 
-    async def test_exit_code_reported(self, toolset: ShellToolset) -> None:
+    async def test_exit_code_reported(self, toolset: ShellToolset[None]) -> None:
         result = await toolset.run_command('exit 42')
         assert '[exit code: 42]' in result
 
-    async def test_exit_code_zero_not_shown(self, toolset: ShellToolset) -> None:
+    async def test_exit_code_zero_not_shown(self, toolset: ShellToolset[None]) -> None:
         result = await toolset.run_command('echo ok')
         assert 'exit code' not in result
 
-    async def test_no_output(self, toolset: ShellToolset) -> None:
+    async def test_no_output(self, toolset: ShellToolset[None]) -> None:
         result = await toolset.run_command('true')
         assert result == '(no output)'
 
@@ -497,15 +553,17 @@ class TestRunCommand:
         await ts.run_command('cd nonexistent_dir_xyz && false')
         assert ts._cwd == original
 
-    async def test_denied_command_in_run(self, toolset: ShellToolset) -> None:
-        with pytest.raises(PermissionError, match="'rm' is denied"):
+    async def test_denied_command_in_run(self, toolset: ShellToolset[None]) -> None:
+        # B2: a denied command is model-correctable, so it surfaces as ModelRetry
+        # (which pyai feeds back to the model) rather than aborting the run.
+        with pytest.raises(ModelRetry, match="'rm' is denied"):
             await toolset.run_command('rm -rf /')
 
-    async def test_cwd_used(self, toolset: ShellToolset, shell_dir: Path) -> None:
+    async def test_cwd_used(self, toolset: ShellToolset[None], shell_dir: Path) -> None:
         result = await toolset.run_command('cat test.txt')
         assert 'hello' in result
 
-    async def test_multiline_output(self, toolset: ShellToolset) -> None:
+    async def test_multiline_output(self, toolset: ShellToolset[None]) -> None:
         result = await toolset.run_command(f'{sys.executable} -c "print(\'a\\nb\\nc\\n\')"')
         assert '[stdout]' in result
 
@@ -552,27 +610,27 @@ class TestRunCommand:
         await ts.run_command('cd subdir')
         assert ts._cwd == original
 
-    async def test_nonzero_exit_shows_code(self, toolset: ShellToolset) -> None:
+    async def test_nonzero_exit_shows_code(self, toolset: ShellToolset[None]) -> None:
         result = await toolset.run_command('exit 1')
         assert '[exit code: 1]' in result
 
-    async def test_stdout_stderr_separated_by_newline(self, toolset: ShellToolset) -> None:
+    async def test_stdout_stderr_separated_by_newline(self, toolset: ShellToolset[None]) -> None:
         result = await toolset.run_command('echo out && echo err >&2')
         assert '[stdout]\nout\n\n[stderr]\nerr' in result
 
-    async def test_non_ascii_stdout(self, toolset: ShellToolset) -> None:
+    async def test_non_ascii_stdout(self, toolset: ShellToolset[None]) -> None:
         result = await toolset.run_command(
             f'{sys.executable} -c "import sys; sys.stdout.buffer.write(b\'hello \\xff\\xfe world\\n\')"'
         )
         assert 'hello' in result
 
-    async def test_non_ascii_stderr(self, toolset: ShellToolset) -> None:
+    async def test_non_ascii_stderr(self, toolset: ShellToolset[None]) -> None:
         result = await toolset.run_command(
             f'{sys.executable} -c "import sys; sys.stderr.buffer.write(b\'err \\xff\\xfe msg\\n\')"'
         )
         assert 'err' in result
 
-    async def test_stdout_chunk_join(self, toolset: ShellToolset) -> None:
+    async def test_stdout_chunk_join(self, toolset: ShellToolset[None]) -> None:
         result = await toolset.run_command(f"{sys.executable} -c \"print('A' * 100 + 'B' * 100)\"")
         assert 'A' * 100 + 'B' * 100 in result
 
@@ -630,22 +688,6 @@ class TestRunCommand:
         )
         result = await ts.run_command("printf '%0500d\\n' $(seq 1 100) >&2")
         assert 'XXXX' not in result
-
-    async def test_persist_cwd_sentinel_stripped_from_output(self, shell_dir: Path) -> None:
-        """The pwd sentinel should never appear in output shown to user."""
-        ts = ShellToolset(
-            cwd=shell_dir,
-            allowed_commands=[],
-            denied_commands=[],
-            denied_operators=[],
-            default_timeout=10.0,
-            max_output_chars=50_000,
-            persist_cwd=True,
-            allow_interactive=False,
-        )
-        result = await ts.run_command('echo visible')
-        assert _PWD_SENTINEL not in result
-        assert 'visible' in result
 
     async def test_persist_cwd_updates_after_cd(self, shell_dir: Path) -> None:
         """CWD should update to the actual directory after a successful cd."""
@@ -745,11 +787,11 @@ class TestBackgroundCommands:
         command_id = _parse_command_id(result)
         await ts.stop_command(command_id)
 
-    async def test_check_unknown_id(self, toolset: ShellToolset) -> None:
+    async def test_check_unknown_id(self, toolset: ShellToolset[None]) -> None:
         result = await toolset.check_command('nonexistent_id')
         assert 'unknown command ID' in result
 
-    async def test_stop_unknown_id(self, toolset: ShellToolset) -> None:
+    async def test_stop_unknown_id(self, toolset: ShellToolset[None]) -> None:
         result = await toolset.stop_command('nonexistent_id')
         assert 'unknown command ID' in result
 
@@ -825,7 +867,7 @@ class TestBackgroundCommands:
             persist_cwd=False,
             allow_interactive=False,
         )
-        with pytest.raises(PermissionError, match="'rm' is denied"):
+        with pytest.raises(ModelRetry, match="'rm' is denied"):
             await ts.start_command('rm -rf /')
 
     async def test_stop_captures_stderr(self, shell_dir: Path) -> None:
@@ -1028,7 +1070,7 @@ class TestBackgroundCommands:
 
 
 class TestEdgeCases:
-    async def test_toolset_tool_names(self, toolset: ShellToolset) -> None:
+    async def test_toolset_tool_names(self, toolset: ShellToolset[None]) -> None:
         tool_names = list(toolset.tools.keys())
         assert 'run_command' in tool_names
         assert 'start_command' in tool_names
@@ -1049,16 +1091,6 @@ class TestEdgeCases:
         result = await ts.run_command('pwd')
         assert str(shell_dir) in result
 
-    def test_wrap_command_uses_correct_sentinel(self, toolset: ShellToolset) -> None:
-        result = toolset._wrap_command_for_cwd('ls')
-        assert '__HARNESS_PWD__' in result
-        assert '$(pwd)' in result
-
-    def test_extract_cwd_rfind_not_find(self, toolset: ShellToolset, shell_dir: Path) -> None:
-        stdout = f'{_PWD_SENTINEL}/fake\nstuff\n{_PWD_SENTINEL}{shell_dir}\n'
-        _, cwd = toolset._extract_cwd_from_output(stdout)
-        assert cwd == shell_dir
-
     async def test_persist_cwd_requires_all_three_conditions(self, shell_dir: Path) -> None:
         ts = ShellToolset(
             cwd=shell_dir,
@@ -1073,36 +1105,6 @@ class TestEdgeCases:
         # Successful echo — sentinel shows same dir, cwd should remain valid
         await ts.run_command('echo hi')
         assert ts._cwd.is_dir()
-
-    async def test_persist_cwd_false_skips_sentinel(self, shell_dir: Path) -> None:
-        ts = ShellToolset(
-            cwd=shell_dir,
-            allowed_commands=[],
-            denied_commands=[],
-            denied_operators=[],
-            default_timeout=10.0,
-            max_output_chars=50_000,
-            persist_cwd=False,
-            allow_interactive=False,
-        )
-        result = await ts.run_command('echo test')
-        assert _PWD_SENTINEL not in result
-
-    async def test_persist_cwd_semicolon_skips_sentinel(self, shell_dir: Path) -> None:
-        ts = ShellToolset(
-            cwd=shell_dir,
-            allowed_commands=[],
-            denied_commands=[],
-            denied_operators=[],
-            default_timeout=10.0,
-            max_output_chars=50_000,
-            persist_cwd=True,
-            allow_interactive=False,
-        )
-        original_cwd = ts._cwd
-        result = await ts.run_command('echo a ; echo b')
-        assert _PWD_SENTINEL not in result
-        assert ts._cwd == original_cwd
 
 
 class TestShellCapability:
