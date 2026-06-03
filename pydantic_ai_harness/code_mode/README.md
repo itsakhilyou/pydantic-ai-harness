@@ -179,12 +179,24 @@ allowed_env = {'API_KEY': 'sk-...'}
 
 def my_os(fn, args, kwargs):
     if fn == 'os.getenv':
-        return allowed_env.get(args[0], NOT_HANDLED)  # only allow-listed keys; the rest stay hidden
+        # Answer the call: allow-listed keys resolve, every other key reads back
+        # as None -- absent, exactly like a real unset variable.
+        return allowed_env.get(args[0])
+    # Refuse everything else: NOT_HANDLED makes the call fail in the sandbox.
     return NOT_HANDLED
 
 
 CodeMode(os_access=my_os)
 ```
+
+Your callback's return value decides the call's fate, and the two outcomes are easy to confuse:
+
+- **Return any value** -- including `None`, `''`, or `0` -- and that becomes the result the sandbox
+  sees. `os.getenv` returning `None` looks exactly like a normal unset variable, so the agent's code
+  keeps running. This is how you *hide* something: answer with an empty value.
+- **Return `NOT_HANDLED`** and the call is treated as unsupported: it raises inside the sandbox and
+  the model gets a retry. This *refuses* a capability outright -- use it to block, not to say "no
+  value". Returning `NOT_HANDLED` for a key the agent reasonably expects will burn retries.
 
 Both expose the real host to model-written code, so grant only what the task needs. Access is fixed
 when the capability is built, so construct `CodeMode` per request to scope it.
