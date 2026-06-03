@@ -22,9 +22,12 @@ from pydantic_ai.usage import RunUsage
 
 from pydantic_harness.compaction import (
     _SUMMARY_PREFIX,
-    Compaction,
+    ClearToolResults,
+    DeduplicateFileReads,
     LimitWarner,
     SlidingWindow,
+    SummarizingCompaction,
+    TieredCompaction,
     _extract_previous_summary,
     _extract_system_prompts,
     _find_first_user_message,
@@ -32,6 +35,8 @@ from pydantic_harness.compaction import (
     _find_token_cutoff,
     _format_messages,
     _is_safe_cutoff,
+    _iter_tool_pairs,
+    _prepend_first_user_message,
     estimate_token_count,
 )
 
@@ -221,6 +226,19 @@ class TestFindTokenCutoff:
         assert cutoff > 0
         remaining = msgs[cutoff:]
         assert estimate_token_count(remaining) <= 30
+
+    def test_walks_back_over_tool_pair(self):
+        # The token-fit cutoff lands between a tool call and its return; the backward
+        # walk must skip to a safe index that keeps the pair together.
+        msgs: list[ModelMessage] = [
+            _user('a' * 8),
+            _tool_call('fn', 'tc1'),  # contributes 'fn' + '{}' = 4 tokens
+            _tool_return('fn', 'tc1', 'b' * 4),
+            _user('c' * 4),
+        ]
+        # messages[2:] = 8 tokens (fits), messages[1:] = 12 (does not) -> candidate is 2,
+        # which splits the pair, so it walks back to 1.
+        assert _find_token_cutoff(msgs, 8, tokenizer=len) == 1
 
 
 # ---------------------------------------------------------------------------
@@ -450,27 +468,27 @@ class TestLimitWarner:
 class TestCompaction:
     def test_validation_no_trigger(self):
         with pytest.raises(ValueError, match='At least one of max_messages or max_tokens must be set'):
-            Compaction(model='test', max_messages=None, max_tokens=None)
+            SummarizingCompaction(model='test', max_messages=None, max_tokens=None)
 
     def test_validation_negative_max_messages(self):
         with pytest.raises(ValueError, match='max_messages must be positive'):
-            Compaction(model='test', max_messages=0)
+            SummarizingCompaction(model='test', max_messages=0)
 
     def test_validation_negative_max_tokens(self):
         with pytest.raises(ValueError, match='max_tokens must be positive'):
-            Compaction(model='test', max_tokens=-1)
+            SummarizingCompaction(model='test', max_tokens=-1)
 
     def test_validation_negative_keep_messages(self):
         with pytest.raises(ValueError, match='keep_messages must be non-negative'):
-            Compaction(model='test', max_messages=10, keep_messages=-1)
+            SummarizingCompaction(model='test', max_messages=10, keep_messages=-1)
 
     def test_validation_negative_keep_tokens(self):
         with pytest.raises(ValueError, match='keep_tokens must be non-negative'):
-            Compaction(model='test', max_messages=10, keep_tokens=-1)
+            SummarizingCompaction(model='test', max_messages=10, keep_tokens=-1)
 
     @pytest.mark.anyio
     async def test_no_compaction_below_threshold(self):
-        comp = Compaction(model='test', max_messages=100)
+        comp = SummarizingCompaction(model='test', max_messages=100)
         messages: list[ModelMessage] = [_user('hi')]
         rc = _make_request_context(messages)
         ctx = _make_ctx()
@@ -479,7 +497,7 @@ class TestCompaction:
 
     @pytest.mark.anyio
     async def test_compaction_replaces_old_messages(self):
-        comp = Compaction(model='test:m', max_messages=3, keep_messages=1, preserve_first_user_message=False)
+        comp = SummarizingCompaction(model='test:m', max_messages=3, keep_messages=1, preserve_first_user_message=False)
         messages: list[ModelMessage] = [
             _user('first'),
             _assistant('response 1'),
@@ -511,7 +529,7 @@ class TestCompaction:
 
     @pytest.mark.anyio
     async def test_compaction_preserves_system_prompts(self):
-        comp = Compaction(model='test:m', max_messages=3, keep_messages=1)
+        comp = SummarizingCompaction(model='test:m', max_messages=3, keep_messages=1)
         messages: list[ModelMessage] = [
             ModelRequest(parts=[SystemPromptPart(content='You are a helpful assistant.')]),
             _user('first'),
@@ -540,7 +558,7 @@ class TestCompaction:
 
     @pytest.mark.anyio
     async def test_compaction_preserves_tool_pairs(self):
-        comp = Compaction(model='test:m', max_messages=4, keep_messages=2)
+        comp = SummarizingCompaction(model='test:m', max_messages=4, keep_messages=2)
         messages: list[ModelMessage] = [
             _user('start'),
             _tool_call('fn', 'tc1'),
@@ -578,7 +596,7 @@ class TestCompaction:
 
     @pytest.mark.anyio
     async def test_compaction_token_trigger(self):
-        comp = Compaction(model='test:m', max_tokens=5, keep_messages=1)
+        comp = SummarizingCompaction(model='test:m', max_tokens=5, keep_messages=1)
         messages: list[ModelMessage] = [_user('x' * 40) for _ in range(5)]
         rc = _make_request_context(messages)
         ctx = _make_ctx()
@@ -600,7 +618,7 @@ class TestCompaction:
 
     @pytest.mark.anyio
     async def test_compaction_keep_tokens_mode(self):
-        comp = Compaction(model='test:m', max_messages=3, keep_tokens=5)
+        comp = SummarizingCompaction(model='test:m', max_messages=3, keep_tokens=5)
         messages: list[ModelMessage] = [_user('x' * 40) for _ in range(5)]
         rc = _make_request_context(messages)
         ctx = _make_ctx()
@@ -694,7 +712,10 @@ class TestExports:
 
         assert hasattr(pydantic_harness, 'SlidingWindow')
         assert hasattr(pydantic_harness, 'LimitWarner')
-        assert hasattr(pydantic_harness, 'Compaction')
+        assert hasattr(pydantic_harness, 'SummarizingCompaction')
+        assert hasattr(pydantic_harness, 'ClearToolResults')
+        assert hasattr(pydantic_harness, 'DeduplicateFileReads')
+        assert hasattr(pydantic_harness, 'TieredCompaction')
 
 
 # ---------------------------------------------------------------------------
@@ -838,7 +859,7 @@ class TestCompactionEdgeCases:
     @pytest.mark.anyio
     async def test_compaction_cutoff_zero_no_change(self):
         """When cutoff is 0, no compaction should occur (messages all kept)."""
-        comp = Compaction(model='test:m', max_messages=2, keep_messages=10)
+        comp = SummarizingCompaction(model='test:m', max_messages=2, keep_messages=10)
         # Only 3 messages, keep_messages=10 means cutoff=0.
         messages: list[ModelMessage] = [_user('a'), _assistant('b'), _user('c')]
         rc = _make_request_context(messages)
@@ -989,7 +1010,7 @@ class TestTokenizerParameter:
     async def test_compaction_with_tokenizer(self):
         """Compaction should use the tokenizer for token-based triggers."""
         # Tokenizer: 1 token per char.
-        comp = Compaction(
+        comp = SummarizingCompaction(
             model='test:m',
             max_tokens=10,
             keep_messages=1,
@@ -1117,7 +1138,7 @@ class TestPreserveFirstUserMessage:
 
     @pytest.mark.anyio
     async def test_compaction_preserves_first_user(self):
-        comp = Compaction(model='test:m', max_messages=3, keep_messages=1, preserve_first_user_message=True)
+        comp = SummarizingCompaction(model='test:m', max_messages=3, keep_messages=1, preserve_first_user_message=True)
         messages: list[ModelMessage] = [
             _user('build a web app'),
             _assistant('response 1'),
@@ -1153,7 +1174,7 @@ class TestPreserveFirstUserMessage:
     @pytest.mark.anyio
     async def test_compaction_no_duplicate_first_user_when_in_window(self):
         """First user message already in kept window should not be duplicated."""
-        comp = Compaction(model='test:m', max_messages=3, keep_messages=5, preserve_first_user_message=True)
+        comp = SummarizingCompaction(model='test:m', max_messages=3, keep_messages=5, preserve_first_user_message=True)
         messages: list[ModelMessage] = [
             _user('task'),
             _assistant('ok'),
@@ -1216,7 +1237,7 @@ class TestIncrementalSummarization:
     @pytest.mark.anyio
     async def test_incremental_includes_previous_summary(self):
         """When incremental=True and a prior summary exists, it should be included in the prompt."""
-        comp = Compaction(
+        comp = SummarizingCompaction(
             model='test:m',
             max_messages=3,
             keep_messages=1,
@@ -1253,7 +1274,7 @@ class TestIncrementalSummarization:
     @pytest.mark.anyio
     async def test_incremental_no_previous_summary(self):
         """When incremental=True but no prior summary exists, prompt should be plain."""
-        comp = Compaction(
+        comp = SummarizingCompaction(
             model='test:m',
             max_messages=3,
             keep_messages=1,
@@ -1286,7 +1307,7 @@ class TestIncrementalSummarization:
     @pytest.mark.anyio
     async def test_incremental_disabled(self):
         """When incremental=False, the previous summary should not be included."""
-        comp = Compaction(
+        comp = SummarizingCompaction(
             model='test:m',
             max_messages=3,
             keep_messages=1,
@@ -1320,7 +1341,7 @@ class TestIncrementalSummarization:
     @pytest.mark.anyio
     async def test_incremental_output_contains_summary(self):
         """The output after incremental compaction should contain the new summary."""
-        comp = Compaction(
+        comp = SummarizingCompaction(
             model='test:m',
             max_messages=3,
             keep_messages=1,
@@ -1351,3 +1372,514 @@ class TestIncrementalSummarization:
         assert isinstance(first_msg, ModelRequest)
         sys_parts = [p for p in first_msg.parts if isinstance(p, SystemPromptPart)]
         assert any('Extended context summary.' in p.content for p in sys_parts)
+
+
+# ---------------------------------------------------------------------------
+# Helpers for the new strategies
+# ---------------------------------------------------------------------------
+
+
+def _pair(name: str, cid: str, content: str = 'result content here') -> list[ModelMessage]:
+    return [_tool_call(name, cid), _tool_return(name, cid, content)]
+
+
+def _return_contents(messages: list[ModelMessage]) -> list[str]:
+    out: list[str] = []
+    for m in messages:
+        if isinstance(m, ModelRequest):
+            for p in m.parts:
+                if isinstance(p, ToolReturnPart):
+                    out.append(str(p.content))
+    return out
+
+
+def _call_args(messages: list[ModelMessage]) -> list[str | dict[str, Any] | None]:
+    out: list[str | dict[str, Any] | None] = []
+    for m in messages:
+        if isinstance(m, ModelResponse):
+            for p in m.parts:
+                if isinstance(p, ToolCallPart):
+                    out.append(p.args)
+    return out
+
+
+# ---------------------------------------------------------------------------
+# _iter_tool_pairs
+# ---------------------------------------------------------------------------
+
+
+class TestIterToolPairs:
+    def test_skips_empty_ids_and_orphan_returns(self):
+        msgs: list[ModelMessage] = [
+            ModelResponse(parts=[ToolCallPart(tool_name='fn', args='{}', tool_call_id='')]),
+            _tool_return('fn', ''),  # empty id, no matching call
+            _tool_return('fn', 'orphan'),  # return with no matching call
+            _tool_call('g', 'g1'),
+            _tool_return('g', 'g1'),
+        ]
+        pairs = _iter_tool_pairs(msgs)
+        assert [p.tool_call_id for p in pairs] == ['g1']
+        assert pairs[0].tool_name == 'g'
+        assert pairs[0].order == 0
+
+
+# ---------------------------------------------------------------------------
+# ClearToolResults
+# ---------------------------------------------------------------------------
+
+
+class TestClearToolResults:
+    def test_validation_no_trigger(self):
+        with pytest.raises(ValueError, match='At least one of max_messages or max_tokens must be set'):
+            ClearToolResults()
+
+    def test_validation_negative_max_messages(self):
+        with pytest.raises(ValueError, match='max_messages must be positive'):
+            ClearToolResults(max_messages=0)
+
+    def test_validation_negative_max_tokens(self):
+        with pytest.raises(ValueError, match='max_tokens must be positive'):
+            ClearToolResults(max_tokens=-1)
+
+    def test_validation_negative_keep_pairs(self):
+        with pytest.raises(ValueError, match='keep_pairs must be non-negative'):
+            ClearToolResults(max_messages=1, keep_pairs=-1)
+
+    def test_validation_negative_min_clear_tokens(self):
+        with pytest.raises(ValueError, match='min_clear_tokens must be non-negative'):
+            ClearToolResults(max_messages=1, min_clear_tokens=-1)
+
+    @pytest.mark.anyio
+    async def test_no_clear_below_threshold(self):
+        cap = ClearToolResults(max_messages=100, keep_pairs=0)
+        messages: list[ModelMessage] = [*_pair('fn', 'tc1'), *_pair('fn', 'tc2')]
+        rc = _make_request_context(messages)
+        result = await cap.before_model_request(_make_ctx(), rc)
+        assert result.messages == messages
+
+    @pytest.mark.anyio
+    async def test_clears_old_keeps_recent_pairs(self):
+        cap = ClearToolResults(max_messages=1, keep_pairs=1)
+        messages: list[ModelMessage] = [
+            *_pair('fn', 'tc1'),
+            *_pair('fn', 'tc2'),
+            *_pair('fn', 'tc3'),
+        ]
+        rc = _make_request_context(messages)
+        result = await cap.before_model_request(_make_ctx(), rc)
+        contents = _return_contents(result.messages)
+        assert contents == ['[tool result cleared]', '[tool result cleared]', 'result content here']
+
+    @pytest.mark.anyio
+    async def test_token_trigger(self):
+        cap = ClearToolResults(max_tokens=5, keep_pairs=0)
+        messages: list[ModelMessage] = [*_pair('fn', 'tc1', 'x' * 80)]
+        rc = _make_request_context(messages)
+        result = await cap.before_model_request(_make_ctx(), rc)
+        assert _return_contents(result.messages) == ['[tool result cleared]']
+
+    @pytest.mark.anyio
+    async def test_exclude_tools(self):
+        cap = ClearToolResults(max_messages=1, keep_pairs=0, exclude_tools=frozenset({'keep'}))
+        messages: list[ModelMessage] = [*_pair('drop', 'tc1'), *_pair('keep', 'tc2')]
+        rc = _make_request_context(messages)
+        result = await cap.before_model_request(_make_ctx(), rc)
+        assert _return_contents(result.messages) == ['[tool result cleared]', 'result content here']
+
+    @pytest.mark.anyio
+    async def test_clear_tool_inputs(self):
+        cap = ClearToolResults(max_messages=1, keep_pairs=0, clear_tool_inputs=True)
+        call = ModelResponse(parts=[ToolCallPart(tool_name='fn', args='{"q": "x"}', tool_call_id='tc1')])
+        messages: list[ModelMessage] = [call, _tool_return('fn', 'tc1')]
+        rc = _make_request_context(messages)
+        result = await cap.before_model_request(_make_ctx(), rc)
+        # Cleared args stay JSON-valid so they don't reach a provider as malformed function-args.
+        assert _call_args(result.messages) == ['{}']
+
+    @pytest.mark.anyio
+    async def test_min_clear_tokens_skips_small_gain(self):
+        cap = ClearToolResults(max_messages=1, keep_pairs=0, min_clear_tokens=10_000)
+        messages: list[ModelMessage] = [*_pair('fn', 'tc1', 'tiny')]
+        rc = _make_request_context(messages)
+        result = await cap.before_model_request(_make_ctx(), rc)
+        # Reclaim is far below min_clear_tokens, so nothing is cleared.
+        assert _return_contents(result.messages) == ['tiny']
+
+    @pytest.mark.anyio
+    async def test_min_clear_tokens_proceeds_on_large_gain(self):
+        cap = ClearToolResults(max_messages=1, keep_pairs=0, min_clear_tokens=1)
+        messages: list[ModelMessage] = [*_pair('fn', 'tc1', 'x' * 400)]
+        rc = _make_request_context(messages)
+        result = await cap.before_model_request(_make_ctx(), rc)
+        assert _return_contents(result.messages) == ['[tool result cleared]']
+
+    @pytest.mark.anyio
+    async def test_no_tool_pairs_is_noop(self):
+        cap = ClearToolResults(max_messages=1, keep_pairs=0)
+        messages: list[ModelMessage] = [_user('a'), _assistant('b')]
+        rc = _make_request_context(messages)
+        result = await cap.before_model_request(_make_ctx(), rc)
+        assert result.messages == messages
+
+    @pytest.mark.anyio
+    async def test_idempotent(self):
+        cap = ClearToolResults(max_messages=1, keep_pairs=0, clear_tool_inputs=True)
+        call = ModelResponse(parts=[ToolCallPart(tool_name='fn', args='{"q": "x"}', tool_call_id='tc1')])
+        messages: list[ModelMessage] = [call, _tool_return('fn', 'tc1')]
+        ctx = _make_ctx()
+        once = await cap.compact(messages, ctx)
+        twice = await cap.compact(once, ctx)
+        assert _return_contents(twice) == ['[tool result cleared]']
+        assert _call_args(twice) == ['{}']
+
+
+# ---------------------------------------------------------------------------
+# DeduplicateFileReads
+# ---------------------------------------------------------------------------
+
+
+def _read_call(cid: str, path: str) -> ModelResponse:
+    return ModelResponse(parts=[ToolCallPart(tool_name='read_file', args={'path': path}, tool_call_id=cid)])
+
+
+def _read_return(cid: str, content: str) -> ModelRequest:
+    return ModelRequest(parts=[ToolReturnPart(tool_name='read_file', content=content, tool_call_id=cid)])
+
+
+def _file_key(call: ToolCallPart) -> str | None:
+    if call.tool_name != 'read_file':
+        return None
+    args = call.args
+    if isinstance(args, dict):
+        path = args.get('path')
+        return path if isinstance(path, str) else None
+    return None
+
+
+class TestDeduplicateFileReads:
+    def test_validation_negative_max_messages(self):
+        with pytest.raises(ValueError, match='max_messages must be positive'):
+            DeduplicateFileReads(file_key=_file_key, max_messages=0)
+
+    def test_validation_negative_max_tokens(self):
+        with pytest.raises(ValueError, match='max_tokens must be positive'):
+            DeduplicateFileReads(file_key=_file_key, max_tokens=-1)
+
+    @pytest.mark.anyio
+    async def test_keeps_latest_read(self):
+        cap = DeduplicateFileReads(file_key=_file_key)
+        messages: list[ModelMessage] = [
+            _read_call('tc1', 'a.py'),
+            _read_return('tc1', 'first a'),
+            _read_call('tc2', 'b.py'),
+            _read_return('tc2', 'b body'),
+            _read_call('tc3', 'a.py'),
+            _read_return('tc3', 'second a'),
+        ]
+        rc = _make_request_context(messages)
+        result = await cap.before_model_request(_make_ctx(), rc)
+        assert _return_contents(result.messages) == ['[superseded file read]', 'b body', 'second a']
+
+    @pytest.mark.anyio
+    async def test_non_file_read_ignored(self):
+        cap = DeduplicateFileReads(file_key=_file_key)
+        messages: list[ModelMessage] = [
+            *_pair('search', 'tc1'),
+            *_pair('search', 'tc2'),
+        ]
+        rc = _make_request_context(messages)
+        result = await cap.before_model_request(_make_ctx(), rc)
+        # search is not a file read -> file_key returns None -> nothing cleared.
+        assert _return_contents(result.messages) == ['result content here', 'result content here']
+
+    @pytest.mark.anyio
+    async def test_no_duplicates_is_noop(self):
+        cap = DeduplicateFileReads(file_key=_file_key)
+        messages: list[ModelMessage] = [
+            _read_call('tc1', 'a.py'),
+            _read_return('tc1', 'a body'),
+            _read_call('tc2', 'b.py'),
+            _read_return('tc2', 'b body'),
+        ]
+        rc = _make_request_context(messages)
+        result = await cap.before_model_request(_make_ctx(), rc)
+        assert result.messages == messages
+
+    @pytest.mark.anyio
+    async def test_runs_always_without_trigger(self):
+        cap = DeduplicateFileReads(file_key=_file_key)
+        messages: list[ModelMessage] = [
+            _read_call('tc1', 'a.py'),
+            _read_return('tc1', 'first'),
+            _read_call('tc2', 'a.py'),
+            _read_return('tc2', 'second'),
+        ]
+        rc = _make_request_context(messages)
+        result = await cap.before_model_request(_make_ctx(), rc)
+        assert _return_contents(result.messages) == ['[superseded file read]', 'second']
+
+    @pytest.mark.anyio
+    async def test_trigger_gate_not_exceeded(self):
+        cap = DeduplicateFileReads(file_key=_file_key, max_messages=100)
+        messages: list[ModelMessage] = [
+            _read_call('tc1', 'a.py'),
+            _read_return('tc1', 'first'),
+            _read_call('tc2', 'a.py'),
+            _read_return('tc2', 'second'),
+        ]
+        rc = _make_request_context(messages)
+        result = await cap.before_model_request(_make_ctx(), rc)
+        # Below the trigger threshold, so no dedup despite the duplicate.
+        assert result.messages == messages
+
+    @pytest.mark.anyio
+    async def test_trigger_gate_exceeded(self):
+        cap = DeduplicateFileReads(file_key=_file_key, max_messages=1)
+        messages: list[ModelMessage] = [
+            _read_call('tc1', 'a.py'),
+            _read_return('tc1', 'first'),
+            _read_call('tc2', 'a.py'),
+            _read_return('tc2', 'second'),
+        ]
+        rc = _make_request_context(messages)
+        result = await cap.before_model_request(_make_ctx(), rc)
+        assert _return_contents(result.messages) == ['[superseded file read]', 'second']
+
+
+# ---------------------------------------------------------------------------
+# TieredCompaction
+# ---------------------------------------------------------------------------
+
+
+@dataclasses.dataclass
+class _RecordingTier:
+    label: str
+    calls: list[str]
+    drop: int = 0
+
+    async def compact(self, messages: list[ModelMessage], ctx: Any) -> list[ModelMessage]:
+        self.calls.append(self.label)
+        return messages[self.drop :] if self.drop else messages
+
+
+class TestTieredCompaction:
+    def test_validation_empty_tiers(self):
+        with pytest.raises(ValueError, match='tiers must not be empty'):
+            TieredCompaction(tiers=[], target_tokens=10)
+
+    def test_validation_target_tokens(self):
+        with pytest.raises(ValueError, match='target_tokens must be positive'):
+            TieredCompaction(tiers=[ClearToolResults(max_messages=1)], target_tokens=0)
+
+    @pytest.mark.anyio
+    async def test_noop_under_target(self):
+        calls: list[str] = []
+        tier = _RecordingTier('t1', calls)
+        cap = TieredCompaction(tiers=[tier], target_tokens=1_000_000)
+        messages: list[ModelMessage] = [_user('x' * 40)]
+        rc = _make_request_context(messages)
+        result = await cap.before_model_request(_make_ctx(), rc)
+        assert result.messages == messages
+        assert calls == []
+
+    @pytest.mark.anyio
+    async def test_short_circuit_first_tier_suffices(self):
+        calls: list[str] = []
+        # Each message ~10 tokens; 5 messages = 50 tokens. Target 15.
+        t1 = _RecordingTier('t1', calls, drop=4)  # leaves 1 message (~10 tokens) <= 15
+        t2 = _RecordingTier('t2', calls, drop=0)
+        cap = TieredCompaction(tiers=[t1, t2], target_tokens=15)
+        messages: list[ModelMessage] = [_user('x' * 40) for _ in range(5)]
+        rc = _make_request_context(messages)
+        result = await cap.before_model_request(_make_ctx(), rc)
+        assert calls == ['t1']  # t2 never reached
+        assert len(result.messages) == 1
+
+    @pytest.mark.anyio
+    async def test_full_escalation(self):
+        calls: list[str] = []
+        t1 = _RecordingTier('t1', calls, drop=1)  # 5 -> 4 messages (~40 tokens) still > 15
+        t2 = _RecordingTier('t2', calls, drop=3)  # 4 -> 1 message
+        cap = TieredCompaction(tiers=[t1, t2], target_tokens=15)
+        messages: list[ModelMessage] = [_user('x' * 40) for _ in range(5)]
+        rc = _make_request_context(messages)
+        result = await cap.before_model_request(_make_ctx(), rc)
+        assert calls == ['t1', 't2']
+        assert len(result.messages) == 1
+
+    @pytest.mark.anyio
+    async def test_composes_real_strategies(self):
+        # ClearToolResults then SummarizingCompaction, driven by the orchestrator.
+        clear = ClearToolResults(max_messages=1, keep_pairs=0)
+        summarizer = SummarizingCompaction(
+            model='test:m', max_messages=1, keep_messages=1, preserve_first_user_message=False
+        )
+        cap = TieredCompaction(tiers=[clear, summarizer], target_tokens=1)
+        messages: list[ModelMessage] = [*_pair('fn', 'tc1', 'x' * 200), _user('latest')]
+        rc = _make_request_context(messages)
+
+        mock_result = AsyncMock()
+        mock_result.output = 'Tiered summary.'
+        with patch('pydantic_ai.Agent') as MockAgent:
+            mock_agent_instance = AsyncMock()
+            mock_agent_instance.run.return_value = mock_result
+            MockAgent.return_value = mock_agent_instance
+            result = await cap.before_model_request(_make_ctx(), rc)
+
+        first_msg = result.messages[0]
+        assert isinstance(first_msg, ModelRequest)
+        sys_parts = [p for p in first_msg.parts if isinstance(p, SystemPromptPart)]
+        assert any('Tiered summary.' in p.content for p in sys_parts)
+
+
+# ---------------------------------------------------------------------------
+# SummarizingCompaction — model inheritance + structured prompt
+# ---------------------------------------------------------------------------
+
+
+class TestSummarizingCompactionModel:
+    @pytest.mark.anyio
+    async def test_model_inherits_from_ctx_when_none(self):
+        comp = SummarizingCompaction(
+            max_messages=3, keep_messages=1, preserve_first_user_message=False, incremental=False
+        )
+        messages: list[ModelMessage] = [_user('a'), _assistant('b'), _user('c'), _assistant('d')]
+        rc = _make_request_context(messages)
+        ctx = _make_ctx()
+
+        mock_result = AsyncMock()
+        mock_result.output = 'Inherited-model summary.'
+        with patch('pydantic_ai.Agent') as MockAgent:
+            mock_agent_instance = AsyncMock()
+            mock_agent_instance.run.return_value = mock_result
+            MockAgent.return_value = mock_agent_instance
+            await comp.before_model_request(ctx, rc)
+
+        # The summarizer agent was constructed with the running agent's model.
+        assert MockAgent.call_args.args[0] is ctx.model
+        # And its usage is threaded into the parent run for honest accounting.
+        assert mock_agent_instance.run.call_args.kwargs['usage'] is ctx.usage
+
+    def test_default_prompt_has_structured_sections(self):
+        from pydantic_harness.compaction import _DEFAULT_SUMMARY_PROMPT
+
+        for heading in (
+            '## Intent',
+            '## Key decisions',
+            '## Artifacts',
+            '## Current state',
+            '## Next steps',
+            '## Open questions',
+        ):
+            assert heading in _DEFAULT_SUMMARY_PROMPT
+
+
+# ---------------------------------------------------------------------------
+# Public path — Agent(capabilities=[...])
+# ---------------------------------------------------------------------------
+
+
+class TestPublicPath:
+    @pytest.fixture
+    def anyio_backend(self) -> str:
+        # A full agent.run only needs to be exercised once; the trio backend hits a
+        # TestModel event-loop quirk in core unrelated to compaction.
+        return 'asyncio'
+
+    @pytest.mark.anyio
+    async def test_capabilities_wired_into_agent(self):
+        from pydantic_ai import Agent
+        from pydantic_ai.models.test import TestModel
+
+        agent = Agent(
+            TestModel(),
+            capabilities=[ClearToolResults(max_tokens=1, keep_pairs=0)],
+        )
+        result = await agent.run('hello')
+        assert result.output is not None
+
+
+# ---------------------------------------------------------------------------
+# Remaining branch coverage — defensive paths in shared helpers
+# ---------------------------------------------------------------------------
+
+
+class TestHelperBranchCoverage:
+    def test_prepend_returns_trimmed_when_first_user_not_discarded(self):
+        first = _user('task')
+        messages: list[ModelMessage] = [first, _assistant('a'), _user('b')]
+        # cutoff=0 -> first (idx 0) is not before the cut, so it is left as-is.
+        assert _prepend_first_user_message(messages, 0, messages) == messages
+
+    def test_extract_system_prompts_all_system_loop_completes(self):
+        msgs: list[ModelMessage] = [
+            ModelRequest(parts=[SystemPromptPart(content='a')]),
+            ModelRequest(parts=[SystemPromptPart(content='b')]),
+        ]
+        assert [p.content for p in _extract_system_prompts(msgs)] == ['a', 'b']
+
+    def test_collect_and_format_skip_unknown_part_types(self):
+        from pydantic_ai.messages import RetryPromptPart, ThinkingPart
+
+        msgs: list[ModelMessage] = [
+            ModelRequest(parts=[RetryPromptPart(content='retry')]),
+            ModelResponse(parts=[ThinkingPart(content='think')]),
+        ]
+        # Unknown part types contribute no countable text but exercise the skip branches.
+        assert estimate_token_count(msgs) == 0
+        assert _format_messages(msgs) == ''
+
+    def test_user_prompt_text_skips_non_text_content(self):
+        from pydantic_ai.messages import ImageUrl
+
+        part = UserPromptPart(content=[ImageUrl(url='https://example.com/y.png'), 'hello'])
+        msgs: list[ModelMessage] = [ModelRequest(parts=[part])]
+        assert estimate_token_count(msgs) == len('hello') // 4
+        assert 'hello' in _format_messages(msgs)
+
+
+class TestSummarizingCompactionPreserveBranches:
+    @pytest.mark.anyio
+    async def test_preserve_with_no_user_messages(self):
+        comp = SummarizingCompaction(
+            model='test:m', max_messages=2, keep_messages=1, preserve_first_user_message=True, incremental=False
+        )
+        messages: list[ModelMessage] = [_assistant('a'), _assistant('b'), _assistant('c')]
+        rc = _make_request_context(messages)
+        ctx = _make_ctx()
+
+        mock_result = AsyncMock()
+        mock_result.output = 'No-user summary.'
+        with patch('pydantic_ai.Agent') as MockAgent:
+            mock_agent_instance = AsyncMock()
+            mock_agent_instance.run.return_value = mock_result
+            MockAgent.return_value = mock_agent_instance
+            result = await comp.before_model_request(ctx, rc)
+
+        # Summary message + preserved tail, no first-user message prepended.
+        first_msg = result.messages[0]
+        assert isinstance(first_msg, ModelRequest)
+        assert any(isinstance(p, SystemPromptPart) and 'No-user summary.' in p.content for p in first_msg.parts)
+
+    @pytest.mark.anyio
+    async def test_preserve_when_first_user_already_in_tail(self):
+        comp = SummarizingCompaction(
+            model='test:m', max_messages=2, keep_messages=2, preserve_first_user_message=True, incremental=False
+        )
+        messages: list[ModelMessage] = [_assistant('x'), _assistant('y'), _user('only user'), _assistant('z')]
+        rc = _make_request_context(messages)
+        ctx = _make_ctx()
+
+        mock_result = AsyncMock()
+        mock_result.output = 'Tail summary.'
+        with patch('pydantic_ai.Agent') as MockAgent:
+            mock_agent_instance = AsyncMock()
+            mock_agent_instance.run.return_value = mock_result
+            MockAgent.return_value = mock_agent_instance
+            result = await comp.before_model_request(ctx, rc)
+
+        # The only user message is within the kept tail, so it is not duplicated.
+        user_count = sum(
+            1 for m in result.messages if isinstance(m, ModelRequest) for p in m.parts if isinstance(p, UserPromptPart)
+        )
+        assert user_count == 1

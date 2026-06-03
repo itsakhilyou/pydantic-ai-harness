@@ -99,4 +99,5 @@ exclude_lines = [
     'pragma: no cover',
     'assert_never',
     'if TYPE_CHECKING:',
+    '^\s*\.\.\.\s*$',
 ]

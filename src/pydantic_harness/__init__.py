@@ -7,10 +7,22 @@ Usage:
 # Each capability module is imported and re-exported here.
 # Capabilities are listed alphabetically.
 
-from pydantic_harness.compaction import Compaction, LimitWarner, SlidingWindow
+from pydantic_harness.compaction import (
+    ClearToolResults,
+    CompactionStrategy,
+    DeduplicateFileReads,
+    LimitWarner,
+    SlidingWindow,
+    SummarizingCompaction,
+    TieredCompaction,
+)
 
 __all__: list[str] = [
-    'Compaction',
+    'ClearToolResults',
+    'CompactionStrategy',
+    'DeduplicateFileReads',
     'LimitWarner',
     'SlidingWindow',
+    'SummarizingCompaction',
+    'TieredCompaction',
 ]
