@@ -1,4 +1,4 @@
-"""Tests for pydantic_harness.compaction capabilities."""
+"""Tests for pydantic_ai_harness.compaction capabilities."""
 
 from __future__ import annotations
 
@@ -20,14 +20,17 @@ from pydantic_ai.messages import (
 from pydantic_ai.models import ModelRequestContext, ModelRequestParameters
 from pydantic_ai.usage import RunUsage
 
-from pydantic_harness.compaction import (
-    _SUMMARY_PREFIX,
+from pydantic_ai_harness.compaction import (
     ClearToolResults,
     DeduplicateFileReads,
     LimitWarner,
     SlidingWindow,
     SummarizingCompaction,
     TieredCompaction,
+    estimate_token_count,
+)
+from pydantic_ai_harness.compaction._capability import (
+    _SUMMARY_PREFIX,
     _extract_previous_summary,
     _extract_system_prompts,
     _find_first_user_message,
@@ -37,7 +40,6 @@ from pydantic_harness.compaction import (
     _is_safe_cutoff,
     _iter_tool_pairs,
     _prepend_first_user_message,
-    estimate_token_count,
 )
 
 # ---------------------------------------------------------------------------
@@ -708,14 +710,14 @@ class TestExtractSystemPrompts:
 
 class TestExports:
     def test_package_exports(self):
-        import pydantic_harness
+        import pydantic_ai_harness
 
-        assert hasattr(pydantic_harness, 'SlidingWindow')
-        assert hasattr(pydantic_harness, 'LimitWarner')
-        assert hasattr(pydantic_harness, 'SummarizingCompaction')
-        assert hasattr(pydantic_harness, 'ClearToolResults')
-        assert hasattr(pydantic_harness, 'DeduplicateFileReads')
-        assert hasattr(pydantic_harness, 'TieredCompaction')
+        assert hasattr(pydantic_ai_harness, 'SlidingWindow')
+        assert hasattr(pydantic_ai_harness, 'LimitWarner')
+        assert hasattr(pydantic_ai_harness, 'SummarizingCompaction')
+        assert hasattr(pydantic_ai_harness, 'ClearToolResults')
+        assert hasattr(pydantic_ai_harness, 'DeduplicateFileReads')
+        assert hasattr(pydantic_ai_harness, 'TieredCompaction')
 
 
 # ---------------------------------------------------------------------------
@@ -1393,8 +1395,8 @@ def _return_contents(messages: list[ModelMessage]) -> list[str]:
     return out
 
 
-def _call_args(messages: list[ModelMessage]) -> list[str | dict[str, Any] | None]:
-    out: list[str | dict[str, Any] | None] = []
+def _call_args(messages: list[ModelMessage]) -> list[object]:
+    out: list[object] = []
     for m in messages:
         if isinstance(m, ModelResponse):
             for p in m.parts:
@@ -1761,7 +1763,7 @@ class TestSummarizingCompactionModel:
         assert mock_agent_instance.run.call_args.kwargs['usage'] is ctx.usage
 
     def test_default_prompt_has_structured_sections(self):
-        from pydantic_harness.compaction import _DEFAULT_SUMMARY_PROMPT
+        from pydantic_ai_harness.compaction._capability import _DEFAULT_SUMMARY_PROMPT
 
         for heading in (
             '## Intent',

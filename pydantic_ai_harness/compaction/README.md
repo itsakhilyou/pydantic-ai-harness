@@ -35,7 +35,7 @@ that is not enough — which is exactly what `TieredCompaction` encodes:
 
 ```python
 from pydantic_ai import Agent
-from pydantic_harness.compaction import (
+from pydantic_ai_harness.compaction import (
     ClearToolResults,
     DeduplicateFileReads,
     SummarizingCompaction,

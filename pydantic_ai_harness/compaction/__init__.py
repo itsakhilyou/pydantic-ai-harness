@@ -1,13 +1,6 @@
-"""Agent harness for composable, reusable AI agent capabilities, built on PydanticAI.
+"""Compaction capabilities: keep an agent's conversation history within the context window."""
 
-Usage:
-    from pydantic_harness import Memory, Skills, Guardrails, ...
-"""
-
-# Each capability module is imported and re-exported here.
-# Capabilities are listed alphabetically.
-
-from pydantic_harness.compaction import (
+from pydantic_ai_harness.compaction._capability import (
     ClearToolResults,
     CompactionStrategy,
     DeduplicateFileReads,
@@ -15,9 +8,11 @@ from pydantic_harness.compaction import (
     SlidingWindow,
     SummarizingCompaction,
     TieredCompaction,
+    WarningKind,
+    estimate_token_count,
 )
 
-__all__: list[str] = [
+__all__ = [
     'ClearToolResults',
     'CompactionStrategy',
     'DeduplicateFileReads',
@@ -25,4 +20,6 @@ __all__: list[str] = [
     'SlidingWindow',
     'SummarizingCompaction',
     'TieredCompaction',
+    'WarningKind',
+    'estimate_token_count',
 ]

@@ -129,7 +129,7 @@ class CompactionStrategy(Protocol[AgentDepsT]):
     tool-return pairing.
     """
 
-    async def compact(  # noqa: D102
+    async def compact(
         self,
         messages: list[ModelMessage],
         ctx: RunContext[AgentDepsT],
@@ -378,7 +378,7 @@ class SlidingWindow(AbstractCapability[AgentDepsT]):
     Example:
         ```python
         from pydantic_ai import Agent
-        from pydantic_harness.compaction import SlidingWindow
+        from pydantic_ai_harness.compaction import SlidingWindow
 
         agent = Agent(
             'openai:gpt-4o',
@@ -414,7 +414,7 @@ class SlidingWindow(AbstractCapability[AgentDepsT]):
     is always kept after trimming, in addition to system prompts.
     """
 
-    def __post_init__(self) -> None:  # noqa: D105
+    def __post_init__(self) -> None:
         if self.max_messages is None and self.max_tokens is None:
             raise ValueError('At least one of max_messages or max_tokens must be set.')
         if self.max_messages is not None and self.max_messages < 1:
@@ -483,7 +483,7 @@ class ClearToolResults(AbstractCapability[AgentDepsT]):
     Example:
         ```python
         from pydantic_ai import Agent
-        from pydantic_harness.compaction import ClearToolResults
+        from pydantic_ai_harness.compaction import ClearToolResults
 
         agent = Agent(
             'openai:gpt-4o',
@@ -523,7 +523,7 @@ class ClearToolResults(AbstractCapability[AgentDepsT]):
     When ``None``, uses a ~4 characters-per-token heuristic.
     """
 
-    def __post_init__(self) -> None:  # noqa: D105
+    def __post_init__(self) -> None:
         if self.max_messages is None and self.max_tokens is None:
             raise ValueError('At least one of max_messages or max_tokens must be set.')
         if self.max_messages is not None and self.max_messages < 1:
@@ -598,7 +598,7 @@ class DeduplicateFileReads(AbstractCapability[AgentDepsT]):
         ```python
         from pydantic_ai import Agent
         from pydantic_ai.messages import ToolCallPart
-        from pydantic_harness.compaction import DeduplicateFileReads
+        from pydantic_ai_harness.compaction import DeduplicateFileReads
 
 
         def file_key(call: ToolCallPart) -> str | None:
@@ -631,7 +631,7 @@ class DeduplicateFileReads(AbstractCapability[AgentDepsT]):
     When ``None``, uses a ~4 characters-per-token heuristic.
     """
 
-    def __post_init__(self) -> None:  # noqa: D105
+    def __post_init__(self) -> None:
         if self.max_messages is not None and self.max_messages < 1:
             raise ValueError('max_messages must be positive.')
         if self.max_tokens is not None and self.max_tokens < 1:
@@ -707,7 +707,7 @@ class LimitWarner(AbstractCapability[AgentDepsT]):
     Example:
         ```python
         from pydantic_ai import Agent
-        from pydantic_harness.compaction import LimitWarner
+        from pydantic_ai_harness.compaction import LimitWarner
 
         agent = Agent(
             'openai:gpt-4o',
@@ -739,7 +739,7 @@ class LimitWarner(AbstractCapability[AgentDepsT]):
 
     _active_kinds: tuple[WarningKind, ...] = field(default=(), init=False, repr=False)
 
-    def __post_init__(self) -> None:  # noqa: D105
+    def __post_init__(self) -> None:
         if self.max_iterations is not None and self.max_iterations <= 0:
             raise ValueError('max_iterations must be positive.')
         if self.max_context_tokens is not None and self.max_context_tokens <= 0:
@@ -1006,7 +1006,7 @@ class SummarizingCompaction(AbstractCapability[AgentDepsT]):
     Example:
         ```python
         from pydantic_ai import Agent
-        from pydantic_harness.compaction import SummarizingCompaction
+        from pydantic_ai_harness.compaction import SummarizingCompaction
 
         agent = Agent(
             'openai:gpt-4o',
@@ -1060,7 +1060,7 @@ class SummarizingCompaction(AbstractCapability[AgentDepsT]):
     summarization prompt so that it is extended rather than regenerated from scratch.
     """
 
-    def __post_init__(self) -> None:  # noqa: D105
+    def __post_init__(self) -> None:
         if self.max_messages is None and self.max_tokens is None:
             raise ValueError('At least one of max_messages or max_tokens must be set.')
         if self.max_messages is not None and self.max_messages < 1:
@@ -1163,7 +1163,7 @@ class TieredCompaction(AbstractCapability[AgentDepsT]):
     Example:
         ```python
         from pydantic_ai import Agent
-        from pydantic_harness.compaction import (
+        from pydantic_ai_harness.compaction import (
             ClearToolResults,
             SummarizingCompaction,
             TieredCompaction,
@@ -1195,7 +1195,7 @@ class TieredCompaction(AbstractCapability[AgentDepsT]):
     When ``None``, uses a ~4 characters-per-token heuristic.
     """
 
-    def __post_init__(self) -> None:  # noqa: D105
+    def __post_init__(self) -> None:
         if not self.tiers:
             raise ValueError('tiers must not be empty.')
         if self.target_tokens < 1:
