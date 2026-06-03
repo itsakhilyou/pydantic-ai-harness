@@ -73,6 +73,14 @@ from the edit point onward — the next request pays a cache-write. Use `ClearTo
 `SummarizingCompaction(model=...)` accepts a model name or `Model`; when left `None` it inherits the
 running agent's model. No token caps are imposed on the summary call.
 
+## Usage accounting
+
+The summary call is a real request to the model, so its full usage — tokens **and** the request
+itself — is folded into the run's `ctx.usage`. This is deliberate: it keeps cost honest, keeps the
+request count consistent (a model request that didn't count as one would be the surprise), and lets a
+`UsageLimits` request limit catch a runaway compaction. A run-request / iteration limiter will
+therefore see compaction calls among its requests.
+
 ## `DeduplicateFileReads.file_key`
 
 There is no default `file_key`: identifying a file read is agent-specific, and a wrong guess would
