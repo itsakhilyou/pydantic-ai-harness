@@ -1967,6 +1967,46 @@ class TestCodeModeOSAccess:
         with pytest.raises(ModelRetry, match='boom from os'):
             await wrapper.call_tool('run_code', {'code': "import os\nos.getenv('X')"}, ctx, tools['run_code'])
 
+    async def test_os_callback_returning_value_answers_call_including_none(self) -> None:
+        """Returning a value from the `os` callback -- even `None` -- *answers* the call.
+
+        Allow-listed keys resolve; every other key reads back as `None`, exactly like a real
+        unset env var, so the sandbox keeps running with no retry. This is how a callback hides
+        a secret: by answering with an empty value, not by refusing the call.
+        """
+        allowed = {'API_KEY': 'sk-xxx'}
+
+        def os_cb(fn: OsFunction, args: tuple[Any, ...], kwargs: dict[str, Any]) -> Any:
+            if fn == 'os.getenv':
+                return allowed.get(args[0])
+            return NOT_HANDLED  # pragma: no cover - sandbox only calls os.getenv here
+
+        wrapper = CodeMode[None](os_access=os_cb).get_wrapper_toolset(_build_function_toolset(add))
+        assert isinstance(wrapper, CodeModeToolset)
+        ctx = await build_ctx(None, wrapper)
+        tools = await wrapper.get_tools(ctx)
+        code = "import os\n{'allowed': os.getenv('API_KEY'), 'hidden': os.getenv('SECRET')}"
+        result = await wrapper.call_tool('run_code', {'code': code}, ctx, tools['run_code'])
+        assert result.return_value == {'allowed': 'sk-xxx', 'hidden': None}
+
+    async def test_os_callback_not_handled_refuses_call_as_model_retry(self) -> None:
+        """Returning `NOT_HANDLED` *refuses* the call rather than answering it.
+
+        The OS function is treated as unsupported, so it raises in the sandbox and surfaces as
+        `ModelRetry`. This is the counterpart to returning a value: refusing is not the same as
+        answering `None`, and using it for a key the model expects will burn retries.
+        """
+
+        def os_cb(fn: OsFunction, args: tuple[Any, ...], kwargs: dict[str, Any]) -> Any:
+            return NOT_HANDLED
+
+        wrapper = CodeMode[None](os_access=os_cb).get_wrapper_toolset(_build_function_toolset(add))
+        assert isinstance(wrapper, CodeModeToolset)
+        ctx = await build_ctx(None, wrapper)
+        tools = await wrapper.get_tools(ctx)
+        with pytest.raises(ModelRetry, match='not supported in this environment'):
+            await wrapper.call_tool('run_code', {'code': "import os\nos.getenv('X')"}, ctx, tools['run_code'])
+
     async def test_mount_exposes_host_directory(self, tmp_path: Path) -> None:
         """A `mount` exposes a host directory inside the sandbox, threaded through resumes."""
         (tmp_path / 'data.txt').write_text('hello-from-host')
