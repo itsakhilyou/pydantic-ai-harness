@@ -222,11 +222,13 @@ The value of the script's last expression becomes the `run_workflow` result — 
   it). The parent's own `usage_limits` on `run()` is **not** forwarded into sub-agents (`RunContext`
   doesn't expose it); it is re-checked only at the parent's request boundaries. Use `max_agent_calls`
   for an exact ceiling on sub-agent *runs*.
-- **`resource_limits`** — Monty limits on the *script's own* CPU and memory (default: 30s CPU,
-  256 MB). `max_duration_secs` counts only sandbox CPU, not time awaiting sub-agents, so a runaway
-  `while` loop is stopped without penalising slow sub-agents. Pass `'unlimited'` to remove all
-  limits; a partial dict (e.g. `{'max_memory': ...}`) is merged onto the backstop, overriding only
-  the caps it names and leaving the others at their default.
+- **`resource_limits`** — Monty limits on the *script's own* memory/allocations (default: 256 MB,
+  50M allocations). There is deliberately **no default `max_duration_secs`**: the sandbox's duration
+  timer counts total wall-clock *including* time awaiting sub-agents fanned out with `asyncio.gather`,
+  so a default cap would abort ordinary parallel workflows, not just a runaway. Set one explicitly to
+  bound a whole orchestration's runtime (it's also the only guard against a pure-CPU `while True`).
+  Pass `'unlimited'` to remove all limits; a partial dict (e.g. `{'max_memory': ...}`) is merged onto
+  the backstop, overriding only the caps it names and leaving the others at their default.
 - **Workflows do not nest.** A sub-agent that tries to start its own workflow is refused. Don't
   give the sub-agents in `agents` the `DynamicWorkflow` capability — they are leaves of the
   orchestration, not orchestrators.
@@ -267,7 +269,7 @@ DynamicWorkflow(
     max_retries=3,
     forward_usage=True,
     sub_agent_usage_limits=None,  # UsageLimits applied to each sub-agent run; None -> pydantic-ai default
-    resource_limits=None,    # None -> backstop (30s CPU, 256 MB); 'unlimited' -> off; dict -> merged onto backstop
+    resource_limits=None,    # None -> backstop (256 MB, 50M allocs, no time cap); 'unlimited' -> off; dict -> merged
     id=None,                 # required when defer_loading=True
     defer_loading=False,
 )

@@ -103,13 +103,16 @@ class DynamicWorkflow(AbstractCapability[AgentDepsT]):
     """
 
     resource_limits: WorkflowResourceLimits | Literal['unlimited'] | None = None
-    """Sandbox limits guarding the orchestration script's own CPU/memory.
+    """Sandbox limits guarding the orchestration script's own memory/allocations.
 
-    These bound the script itself (e.g. a runaway `while` loop), not sub-agent latency:
-    `max_duration_secs` counts only the sandbox's CPU time, not time awaiting sub-agents.
-    `None` applies a safe backstop (30s CPU, 256 MB); `'unlimited'` removes all limits; a
-    `WorkflowResourceLimits` mapping is merged onto the backstop, so a partial dict overrides only
-    the caps it names and leaves the others at their backstop value.
+    `None` applies a safe backstop (256 MB, 50M allocations) with no wall-clock cap; `'unlimited'`
+    removes all limits; a `WorkflowResourceLimits` mapping is merged onto the backstop, so a partial
+    dict overrides only the caps it names and leaves the others at their backstop value.
+
+    There is intentionally no default `max_duration_secs`: the sandbox's duration timer counts total
+    wall-clock — including time awaiting sub-agents fanned out with `asyncio.gather` — so a default
+    cap would abort ordinary parallel workflows, not just a runaway. Set one explicitly to bound a
+    whole orchestration's runtime (also the only guard against a pure-CPU `while True`).
     """
 
     @classmethod

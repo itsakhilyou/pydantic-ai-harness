@@ -48,9 +48,12 @@ class WorkflowResourceLimits(TypedDict, total=False):
     """
 
     max_duration_secs: float
-    """Maximum sandbox CPU seconds. Counts only the interpreter's own CPU time — not wall-clock,
-    and not time spent awaiting sub-agents — so a runaway loop is stopped without penalising slow
-    sub-agent calls."""
+    """Maximum total wall-clock seconds for the script — **including** time spent awaiting
+    sub-agents dispatched concurrently with `asyncio.gather` (the sandbox's duration timer accrues
+    across that suspension; it only excludes the wait for sub-agents awaited one at a time). There
+    is no default cap, because one would also kill ordinary parallel fan-out, not just a runaway.
+    Set this only to put a hard ceiling on a whole orchestration's runtime; it is also the only
+    guard against a pure-CPU `while True` loop, which otherwise blocks the event loop."""
 
     max_memory: int
     """Maximum sandbox memory, in bytes."""
@@ -60,14 +63,14 @@ class WorkflowResourceLimits(TypedDict, total=False):
 
 
 def _default_resource_limits() -> ResourceLimits:
-    """Backstop limits for the sandbox itself (not sub-agent latency).
+    """Backstop limits for the sandbox itself.
 
-    `max_duration_secs` measures only the sandbox interpreter's own CPU time — it
-    does not count time spent awaiting sub-agents — so a generous cap still stops a
-    runaway script (e.g. `while True`) without penalising slow sub-agent calls.
+    Caps memory and allocations to stop an accidental runaway that builds unbounded data.
+    Deliberately omits `max_duration_secs`: in the sandbox that limit counts total wall-clock,
+    including time suspended awaiting concurrently-gathered sub-agents, so a default cap would
+    abort ordinary parallel fan-out. Set `resource_limits` explicitly to add a wall-clock ceiling.
     """
     return {
-        'max_duration_secs': 30.0,
         'max_memory': 256 * 1024 * 1024,
         'max_allocations': 50_000_000,
     }
@@ -252,11 +255,12 @@ class DynamicWorkflowToolset(AbstractToolset[AgentDepsT]):
     them increments it). `None` keeps the default (`request_limit=50`, no token limit)."""
 
     resource_limits: WorkflowResourceLimits | Literal['unlimited'] | None = None
-    """Sandbox limits guarding the orchestration script's own CPU/memory (not sub-agents).
+    """Sandbox limits guarding the orchestration script's own memory/allocations (not sub-agents).
 
-    `None` applies a safe backstop (30s CPU, 256 MB); `'unlimited'` removes all limits; a
-    `WorkflowResourceLimits` mapping is merged onto the backstop, so a partial dict overrides only
-    the caps it names and the others keep their backstop value.
+    `None` applies a safe backstop (256 MB, 50M allocations) with no wall-clock cap; `'unlimited'`
+    removes all limits; a `WorkflowResourceLimits` mapping is merged onto the backstop, so a partial
+    dict overrides only the caps it names and the others keep their backstop value. See
+    `WorkflowResourceLimits.max_duration_secs` for why there is no default duration cap.
     """
 
     toolset_id: str | None = None
