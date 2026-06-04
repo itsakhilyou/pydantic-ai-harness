@@ -2,11 +2,9 @@
 
 from __future__ import annotations
 
-import asyncio
 import keyword
 import re
 import warnings
-from collections.abc import Callable, Coroutine
 from dataclasses import dataclass, field, replace
 from typing import Annotated, Any
 
@@ -26,18 +24,11 @@ except ImportError:  # pragma: no cover
 
 try:
     from pydantic_monty import (
-        ExternalException,
-        ExternalResult,
-        ExternalReturnValue,
-        FunctionSnapshot,
-        FutureSnapshot,
         Monty,
-        MontyComplete,
         MontyRepl,
         MontyRuntimeError,
         MontySyntaxError,
         MontyTypingError,
-        NameLookupSnapshot,
     )
 except ImportError as _import_error:  # pragma: no cover
     raise ImportError(
@@ -45,8 +36,8 @@ except ImportError as _import_error:  # pragma: no cover
     ) from _import_error
 from typing_extensions import NotRequired, TypedDict
 
-# Type alias for the dispatch callback passed to _execution_loop.
-_DispatchFn = Callable[[str, dict[str, Any]], Coroutine[Any, Any, Any]]
+from pydantic_ai_harness._monty_exec import MontyExecutor as _MontyExecutor
+from pydantic_ai_harness._monty_exec import PrintCapture as _PrintCapture
 
 
 class _RunCodeArguments(TypedDict):
@@ -400,18 +391,17 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
 
         try:
             monty_state = self._repl.feed_start(code, print_callback=capture)
-            completed = await _execution_loop(
-                monty_state,
+            completed = await _MontyExecutor(
                 dispatch=dispatch_tool_call,
-                callable_defs=callable_defs,
+                valid_names=callable_defs,
                 sanitized_to_original=sanitized_to_original,
-                sequential_tools=sequential_tools,
+                sequential_names=sequential_tools,
                 global_sequential=global_sequential,
-            )
+            ).run(monty_state)
         except MontySyntaxError as e:
-            raise ModelRetry(f'Syntax error in code:\n{_prepend_prints(e.display(), capture)}') from e
+            raise ModelRetry(f'Syntax error in code:\n{capture.prepend_to(e.display())}') from e
         except MontyTypingError as e:  # pragma: no cover — MontyRepl.feed_start doesn't raise this
-            raise ModelRetry(f'Type error in code:\n{_prepend_prints(e.display(), capture)}') from e
+            raise ModelRetry(f'Type error in code:\n{capture.prepend_to(e.display())}') from e
         except MontyRuntimeError as e:
             # Exceptions raised inside dispatch_tool_call (e.g. UserError from
             # ApprovalRequired, or ModelRetry from a wrapped tool) are passed
@@ -422,7 +412,7 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
             # ModelRetry from a wrapped tool gets double-wrapped
             # (ModelRetry → MontyRuntimeError → ModelRetry), but the retry
             # semantics are the same — the model gets another chance.
-            raise ModelRetry(f'Runtime error:\n{_prepend_prints(e.display(), capture)}') from e
+            raise ModelRetry(f'Runtime error:\n{capture.prepend_to(e.display())}') from e
 
         result = completed.output
         printed = capture.joined
@@ -571,179 +561,6 @@ def _get_sigs_and_conflicting(
     return sigs, FunctionSignature.get_conflicting_type_names(sigs)
 
 
-async def _execution_loop(
-    monty_state: FunctionSnapshot | FutureSnapshot | NameLookupSnapshot | MontyComplete,
-    *,
-    dispatch: _DispatchFn,
-    callable_defs: dict[str, ToolDefinition],
-    sanitized_to_original: dict[str, str],
-    sequential_tools: set[str],
-    global_sequential: bool,
-) -> MontyComplete:
-    """Drive the Monty REPL via the synchronous snapshot API until completion.
-
-    Uses Monty's `feed_start`/`resume` snapshot API instead of `feed_run_async`
-    to avoid background threads and `call_soon_threadsafe`. This makes it safe
-    to run inside restricted event loops like Temporal's workflow sandbox.
-
-    Tool calls are handled based on their execution mode:
-
-    - **Parallel tools** (`async def`): deferred via `resume({'future': ...})`
-      and eagerly scheduled as `asyncio.Task`s for concurrent execution.
-      Resolved at `FutureSnapshot` via `asyncio.gather`.
-    - **Sequential tools** (`def`): resolved inline at `FunctionSnapshot`
-      via `resume({'return_value': ...})` or `resume({'exception': ...})`. Before
-      dispatching, any pending parallel tasks are awaited to maintain ordering.
-    - **Global sequential mode** (DBOS/Temporal): all tools are deferred via
-      `resume({'future': ...})` but stored as bare coroutines and awaited
-      one-at-a-time at `FutureSnapshot` to prevent interleaving.
-    """
-    pending: dict[int, asyncio.Task[Any] | Coroutine[Any, Any, Any]] = {}
-    # Results from parallel tasks that were awaited early (at a sequential-tool
-    # barrier) but whose FutureSnapshot hasn't been reached yet.
-    pre_resolved: dict[int, ExternalResult] = {}
-    try:
-        while not isinstance(monty_state, MontyComplete):
-            if isinstance(monty_state, NameLookupSnapshot):
-                monty_state = monty_state.resume()
-            elif isinstance(monty_state, FunctionSnapshot):
-                monty_state = await _handle_function_snapshot(
-                    monty_state,
-                    dispatch,
-                    callable_defs,
-                    sanitized_to_original,
-                    sequential_tools=sequential_tools,
-                    global_sequential=global_sequential,
-                    pending=pending,
-                    pre_resolved=pre_resolved,
-                )
-            else:
-                monty_state = await _resolve_future_snapshot(
-                    monty_state,
-                    pending=pending,
-                    pre_resolved=pre_resolved,
-                    global_sequential=global_sequential,
-                )
-    finally:
-        for item in pending.values():  # pragma: no cover
-            if isinstance(item, asyncio.Task):
-                item.cancel()
-            else:
-                item.close()
-
-    return monty_state
-
-
-async def _handle_function_snapshot(
-    snapshot: FunctionSnapshot,
-    dispatch: _DispatchFn,
-    callable_defs: dict[str, ToolDefinition],
-    sanitized_to_original: dict[str, str],
-    *,
-    sequential_tools: set[str],
-    global_sequential: bool,
-    pending: dict[int, asyncio.Task[Any] | Coroutine[Any, Any, Any]],
-    pre_resolved: dict[int, ExternalResult],
-) -> FunctionSnapshot | FutureSnapshot | NameLookupSnapshot | MontyComplete:
-    """Handle a single FunctionSnapshot from the Monty execution loop."""
-    fn_name = snapshot.function_name
-
-    if fn_name not in callable_defs:
-        return snapshot.resume({'exception': NameError(f'Unknown function: {fn_name}')})
-
-    if snapshot.args:
-        return snapshot.resume(
-            {'exception': TypeError(f'{fn_name}() does not accept positional arguments; use keyword arguments')}
-        )
-
-    original_name = sanitized_to_original.get(fn_name, fn_name)
-
-    if fn_name in sequential_tools:
-        # Per-tool sequential: rendered as `def` (sync), so must resolve inline —
-        # the sandbox code doesn't `await` the result. Await pending parallel
-        # tasks first (barrier) to maintain ordering.
-        for cid in list(pending):
-            pre_resolved[cid] = await _resolve_coro(pending.pop(cid))
-        outcome = await _resolve_coro(dispatch(original_name, snapshot.kwargs))
-        if 'return_value' in outcome:
-            return snapshot.resume({'return_value': outcome['return_value']})
-        return snapshot.resume({'exception': outcome['exception']})
-
-    # Deferred execution — store for later resolution at FutureSnapshot.
-    if global_sequential:
-        # Bare coroutine — don't schedule on the event loop yet.
-        pending[snapshot.call_id] = dispatch(original_name, snapshot.kwargs)
-    else:
-        # Eagerly schedule as a Task for concurrent execution.
-        pending[snapshot.call_id] = asyncio.ensure_future(dispatch(original_name, snapshot.kwargs))
-    return snapshot.resume({'future': ...})
-
-
-async def _resolve_future_snapshot(
-    snapshot: FutureSnapshot,
-    *,
-    pending: dict[int, asyncio.Task[Any] | Coroutine[Any, Any, Any]],
-    pre_resolved: dict[int, ExternalResult],
-    global_sequential: bool,
-) -> FunctionSnapshot | FutureSnapshot | NameLookupSnapshot | MontyComplete:
-    """Resolve pending tool calls at a FutureSnapshot."""
-    pending_ids = snapshot.pending_call_ids
-    if not pending_ids:  # pragma: no cover
-        return snapshot.resume(results={})
-
-    results: dict[int, ExternalResult] = {}
-    for cid in pending_ids:
-        if cid in pre_resolved:
-            results[cid] = pre_resolved.pop(cid)
-        elif global_sequential:
-            results[cid] = await _resolve_coro(pending.pop(cid))
-
-    # Gather remaining parallel tasks.
-    gather_ids = [cid for cid in pending_ids if cid not in results]
-    if gather_ids:
-        tasks = [pending[cid] for cid in gather_ids]
-        settled = await asyncio.gather(*tasks, return_exceptions=True)
-        for cid in gather_ids:
-            del pending[cid]
-        for cid, outcome in zip(gather_ids, settled):
-            results[cid] = _settle_outcome(outcome)
-
-    return snapshot.resume(results=results)
-
-
-async def _resolve_coro(
-    coro: Coroutine[Any, Any, Any] | asyncio.Task[Any],
-) -> ExternalReturnValue | ExternalException:
-    """Await a single coroutine/task and wrap the result for Monty."""
-    try:
-        result = await coro
-    except Exception as exc:
-        return ExternalException(exception=exc)
-    else:
-        return ExternalReturnValue(return_value=result)
-
-
-def _settle_outcome(outcome: Any) -> ExternalReturnValue | ExternalException:
-    """Wrap an `asyncio.gather(return_exceptions=True)` outcome for Monty."""
-    if isinstance(outcome, Exception):
-        return ExternalException(exception=outcome)
-    if isinstance(outcome, BaseException):  # pragma: no cover
-        raise outcome
-    return ExternalReturnValue(return_value=outcome)
-
-
-def _prepend_prints(error_message: str, capture: _PrintCapture) -> str:
-    """Prepend any captured print output to an error message.
-
-    When sandbox code prints debug output before crashing, this preserves
-    that output in the error so the model can use it for debugging.
-    """
-    printed = capture.joined.rstrip('\n')
-    if not printed:
-        return error_message
-    return f'[stdout before error]\n{printed}\n[/stdout before error]\n{error_message}'
-
-
 def _contains_multimodal(value: Any) -> bool:
     """Check if a value is or directly contains multimodal content (images, audio, etc.)."""
     if is_multi_modal_content(value):
@@ -751,21 +568,3 @@ def _contains_multimodal(value: Any) -> bool:
     if isinstance(value, list):
         return any(is_multi_modal_content(item) for item in value)  # pyright: ignore[reportUnknownVariableType]
     return False
-
-
-class _PrintCapture:
-    """Accumulates print-callback chunks from the Monty REPL.
-
-    Pulled out to module scope (rather than a closure inside `call_tool`) so
-    the callback path is testable in isolation and visible to coverage.py.
-    """
-
-    def __init__(self) -> None:
-        self._chunks: list[str] = []
-
-    def __call__(self, _stream: str, text: str) -> None:
-        self._chunks.append(text)
-
-    @property
-    def joined(self) -> str:
-        return ''.join(self._chunks)
