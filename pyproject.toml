@@ -99,7 +99,6 @@ extend-select = ['Q', 'RUF100', 'C90', 'UP', 'I', 'D', 'TID251']
 
 [tool.ruff.lint.per-file-ignores]
 'tests/**/*.py' = ['D']
-'examples/**/*.py' = ['D']
 
 [tool.ruff.lint.flake8-quotes]
 inline-quotes = 'single'

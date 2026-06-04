@@ -20,10 +20,10 @@ prefix.
 
 These two examples show it working:
 
-| File | Runs | What it demonstrates |
-| --- | --- | --- |
-| [`dynamic_workflow_speculative_repair.py`](./dynamic_workflow_speculative_repair.py) | needs an Anthropic key | Typed handoffs, sub-agents with **confined capabilities**, **deferred loading**, **runtime sub-agent reveal** — a whole repair tournament in one tool call. |
-| [`dynamic_workflow_fork_and_resume.py`](./dynamic_workflow_fork_and_resume.py) | no key, no agents | The Monty foundation: **fork a live orchestration** from a 508-byte snapshot and **resume it across processes**. |
+| File | What it demonstrates |
+| --- | --- |
+| [`dynamic_workflow_speculative_repair.py`](./dynamic_workflow_speculative_repair.py) | Typed handoffs, sub-agents with **confined capabilities**, **deferred loading**, **runtime sub-agent reveal** — a whole repair tournament in one tool call. |
+| [`dynamic_workflow_fork_and_resume.py`](./dynamic_workflow_fork_and_resume.py) | The Monty foundation: **fork a live orchestration** from a 508-byte snapshot and **resume it across processes**. |
 
 ## Example 1 — a self-verifying repair tournament
 

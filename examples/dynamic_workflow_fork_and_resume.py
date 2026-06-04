@@ -89,6 +89,7 @@ def best_of_n(snapshot: bytes, strategies: dict[str, int]) -> dict[str, int]:
 
 
 def main() -> None:
+    """Drive the prefix once, fork it into best-of-N branches, then resume from a fresh load."""
     snapshot = drive_prefix()
     print(f'snapshot at the decision point: {len(snapshot)} bytes')
     print(f'prefix executed: {prefix_runs["n"]} time (the expensive context built once)')
