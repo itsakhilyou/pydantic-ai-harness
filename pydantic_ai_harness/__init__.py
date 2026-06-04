@@ -4,30 +4,11 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from .code_mode import CodeMode
-    from .compaction import (
-        ClearToolResults,
-        DeduplicateFileReads,
-        LimitWarner,
-        SlidingWindow,
-        SummarizingCompaction,
-        TieredCompaction,
-    )
     from .filesystem import FileSystem
     from .logfire import ManagedPrompt
     from .shell import Shell
 
-__all__ = [
-    'ClearToolResults',
-    'CodeMode',
-    'DeduplicateFileReads',
-    'FileSystem',
-    'LimitWarner',
-    'ManagedPrompt',
-    'Shell',
-    'SlidingWindow',
-    'SummarizingCompaction',
-    'TieredCompaction',
-]
+__all__ = ['CodeMode', 'FileSystem', 'ManagedPrompt', 'Shell']
 
 
 def __getattr__(name: str) -> object:
@@ -47,15 +28,4 @@ def __getattr__(name: str) -> object:
         from .shell import Shell
 
         return Shell
-    if name in {
-        'ClearToolResults',
-        'DeduplicateFileReads',
-        'LimitWarner',
-        'SlidingWindow',
-        'SummarizingCompaction',
-        'TieredCompaction',
-    }:
-        from . import compaction
-
-        return getattr(compaction, name)
     raise AttributeError(f'module {__name__!r} has no attribute {name!r}')

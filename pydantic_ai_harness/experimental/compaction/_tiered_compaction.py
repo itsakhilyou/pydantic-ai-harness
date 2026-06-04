@@ -11,7 +11,7 @@ from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.messages import ModelMessage
 from pydantic_ai.tools import RunContext
 
-from pydantic_ai_harness.compaction._shared import CompactionStrategy, estimate_token_count
+from pydantic_ai_harness.experimental.compaction._shared import CompactionStrategy, estimate_token_count
 
 if TYPE_CHECKING:
     from pydantic_ai.models import ModelRequestContext
@@ -32,7 +32,7 @@ class TieredCompaction(AbstractCapability[AgentDepsT]):
     Example:
         ```python
         from pydantic_ai import Agent
-        from pydantic_ai_harness.compaction import (
+        from pydantic_ai_harness.experimental.compaction import (
             ClearToolResults,
             SummarizingCompaction,
             TieredCompaction,

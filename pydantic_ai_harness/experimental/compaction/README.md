@@ -1,5 +1,24 @@
 # Compaction capabilities
 
+> [!WARNING]
+> **Experimental.** These capabilities live under `pydantic_ai_harness.experimental` and may
+> change or be removed in any release, without a deprecation period. Import them from the
+> experimental path — there is no top-level export:
+>
+> ```python
+> from pydantic_ai_harness.experimental.compaction import TieredCompaction
+> ```
+>
+> Importing any experimental capability emits a `HarnessExperimentalWarning`. Silence **all**
+> harness experimental warnings with a single filter (no per-capability lines needed):
+>
+> ```python
+> import warnings
+> from pydantic_ai_harness.experimental import HarnessExperimentalWarning
+>
+> warnings.filterwarnings('ignore', category=HarnessExperimentalWarning)
+> ```
+
 A menu of strategies for keeping an agent's conversation history within a model's context
 window. Each is a Pydantic AI `Capability` that runs in the `before_model_request` hook; edits
 **persist** into the run's message history, so a trim/clear/summary carries forward to later
@@ -35,7 +54,7 @@ that is not enough — which is exactly what `TieredCompaction` encodes:
 
 ```python
 from pydantic_ai import Agent
-from pydantic_ai_harness.compaction import (
+from pydantic_ai_harness.experimental.compaction import (
     ClearToolResults,
     DeduplicateFileReads,
     SummarizingCompaction,

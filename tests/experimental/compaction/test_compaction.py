@@ -1,4 +1,4 @@
-"""Tests for pydantic_ai_harness.compaction capabilities."""
+"""Tests for pydantic_ai_harness.experimental.compaction capabilities."""
 
 from __future__ import annotations
 
@@ -20,7 +20,7 @@ from pydantic_ai.messages import (
 from pydantic_ai.models import ModelRequestContext, ModelRequestParameters
 from pydantic_ai.usage import RunUsage
 
-from pydantic_ai_harness.compaction import (
+from pydantic_ai_harness.experimental.compaction import (
     ClearToolResults,
     DeduplicateFileReads,
     LimitWarner,
@@ -29,7 +29,7 @@ from pydantic_ai_harness.compaction import (
     TieredCompaction,
     estimate_token_count,
 )
-from pydantic_ai_harness.compaction._shared import (
+from pydantic_ai_harness.experimental.compaction._shared import (
     _is_safe_cutoff,
     find_first_user_message,
     find_safe_cutoff,
@@ -37,7 +37,7 @@ from pydantic_ai_harness.compaction._shared import (
     iter_tool_pairs,
     prepend_first_user_message,
 )
-from pydantic_ai_harness.compaction._summarizing_compaction import (
+from pydantic_ai_harness.experimental.compaction._summarizing_compaction import (
     _SUMMARY_PREFIX,
     _extract_previous_summary,
     _extract_system_prompts,
@@ -312,20 +312,7 @@ class TestSlidingWindow:
         ctx = _make_ctx()
         result = await sw.before_model_request(ctx, rc)
         # Should not split the tool pair.
-        remaining = result.messages
-        call_ids: set[str] = set()
-        return_ids: set[str] = set()
-        for msg in remaining:
-            if isinstance(msg, ModelResponse):
-                for part in msg.parts:
-                    if isinstance(part, ToolCallPart) and part.tool_call_id:
-                        call_ids.add(part.tool_call_id)
-            else:
-                for part in msg.parts:
-                    if isinstance(part, ToolReturnPart):
-                        return_ids.add(part.tool_call_id)
-        # Every call ID in remaining must have its return.
-        assert call_ids <= return_ids
+        assert _orphan_free(result.messages)
 
     @pytest.mark.anyio
     async def test_keep_tokens_mode(self):
@@ -584,19 +571,7 @@ class TestCompaction:
             result = await comp.before_model_request(ctx, rc)
 
         # Tool pairs in remaining messages should be intact.
-        remaining = result.messages
-        call_ids: set[str] = set()
-        return_ids: set[str] = set()
-        for msg in remaining:
-            if isinstance(msg, ModelResponse):
-                for part in msg.parts:
-                    if isinstance(part, ToolCallPart) and part.tool_call_id:
-                        call_ids.add(part.tool_call_id)
-            else:
-                for part in msg.parts:
-                    if isinstance(part, ToolReturnPart):
-                        return_ids.add(part.tool_call_id)
-        assert call_ids <= return_ids
+        assert _orphan_free(result.messages)
 
     @pytest.mark.anyio
     async def test_compaction_token_trigger(self):
@@ -711,15 +686,23 @@ class TestExtractSystemPrompts:
 
 
 class TestExports:
-    def test_package_exports(self):
+    def test_exposed_under_experimental_only(self):
         import pydantic_ai_harness
+        import pydantic_ai_harness.experimental.compaction as compaction
 
-        assert hasattr(pydantic_ai_harness, 'SlidingWindow')
-        assert hasattr(pydantic_ai_harness, 'LimitWarner')
-        assert hasattr(pydantic_ai_harness, 'SummarizingCompaction')
-        assert hasattr(pydantic_ai_harness, 'ClearToolResults')
-        assert hasattr(pydantic_ai_harness, 'DeduplicateFileReads')
-        assert hasattr(pydantic_ai_harness, 'TieredCompaction')
+        names = [
+            'SlidingWindow',
+            'ClearToolResults',
+            'DeduplicateFileReads',
+            'LimitWarner',
+            'SummarizingCompaction',
+            'TieredCompaction',
+        ]
+        for name in names:
+            # Available from the experimental package...
+            assert hasattr(compaction, name)
+            # ...and deliberately NOT from the top-level namespace.
+            assert not hasattr(pydantic_ai_harness, name)
 
 
 # ---------------------------------------------------------------------------
@@ -1094,13 +1077,7 @@ class TestPreserveFirstUserMessage:
         result = await sw.before_model_request(ctx, rc)
         # The first user message ('original task') should be preserved even though
         # it was outside the keep window.
-        user_contents: list[str] = []
-        for msg in result.messages:
-            if isinstance(msg, ModelRequest):
-                for part in msg.parts:
-                    if isinstance(part, UserPromptPart) and isinstance(part.content, str):
-                        user_contents.append(part.content)
-        assert 'original task' in user_contents
+        assert 'original task' in _user_texts(result.messages)
 
     @pytest.mark.anyio
     async def test_sliding_window_no_duplicate_when_in_window(self):
@@ -1132,13 +1109,7 @@ class TestPreserveFirstUserMessage:
         ctx = _make_ctx()
         result = await sw.before_model_request(ctx, rc)
         assert len(result.messages) == 1
-        user_contents: list[str] = []
-        for msg in result.messages:
-            if isinstance(msg, ModelRequest):
-                for part in msg.parts:
-                    if isinstance(part, UserPromptPart) and isinstance(part.content, str):
-                        user_contents.append(part.content)
-        assert 'original' not in user_contents
+        assert 'original' not in _user_texts(result.messages)
 
     @pytest.mark.anyio
     async def test_compaction_preserves_first_user(self):
@@ -1405,6 +1376,53 @@ def _call_args(messages: list[ModelMessage]) -> list[object]:
                 if isinstance(p, ToolCallPart):
                     out.append(p.args)
     return out
+
+
+def _user_texts(messages: list[ModelMessage]) -> list[str]:
+    out: list[str] = []
+    for m in messages:
+        if isinstance(m, ModelRequest):
+            for p in m.parts:
+                if isinstance(p, UserPromptPart) and isinstance(p.content, str):
+                    out.append(p.content)
+    return out
+
+
+def _orphan_free(messages: list[ModelMessage]) -> bool:
+    """True if every kept tool return has its matching tool call among *messages*."""
+    call_ids: set[str] = set()
+    return_ids: set[str] = set()
+    for m in messages:
+        if isinstance(m, ModelResponse):
+            for p in m.parts:
+                if isinstance(p, ToolCallPart) and p.tool_call_id:
+                    call_ids.add(p.tool_call_id)
+        else:
+            for p in m.parts:
+                if isinstance(p, ToolReturnPart):
+                    return_ids.add(p.tool_call_id)
+    return return_ids <= call_ids
+
+
+class TestHelperCoverage:
+    """Exercise every branch of the shared test-collection helpers with one diverse input."""
+
+    def test_collection_helpers(self):
+        msgs: list[ModelMessage] = [
+            ModelRequest(parts=[SystemPromptPart(content='s'), UserPromptPart(content='u')]),
+            ModelResponse(parts=[TextPart(content='t'), ToolCallPart(tool_name='fn', args='{}', tool_call_id='c1')]),
+            _tool_return('fn', 'c1', 'r'),
+        ]
+        assert _user_texts(msgs) == ['u']
+        assert _return_contents(msgs) == ['r']
+        assert _call_args(msgs) == ['{}']
+        assert _orphan_free(msgs)
+
+    def test_file_key_edges(self):
+        assert _file_key(ToolCallPart(tool_name='other', args={}, tool_call_id='c')) is None
+        assert _file_key(ToolCallPart(tool_name='read_file', args='not-a-dict', tool_call_id='c')) is None
+        assert _file_key(ToolCallPart(tool_name='read_file', args={'path': 123}, tool_call_id='c')) is None
+        assert _file_key(ToolCallPart(tool_name='read_file', args={'path': 'p.py'}, tool_call_id='c')) == 'p.py'
 
 
 # ---------------------------------------------------------------------------
@@ -1765,7 +1783,7 @@ class TestSummarizingCompactionModel:
         assert mock_agent_instance.run.call_args.kwargs['usage'] is ctx.usage
 
     def test_default_prompt_has_structured_sections(self):
-        from pydantic_ai_harness.compaction._summarizing_compaction import _DEFAULT_SUMMARY_PROMPT
+        from pydantic_ai_harness.experimental.compaction._summarizing_compaction import _DEFAULT_SUMMARY_PROMPT
 
         for heading in (
             '## Intent',

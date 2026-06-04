@@ -10,7 +10,7 @@ from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.messages import ModelMessage, ModelRequest, SystemPromptPart, UserPromptPart
 from pydantic_ai.tools import RunContext
 
-from pydantic_ai_harness.compaction._shared import estimate_token_count
+from pydantic_ai_harness.experimental.compaction._shared import estimate_token_count
 
 if TYPE_CHECKING:
     from pydantic_ai.models import ModelRequestContext
@@ -43,7 +43,7 @@ class LimitWarner(AbstractCapability[AgentDepsT]):
     Example:
         ```python
         from pydantic_ai import Agent
-        from pydantic_ai_harness.compaction import LimitWarner
+        from pydantic_ai_harness.experimental.compaction import LimitWarner
 
         agent = Agent(
             'openai:gpt-4o',

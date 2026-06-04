@@ -20,7 +20,7 @@ from pydantic_ai.messages import (
 )
 from pydantic_ai.tools import RunContext
 
-from pydantic_ai_harness.compaction._shared import (
+from pydantic_ai_harness.experimental.compaction._shared import (
     exceeds,
     find_first_user_message,
     find_safe_cutoff,
@@ -150,7 +150,7 @@ class SummarizingCompaction(AbstractCapability[AgentDepsT]):
     Example:
         ```python
         from pydantic_ai import Agent
-        from pydantic_ai_harness.compaction import SummarizingCompaction
+        from pydantic_ai_harness.experimental.compaction import SummarizingCompaction
 
         agent = Agent(
             'openai:gpt-4o',

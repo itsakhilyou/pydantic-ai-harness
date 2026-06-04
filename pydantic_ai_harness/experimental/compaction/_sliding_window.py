@@ -11,7 +11,7 @@ from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.messages import ModelMessage
 from pydantic_ai.tools import RunContext
 
-from pydantic_ai_harness.compaction._shared import (
+from pydantic_ai_harness.experimental.compaction._shared import (
     exceeds,
     find_safe_cutoff,
     find_token_cutoff,
@@ -36,7 +36,7 @@ class SlidingWindow(AbstractCapability[AgentDepsT]):
     Example:
         ```python
         from pydantic_ai import Agent
-        from pydantic_ai_harness.compaction import SlidingWindow
+        from pydantic_ai_harness.experimental.compaction import SlidingWindow
 
         agent = Agent(
             'openai:gpt-4o',

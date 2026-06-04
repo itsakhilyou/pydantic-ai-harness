@@ -11,7 +11,7 @@ from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.messages import ModelMessage
 from pydantic_ai.tools import RunContext
 
-from pydantic_ai_harness.compaction._shared import (
+from pydantic_ai_harness.experimental.compaction._shared import (
     estimate_token_count,
     exceeds,
     iter_tool_pairs,
@@ -42,7 +42,7 @@ class ClearToolResults(AbstractCapability[AgentDepsT]):
     Example:
         ```python
         from pydantic_ai import Agent
-        from pydantic_ai_harness.compaction import ClearToolResults
+        from pydantic_ai_harness.experimental.compaction import ClearToolResults
 
         agent = Agent(
             'openai:gpt-4o',

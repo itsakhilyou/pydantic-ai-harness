@@ -11,7 +11,7 @@ from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.messages import ModelMessage, ToolCallPart
 from pydantic_ai.tools import RunContext
 
-from pydantic_ai_harness.compaction._shared import exceeds, iter_tool_pairs, rebuild_with_cleared
+from pydantic_ai_harness.experimental.compaction._shared import exceeds, iter_tool_pairs, rebuild_with_cleared
 
 if TYPE_CHECKING:
     from pydantic_ai.models import ModelRequestContext
@@ -34,7 +34,7 @@ class DeduplicateFileReads(AbstractCapability[AgentDepsT]):
         ```python
         from pydantic_ai import Agent
         from pydantic_ai.messages import ToolCallPart
-        from pydantic_ai_harness.compaction import DeduplicateFileReads
+        from pydantic_ai_harness.experimental.compaction import DeduplicateFileReads
 
 
         def file_key(call: ToolCallPart) -> str | None:
