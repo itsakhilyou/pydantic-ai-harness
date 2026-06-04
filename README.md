@@ -26,11 +26,11 @@ uv add pydantic-ai-harness
 Extras for specific capabilities:
 
 ```bash
-uv add "pydantic-ai-harness[codemode]"   # CodeMode (adds the Monty sandbox)
+uv add "pydantic-ai-harness[code-mode]"   # CodeMode (adds the Monty sandbox)
 uv add "pydantic-ai-harness[logfire]"     # ManagedPrompt (Logfire-managed prompts)
 ```
 
-The `code-mode` extra is also supported as an alias.
+The `codemode` extra is also supported as an alias.
 
 Requires Python 3.10+ and `pydantic-ai-slim>=1.95.1`.
 
