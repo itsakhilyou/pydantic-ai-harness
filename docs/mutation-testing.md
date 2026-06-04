@@ -4,7 +4,8 @@ Mutation testing complements the 100% branch-coverage requirement: coverage
 proves every line and branch runs, mutation testing proves the assertions
 actually pin the behavior down.
 
-Covers `pydantic_ai_harness/filesystem/_toolset.py` and
+Covers `pydantic_ai_harness/filesystem/_toolset.py`,
+`pydantic_ai_harness/filesystem/_ripgrep.py`, and
 `pydantic_ai_harness/shell/_toolset.py`.
 
 Run with [mutmut](https://mutmut.readthedocs.io/) v3 via `scripts/run-mutmut.sh`,
@@ -35,6 +36,10 @@ survivor; the recurring equivalent-mutant categories in this codebase are:
   can't be triggered in the test environment.
 - **`CancelScope(shield=True)` flips** — require an outer cancellation during
   the near-instant cleanup window.
+- **ripgrep-path breaks masked by the fallback** — `search_files` falls back to
+  the pure-Python backend whenever ripgrep fails, so a mutation that only breaks
+  the `rg` invocation produces identical output via the fallback. The `rg`
+  command is pinned directly by `TestRipgrepProtocol` in `tests/filesystem/`.
 
 Anything outside these categories should be treated as a real gap and killed
 with a new test.

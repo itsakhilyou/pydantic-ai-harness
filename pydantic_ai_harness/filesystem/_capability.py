@@ -56,6 +56,17 @@ class FileSystem(AbstractCapability[AgentDepsT]):
     max_find_results: int = 1000
     """Maximum number of matches returned by `find_files`."""
 
+    use_ripgrep: bool | None = None
+    """Backend for `search_files` content search.
+
+    `None` (default) auto-detects: ripgrep is used when an `rg` binary is on
+    `PATH` (via the `ripgrep` extra or a system install), otherwise a pure-Python
+    search runs. `True` forces ripgrep and raises if it is unavailable; `False`
+    always uses the pure-Python search. Both backends are confined to `root_dir`
+    and return the same results for text files (they differ only on binary
+    detection for files with a NUL byte past the first 8 KB; see the README).
+    """
+
     def __post_init__(self) -> None:
         # Runtime validation: dataclass field annotations are advisory, not enforced.
         # A config-driven caller could pass a string that would otherwise propagate.
@@ -78,4 +89,5 @@ class FileSystem(AbstractCapability[AgentDepsT]):
             max_read_lines=self.max_read_lines,
             max_search_results=self.max_search_results,
             max_find_results=self.max_find_results,
+            use_ripgrep=self.use_ripgrep,
         )

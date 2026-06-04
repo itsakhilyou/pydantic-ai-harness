@@ -101,10 +101,53 @@ FileSystem(
     max_read_lines=2000,           # cap for a single read_file
     max_search_results=1000,       # cap for search_files
     max_find_results=1000,         # cap for find_files
+    use_ripgrep=None,              # None=auto, True=require, False=pure-Python
 )
 ```
 
 The integer limits must be positive; they are validated at construction.
+
+## ripgrep-backed search (optional)
+
+`search_files` has two backends: a pure-Python walker (always available, the
+default, and the behavioral reference) and a ripgrep backend that shells out to
+the `rg` binary, which is typically faster on large trees. Install the optional
+extra to enable it (it pulls in a bundled `rg`; a system `rg` on `PATH` also
+works):
+
+```bash
+uv add "pydantic-ai-harness[ripgrep]"
+```
+
+`use_ripgrep` selects the backend:
+
+| Value | Behavior |
+|---|---|
+| `None` (default) | Use ripgrep if an `rg` binary is on `PATH`, otherwise pure Python. |
+| `True` | Require ripgrep; raise at construction if it is unavailable. |
+| `False` | Always use pure Python. |
+
+Both backends are confined to `root_dir` and apply the same filters, so for a
+given pattern they return the same results for text files:
+
+- ripgrep runs with `root_dir` as its working directory on a target inside the
+  root and does not follow symlinks; each result's path is containment-checked
+  again before the file is read.
+- The dotfile, allow/deny/protected, and `include_glob` filters run on ripgrep's
+  results just as on the pure-Python walk, and `--no-ignore` stops ripgrep from
+  honoring `.gitignore` (which the pure-Python walk also ignores), so both walk
+  the same files.
+
+The one difference is binary detection: the pure-Python walker samples the first
+8 KB of a file for a NUL byte, while ripgrep scans the whole file. A file with a
+NUL byte beyond the first 8 KB is therefore searched by the pure-Python backend
+but skipped by ripgrep.
+
+Only `search_files` uses ripgrep. The pattern is validated with Python's `re`
+first, so an invalid regex is rejected the same way in both backends. Matching
+then uses ripgrep's regex engine, which differs from `re` for some constructs
+(for example, lookaround needs a PCRE2-enabled `rg`); when ripgrep rejects a
+pattern that `re` accepts, the search falls back to pure Python.
 
 ## Agent spec (YAML/JSON)
 

@@ -7,7 +7,7 @@ import functools
 import hashlib
 import os
 import re
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Iterable, Iterator, Sequence
 from pathlib import Path
 from typing import Concatenate, ParamSpec
 
@@ -15,7 +15,12 @@ from pydantic_ai.exceptions import ModelRetry
 from pydantic_ai.tools import AgentDepsT
 from pydantic_ai.toolsets import FunctionToolset
 
+from pydantic_ai_harness.filesystem._ripgrep import RipgrepError, resolve_ripgrep_enabled, ripgrep_file_matches
+
 _P = ParamSpec('_P')
+
+# A file's search hits: its path and the (line_number, line_text) pairs that matched.
+_FileMatches = tuple[str, list[tuple[int, str]]]
 
 # Errors that mean "the model asked for something the tool couldn't do" — a
 # missing file, a denied path, a stale edit. pyai only feeds `ModelRetry` back
@@ -94,6 +99,7 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
         max_read_lines: int,
         max_search_results: int,
         max_find_results: int,
+        use_ripgrep: bool | None = None,
     ) -> None:
         super().__init__()
         self._root = root_dir.resolve()
@@ -104,6 +110,7 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
         self._max_read_lines = max_read_lines
         self._max_search_results = max_search_results
         self._max_find_results = max_find_results
+        self._use_ripgrep = resolve_ripgrep_enabled(use_ripgrep)
 
         self.add_function(self.read_file, name='read_file')
         self.add_function(self.write_file, name='write_file')
@@ -373,30 +380,40 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
         except re.error as e:
             raise ValueError(f'Invalid regex pattern: {e}') from e
 
+        # The regex is compiled with Python's engine above so an invalid pattern
+        # is rejected the same way regardless of backend. ripgrep then re-matches
+        # with its own engine; a pattern it rejects but Python accepts (e.g.
+        # lookaround) falls back below, so the backend choice never changes output.
+        if self._use_ripgrep:
+            try:
+                return self._format_matches(await self._ripgrep_matches(resolved, pattern, include_glob))
+            except RipgrepError:
+                pass
+        return self._format_matches(self._python_matches(resolved, compiled, include_glob))
+
+    def _format_matches(self, per_file: Iterable[_FileMatches]) -> str:
+        """Render and truncate match groups: the shared output of both backends."""
         results: list[str] = []
+        for rel_str, line_matches in per_file:
+            results.extend(f'{rel_str}:{line_num}:{line}' for line_num, line in line_matches)
+            if len(results) >= self._max_search_results:
+                results.append(f'[... truncated at {self._max_search_results} matches]')
+                break
+        return '\n'.join(results) if results else 'No matches found.'
 
-        if resolved.is_file():
-            files = [resolved]
-        else:
-            files = sorted(resolved.rglob('*'))
-
-        real_root = Path(os.path.realpath(self._root))
+    def _python_matches(
+        self, resolved: Path, compiled: re.Pattern[str], include_glob: str | None
+    ) -> Iterator[_FileMatches]:
+        """Walk the tree in Python, yielding matches per file: the reference backend."""
+        files = [resolved] if resolved.is_file() else sorted(resolved.rglob('*'))
         for file_path in files:
             if not file_path.is_file():
                 continue
             try:
-                rel_parts = file_path.relative_to(real_root).parts
+                rel_str = str(file_path.relative_to(self._real_root))
             except ValueError:  # pragma: no cover
                 continue
-            if any(part.startswith('.') for part in rel_parts):
-                continue
-            rel_str = str(file_path.relative_to(real_root))
-            # Apply the same allow/deny/protected filtering used for direct
-            # access so a recursive search can't read patterns the agent
-            # couldn't otherwise read.
-            if not self._is_accessible(rel_str, write=True):
-                continue
-            if include_glob and not fnmatch.fnmatch(rel_str, include_glob):
+            if not self._is_searchable_entry(rel_str, include_glob):
                 continue
             try:
                 raw = file_path.read_bytes()
@@ -405,14 +422,49 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
             if _is_binary(raw):
                 continue
             text = raw.decode('utf-8', errors='replace')
-            for line_num, line in enumerate(text.splitlines(), start=1):
-                if compiled.search(line):
-                    results.append(f'{rel_str}:{line_num}:{line}')
-            if len(results) >= self._max_search_results:
-                results.append(f'[... truncated at {self._max_search_results} matches]')
-                break
+            line_matches = [(n, line) for n, line in enumerate(text.splitlines(), start=1) if compiled.search(line)]
+            if line_matches:
+                yield rel_str, line_matches
 
-        return '\n'.join(results) if results else 'No matches found.'
+    async def _ripgrep_matches(self, resolved: Path, pattern: str, include_glob: str | None) -> list[_FileMatches]:
+        """Delegate matching to ripgrep, returning matches per file.
+
+        ripgrep finds the files and line numbers (skipping binaries itself); each
+        result is run through the same filters as `_python_matches`, and the line
+        text is re-read via the containment-checked `_resolve_path` so the output
+        matches the fallback.
+        """
+        target = resolved.relative_to(self._real_root)
+        groups: list[_FileMatches] = []
+        for rel_path, line_numbers in await ripgrep_file_matches(root=self._real_root, target=target, pattern=pattern):
+            rel_str = str(rel_path)
+            if not self._is_searchable_entry(rel_str, include_glob):
+                continue
+            try:
+                text = self._resolve_path(rel_str).read_text(encoding='utf-8', errors='replace')
+            except OSError:  # pragma: no cover  # file vanished between the search and the read
+                continue
+            # read_text translates CRLF/CR to LF, so splitting on '\n' matches
+            # ripgrep's line numbering with no trailing carriage returns. A line
+            # past EOF means a concurrent write shrank the file after ripgrep
+            # scanned it; drop it rather than crash.
+            lines = text.split('\n')
+            groups.append((rel_str, [(n, lines[n - 1]) for n in line_numbers if n <= len(lines)]))
+        return groups
+
+    def _is_searchable_entry(self, rel_str: str, include_glob: str | None) -> bool:
+        """Shared per-file filter for both search backends.
+
+        Skips dotfiles, applies allow/deny/protected patterns (so a search can't
+        read what direct access couldn't), and honors `include_glob`.
+        """
+        if any(part.startswith('.') for part in Path(rel_str).parts):
+            return False
+        if not self._is_accessible(rel_str, write=True):
+            return False
+        if include_glob and not fnmatch.fnmatch(rel_str, include_glob):
+            return False
+        return True
 
     @_recoverable
     async def find_files(self, pattern: str, *, path: str = '.') -> str:
