@@ -29,17 +29,19 @@ from pydantic_ai_harness.compaction import (
     TieredCompaction,
     estimate_token_count,
 )
-from pydantic_ai_harness.compaction._capability import (
+from pydantic_ai_harness.compaction._shared import (
+    _is_safe_cutoff,
+    find_first_user_message,
+    find_safe_cutoff,
+    find_token_cutoff,
+    iter_tool_pairs,
+    prepend_first_user_message,
+)
+from pydantic_ai_harness.compaction._summarizing_compaction import (
     _SUMMARY_PREFIX,
     _extract_previous_summary,
     _extract_system_prompts,
-    _find_first_user_message,
-    _find_safe_cutoff,
-    _find_token_cutoff,
     _format_messages,
-    _is_safe_cutoff,
-    _iter_tool_pairs,
-    _prepend_first_user_message,
 )
 
 # ---------------------------------------------------------------------------
@@ -176,23 +178,23 @@ class TestIsSafeCutoff:
 
 
 # ---------------------------------------------------------------------------
-# _find_safe_cutoff
+# find_safe_cutoff
 # ---------------------------------------------------------------------------
 
 
 class TestFindSafeCutoff:
     def test_keep_zero_returns_length(self):
         msgs: list[ModelMessage] = [_user('a'), _assistant('b')]
-        assert _find_safe_cutoff(msgs, 0) == 2
+        assert find_safe_cutoff(msgs, 0) == 2
 
     def test_fewer_messages_than_keep(self):
         msgs: list[ModelMessage] = [_user('a')]
-        assert _find_safe_cutoff(msgs, 5) == 0
+        assert find_safe_cutoff(msgs, 5) == 0
 
     def test_normal_cutoff(self):
         msgs: list[ModelMessage] = [_user('a'), _assistant('b'), _user('c'), _assistant('d')]
         # Keep 2 => target cutoff is 2.
-        assert _find_safe_cutoff(msgs, 2) == 2
+        assert find_safe_cutoff(msgs, 2) == 2
 
     def test_adjusts_for_tool_pair(self):
         msgs: list[ModelMessage] = [
@@ -204,27 +206,27 @@ class TestFindSafeCutoff:
         ]
         # Keep 3 => target cutoff is 2, but that splits the tool pair.
         # Should adjust to 1 (keep tool call and return together).
-        cutoff = _find_safe_cutoff(msgs, 3)
+        cutoff = find_safe_cutoff(msgs, 3)
         assert cutoff == 1
 
 
 # ---------------------------------------------------------------------------
-# _find_token_cutoff
+# find_token_cutoff
 # ---------------------------------------------------------------------------
 
 
 class TestFindTokenCutoff:
     def test_already_within_budget(self):
         msgs: list[ModelMessage] = [_user('hi')]
-        assert _find_token_cutoff(msgs, 999999) == 0
+        assert find_token_cutoff(msgs, 999999) == 0
 
     def test_empty(self):
-        assert _find_token_cutoff([], 100) == 0
+        assert find_token_cutoff([], 100) == 0
 
     def test_trims_to_budget(self):
         # Each message contributes ~3 tokens (12 chars / 4).
         msgs: list[ModelMessage] = [_user('x' * 12) for _ in range(20)]
-        cutoff = _find_token_cutoff(msgs, 30)  # Budget for ~10 messages.
+        cutoff = find_token_cutoff(msgs, 30)  # Budget for ~10 messages.
         assert cutoff > 0
         remaining = msgs[cutoff:]
         assert estimate_token_count(remaining) <= 30
@@ -240,7 +242,7 @@ class TestFindTokenCutoff:
         ]
         # messages[2:] = 8 tokens (fits), messages[1:] = 12 (does not) -> candidate is 2,
         # which splits the pair, so it walks back to 1.
-        assert _find_token_cutoff(msgs, 8, tokenizer=len) == 1
+        assert find_token_cutoff(msgs, 8, tokenizer=len) == 1
 
 
 # ---------------------------------------------------------------------------
@@ -1042,11 +1044,11 @@ class TestTokenizerParameter:
         sys_parts = [p for p in first_msg.parts if isinstance(p, SystemPromptPart)]
         assert any('Token summary.' in p.content for p in sys_parts)
 
-    def test_find_token_cutoff_with_tokenizer(self):
-        """_find_token_cutoff should use the tokenizer."""
+    def testfind_token_cutoff_with_tokenizer(self):
+        """find_token_cutoff should use the tokenizer."""
         messages: list[ModelMessage] = [_user('abcde') for _ in range(10)]
         # Tokenizer: 1 token per char. Each message = 5 tokens.
-        cutoff = _find_token_cutoff(messages, 15, tokenizer=lambda s: len(s))
+        cutoff = find_token_cutoff(messages, 15, tokenizer=lambda s: len(s))
         remaining = messages[cutoff:]
         assert estimate_token_count(remaining, tokenizer=lambda s: len(s)) <= 15
 
@@ -1059,23 +1061,23 @@ class TestTokenizerParameter:
 class TestPreserveFirstUserMessage:
     """Tests for the preserve_first_user_message parameter."""
 
-    def test_find_first_user_message_found(self):
+    def testfind_first_user_message_found(self):
         msgs: list[ModelMessage] = [
             ModelRequest(parts=[SystemPromptPart(content='sys')]),
             _user('first'),
             _user('second'),
         ]
-        result = _find_first_user_message(msgs)
+        result = find_first_user_message(msgs)
         assert result is not None
         assert isinstance(result.parts[0], UserPromptPart)
         assert result.parts[0].content == 'first'
 
-    def test_find_first_user_message_none(self):
+    def testfind_first_user_message_none(self):
         msgs: list[ModelMessage] = [
             ModelRequest(parts=[SystemPromptPart(content='sys')]),
             _assistant('hello'),
         ]
-        assert _find_first_user_message(msgs) is None
+        assert find_first_user_message(msgs) is None
 
     @pytest.mark.anyio
     async def test_sliding_window_preserves_first_user(self):
@@ -1406,7 +1408,7 @@ def _call_args(messages: list[ModelMessage]) -> list[object]:
 
 
 # ---------------------------------------------------------------------------
-# _iter_tool_pairs
+# iter_tool_pairs
 # ---------------------------------------------------------------------------
 
 
@@ -1419,7 +1421,7 @@ class TestIterToolPairs:
             _tool_call('g', 'g1'),
             _tool_return('g', 'g1'),
         ]
-        pairs = _iter_tool_pairs(msgs)
+        pairs = iter_tool_pairs(msgs)
         assert [p.tool_call_id for p in pairs] == ['g1']
         assert pairs[0].tool_name == 'g'
         assert pairs[0].order == 0
@@ -1763,7 +1765,7 @@ class TestSummarizingCompactionModel:
         assert mock_agent_instance.run.call_args.kwargs['usage'] is ctx.usage
 
     def test_default_prompt_has_structured_sections(self):
-        from pydantic_ai_harness.compaction._capability import _DEFAULT_SUMMARY_PROMPT
+        from pydantic_ai_harness.compaction._summarizing_compaction import _DEFAULT_SUMMARY_PROMPT
 
         for heading in (
             '## Intent',
@@ -1811,7 +1813,7 @@ class TestHelperBranchCoverage:
         first = _user('task')
         messages: list[ModelMessage] = [first, _assistant('a'), _user('b')]
         # cutoff=0 -> first (idx 0) is not before the cut, so it is left as-is.
-        assert _prepend_first_user_message(messages, 0, messages) == messages
+        assert prepend_first_user_message(messages, 0, messages) == messages
 
     def test_extract_system_prompts_all_system_loop_completes(self):
         msgs: list[ModelMessage] = [
