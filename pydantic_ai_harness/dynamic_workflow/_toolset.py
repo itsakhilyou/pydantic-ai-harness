@@ -8,6 +8,7 @@ and composes their results — fan-out, chaining, voting, loops — in one step.
 from __future__ import annotations
 
 import contextvars
+import keyword
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from typing import Annotated, Any, Generic
@@ -16,6 +17,7 @@ from pydantic import Field, TypeAdapter
 from pydantic_ai import AbstractToolset, RunContext, ToolDefinition
 from pydantic_ai.agent.abstract import AbstractAgent
 from pydantic_ai.exceptions import ModelRetry, UserError
+from pydantic_ai.function_signature import FunctionSignature
 from pydantic_ai.tools import AgentDepsT
 from pydantic_ai.toolsets.abstract import SchemaValidatorProt, ToolsetTool
 from pydantic_core import to_jsonable_python
@@ -85,10 +87,32 @@ The value of the script's last expression is captured as the result — do **not
 """
 
 
+def _is_valid_sandbox_name(name: str) -> bool:
+    """Whether `name` can be exposed as a sandbox function: a non-keyword Python identifier.
+
+    `str.isidentifier()` alone is not enough — Python keywords (`for`, `class`, `async`, ...) are
+    valid identifiers but cannot be used as function names, so the model could never call them.
+    Callers guard the empty/`None` case before this is reached.
+    """
+    return name.isidentifier() and not keyword.iskeyword(name)
+
+
+# Every sub-agent is exposed with the same fixed signature — `(*, task: str) -> Any` — so build it once
+# and render each catalog entry through core's `FunctionSignature` (the renderer code_mode and
+# Pydantic AI already use). This keeps the catalog format consistent across capabilities, forces
+# keyword-only `task` to match `dispatch` (which reads `kwargs['task']`), and renders docstrings
+# safely — a hand-rolled f-string breaks on a newline or a quote inside a description.
+_SUB_AGENT_PARAMS_SCHEMA: dict[str, Any] = {
+    'type': 'object',
+    'properties': {'task': {'type': 'string'}},
+    'required': ['task'],
+}
+_SUB_AGENT_SIGNATURE = FunctionSignature.from_schema(name='_', parameters_schema=_SUB_AGENT_PARAMS_SCHEMA)
+
+
 def _render_agent_block(name: str, description: str | None) -> str:
     """Render one sub-agent as the async function signature shown to the model."""
-    body = f'    """{description}"""' if description else '    ...'
-    return f'async def {name}(task: str) -> Any:\n{body}'
+    return _SUB_AGENT_SIGNATURE.render('...', name=name, description=description, is_async=True)
 
 
 def _render_catalog(catalog: Mapping[str, str | None]) -> str:
@@ -199,10 +223,10 @@ class DynamicWorkflowToolset(AbstractToolset[AgentDepsT]):
                     'DynamicWorkflow sub-agent has no `name` and its agent has no `name`; '
                     'set `WorkflowAgent(name=...)` so it can be exposed as a sandbox function.'
                 )
-            if not name.isidentifier():
+            if not _is_valid_sandbox_name(name):
                 raise UserError(
-                    f'DynamicWorkflow sub-agent name {name!r} is not a valid Python identifier, '
-                    'so it cannot be exposed as a sandbox function. Rename it.'
+                    f'DynamicWorkflow sub-agent name {name!r} cannot be exposed as a sandbox function: '
+                    'it must be a Python identifier that is not a reserved keyword. Rename it.'
                 )
             if name in self._by_name:
                 raise UserError(f'DynamicWorkflow has two sub-agents named {name!r}; names must be unique.')
@@ -237,7 +261,7 @@ class DynamicWorkflowToolset(AbstractToolset[AgentDepsT]):
         """
         for entry in tuple(self.agents):
             name = entry.resolved_name
-            if not name or not name.isidentifier() or name in self._by_name:
+            if not name or not _is_valid_sandbox_name(name) or name in self._by_name:
                 continue
             self._by_name[name] = entry
             ctx.enqueue(_render_reveal(name, entry.description or entry.agent.name, self.tool_name))

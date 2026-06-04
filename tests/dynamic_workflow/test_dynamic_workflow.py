@@ -149,8 +149,15 @@ def test_workflow_agent_resolved_name() -> None:
 
 
 def test_invalid_identifier_name_raises() -> None:
-    with pytest.raises(UserError, match='not a valid Python identifier'):
+    with pytest.raises(UserError, match='cannot be exposed as a sandbox function'):
         DynamicWorkflowToolset[None](agents=[WorkflowAgent(agent=_sub_agent(), name='bad-name')])
+
+
+def test_keyword_name_raises() -> None:
+    # `'class'.isidentifier()` is True, but a Python keyword can't be a sandbox function name —
+    # the model could never call it (`await class(...)` is a syntax error). Reject it up front.
+    with pytest.raises(UserError, match='cannot be exposed as a sandbox function'):
+        DynamicWorkflowToolset[None](agents=[WorkflowAgent(agent=_sub_agent(), name='class')])
 
 
 def test_empty_agents_raises() -> None:
@@ -177,7 +184,7 @@ async def test_description_lists_agents_as_functions(make_agent: MakeAgent) -> N
     tools = await ts.get_tools(_ctx())
     desc = tools['run_workflow'].tool_def.description
     assert desc is not None
-    assert 'async def reviewer(task: str) -> Any:' in desc
+    assert 'async def reviewer(*, task: str) -> Any:' in desc
 
 
 async def test_descriptions_override(make_agent: MakeAgent) -> None:
@@ -196,7 +203,7 @@ async def test_custom_tool_name(make_agent: MakeAgent) -> None:
 
 def test_render_catalog_without_description() -> None:
     out = _render_catalog({'sub': None})
-    assert 'async def sub(task: str) -> Any:' in out
+    assert 'async def sub(*, task: str) -> Any:' in out
     assert '    ...' in out
 
 
@@ -429,7 +436,7 @@ async def test_runtime_reveal_announces_and_makes_callable(make_agent: MakeAgent
     agents.append(make_agent('extra-out', 'extra'))
     await ts.get_tools(ctx)
     assert set(ts._by_name) == {'base', 'extra'}  # pyright: ignore[reportPrivateUsage]
-    assert 'async def extra(task: str) -> Any:' in _enqueued_text(ctx)
+    assert 'async def extra(*, task: str) -> Any:' in _enqueued_text(ctx)
 
     out = await _run_script(ts, "await extra(task='x')", ctx)
     assert out == 'extra-out'
@@ -504,7 +511,7 @@ async def test_reveal_end_to_end_via_agent_run() -> None:
                 for p in m.parts
                 if isinstance(p, UserPromptPart) and isinstance(p.content, str)
             )
-            saw_announcement.append('async def extra(task: str)' in user_text)
+            saw_announcement.append('async def extra(*, task: str)' in user_text)
             return ModelResponse(
                 parts=[ToolCallPart(tool_name='run_workflow', args={'code': "await extra(task='go')"})]
             )
