@@ -1805,8 +1805,8 @@ class TestToolSearchIntegration:
 
     async def test_tool_search_toolset_discovered_tool_in_run_code(self) -> None:
         """End-to-end: once `search_tools` has discovered the deferred tool, it folds into `run_code`."""
-        from pydantic_ai.messages import ModelRequest, ToolSearchReturnPart
-        from pydantic_ai.toolsets._tool_search import ToolSearchToolset
+        from pydantic_ai.messages import ModelMessage, ModelRequest, ToolSearchReturnPart
+        from pydantic_ai.toolsets._tool_search import ToolSearchToolset, parse_discovered_tools
 
         def later(x: int) -> str:
             """A deferred-loading tool."""
@@ -1815,23 +1815,27 @@ class TestToolSearchIntegration:
         base = FunctionToolset[None](tools=[Tool(add), Tool(later, defer_loading=True)])
         code_mode = CodeModeToolset(wrapped=ToolSearchToolset(wrapped=base), tool_selector='all')
 
+        # The discovery lives in history as a `ToolSearchReturnPart`. The agent run loop derives
+        # `RunContext.discovered_tool_names` from that history (via `parse_discovered_tools`) before
+        # toolsets run, and `ToolSearchToolset.get_tools` reads the field — so the context must be
+        # built the same way here, not with the field left empty.
+        messages: list[ModelMessage] = [
+            ModelRequest(
+                parts=[
+                    ToolSearchReturnPart(
+                        content={'discovered_tools': [{'name': 'later', 'description': 'A deferred-loading tool.'}]},
+                        tool_call_id='search-1',
+                    )
+                ]
+            )
+        ]
         ctx = RunContext[None](
             deps=None,
             model=TestModel(),
             usage=RunUsage(),
             prompt=None,
-            messages=[
-                ModelRequest(
-                    parts=[
-                        ToolSearchReturnPart(
-                            content={
-                                'discovered_tools': [{'name': 'later', 'description': 'A deferred-loading tool.'}]
-                            },
-                            tool_call_id='search-1',
-                        )
-                    ]
-                )
-            ],
+            messages=messages,
+            discovered_tool_names=parse_discovered_tools(messages),
             run_step=1,
         )
         tools = await code_mode.get_tools(ctx)
