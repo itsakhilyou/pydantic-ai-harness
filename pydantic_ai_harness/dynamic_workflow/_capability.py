@@ -2,14 +2,18 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
 from dataclasses import dataclass
+from typing import Literal
 
 from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.tools import AgentDepsT
-from pydantic_monty import ResourceLimits
+from pydantic_ai.usage import UsageLimits
 
-from pydantic_ai_harness.dynamic_workflow._toolset import DynamicWorkflowToolset, WorkflowAgent
+from pydantic_ai_harness.dynamic_workflow._toolset import (
+    DynamicWorkflowToolset,
+    WorkflowAgent,
+    WorkflowResourceLimits,
+)
 
 
 @dataclass(kw_only=True)
@@ -39,28 +43,30 @@ class DynamicWorkflow(AbstractCapability[AgentDepsT]):
     ```
 
     Sub-agents run as isolated runs (their own message history). The parent's `deps`
-    are forwarded, and by default the parent's `usage` is shared so a parent
-    `usage_limits` bounds the whole agent tree. An exact `max_agent_calls` ceiling is
-    enforced host-side, and workflows do not nest — a sub-agent invoked from a workflow
-    cannot start its own.
+    are forwarded, and by default the parent's `usage` accumulator is shared so the whole
+    tree's token and request spend is tallied in one place. For a hard cap on sub-agent
+    runs, use the exact, host-enforced `max_agent_calls` ceiling — a shared `usage_limits`
+    is best-effort (see `forward_usage`). Workflows do not nest — a sub-agent invoked from
+    a workflow cannot start its own.
 
     Set `defer_loading=True` (with a stable `id`) to keep the orchestration tool and
     its sub-agent catalog out of the prompt until the model loads the capability —
     paying near-zero tokens on turns that don't need it.
     """
 
-    agents: Sequence[WorkflowAgent[AgentDepsT]]
+    agents: list[WorkflowAgent[AgentDepsT]]
     """Sub-agents the orchestration script can call as async functions.
 
     Each `WorkflowAgent` bundles the agent with its sandbox function name (a valid
     Python identifier, unique across the workflow) and an optional catalog description.
 
-    Pass a mutable `list` to reveal sub-agents at runtime: appending a `WorkflowAgent` mid-run
-    (the host holds the list, typically via `deps`) makes it callable on the next step. The
-    newcomer is announced to the model via an enqueued message, while the `run_workflow`
-    description stays frozen at the agents present when the run started — so the prompt-cache
-    prefix never changes. Requires a `PendingMessageDrainCapability` in the run (auto-injected
-    by Pydantic AI) so the announcement drains into the conversation.
+    A `list` (not a read-only `Sequence`) because the host can keep a reference to it and append
+    a `WorkflowAgent` mid-run to reveal it: it becomes callable on the next step, announced to the
+    model via an enqueued message, while the `run_workflow` description stays frozen at the agents
+    present when the run started — so the prompt-cache prefix never changes. Requires a
+    `PendingMessageDrainCapability` in the run (auto-injected by Pydantic AI) so the announcement
+    drains into the conversation. Reveal is **append-only**: a revealed sub-agent cannot be removed
+    or hidden again for the rest of the run — plan the catalog as monotonically growing.
     """
 
     tool_name: str = 'run_workflow'
@@ -76,19 +82,34 @@ class DynamicWorkflow(AbstractCapability[AgentDepsT]):
     """Maximum retries for the orchestration tool (syntax/runtime errors count as retries)."""
 
     forward_usage: bool = True
-    """Share the parent run's `usage` with sub-agents so `usage_limits` bounds the tree.
+    """Share the parent run's `usage` accumulator with sub-agents, so the whole tree's token
+    and request spend is tallied in one place.
 
-    Note: a shared `usage_limits` is best-effort under concurrent fan-out (sub-agents
-    can pass the limit check before any of them increments it); use `max_agent_calls`
-    for an exact ceiling.
+    This does **not** forward the parent's configured `usage_limits` into sub-agent runs
+    (`RunContext` does not expose the limit value): set `sub_agent_usage_limits` to bound
+    sub-agents, and the parent re-checks its own `usage_limits` at its own request boundaries.
+    Use `max_agent_calls` for an exact ceiling on sub-agent runs.
     """
 
-    resource_limits: ResourceLimits | None = None
-    """Monty sandbox limits guarding the orchestration script's own CPU/memory.
+    sub_agent_usage_limits: UsageLimits | None = None
+    """`UsageLimits` applied to every sub-agent run, replacing pydantic-ai's default.
+
+    Each sub-agent run is sequential, so its own limits are enforced exactly. With
+    `forward_usage=False`, a per-sub-agent `total_tokens_limit` of `T` together with
+    `max_agent_calls` of `N` bound the whole agent tree to at most `N * T` tokens — a hard
+    ceiling. With `forward_usage=True` the limit is checked against the shared counter instead,
+    a tree-wide cap that is best-effort under concurrent fan-out. `None` keeps the default
+    (`request_limit=50`, no token limit).
+    """
+
+    resource_limits: WorkflowResourceLimits | Literal['unlimited'] | None = None
+    """Sandbox limits guarding the orchestration script's own CPU/memory.
 
     These bound the script itself (e.g. a runaway `while` loop), not sub-agent latency:
     `max_duration_secs` counts only the sandbox's CPU time, not time awaiting sub-agents.
-    `None` applies a safe backstop (30s CPU, 256 MB); pass `{}` to disable all limits.
+    `None` applies a safe backstop (30s CPU, 256 MB); `'unlimited'` removes all limits; a
+    `WorkflowResourceLimits` mapping is merged onto the backstop, so a partial dict overrides only
+    the caps it names and leaves the others at their backstop value.
     """
 
     @classmethod
@@ -104,6 +125,7 @@ class DynamicWorkflow(AbstractCapability[AgentDepsT]):
             max_agent_calls=self.max_agent_calls,
             max_retries=self.max_retries,
             forward_usage=self.forward_usage,
+            sub_agent_usage_limits=self.sub_agent_usage_limits,
             resource_limits=self.resource_limits,
             toolset_id=self.id,
         )

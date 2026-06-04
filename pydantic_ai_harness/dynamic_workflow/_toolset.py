@@ -9,9 +9,9 @@ from __future__ import annotations
 
 import contextvars
 import keyword
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
-from typing import Annotated, Any, Generic
+from typing import Annotated, Any, Generic, Literal
 
 from pydantic import Field, TypeAdapter
 from pydantic_ai import AbstractToolset, RunContext, ToolDefinition
@@ -20,6 +20,7 @@ from pydantic_ai.exceptions import ModelRetry, UserError
 from pydantic_ai.function_signature import FunctionSignature
 from pydantic_ai.tools import AgentDepsT
 from pydantic_ai.toolsets.abstract import SchemaValidatorProt, ToolsetTool
+from pydantic_ai.usage import UsageLimits
 from pydantic_core import to_jsonable_python
 from typing_extensions import TypedDict
 
@@ -38,6 +39,26 @@ from pydantic_ai_harness._monty_exec import MontyExecutor, PrintCapture
 _in_workflow: contextvars.ContextVar[bool] = contextvars.ContextVar('pydantic_ai_harness_in_workflow', default=False)
 
 
+class WorkflowResourceLimits(TypedDict, total=False):
+    """Caps on the orchestration script's own sandbox resources (not sub-agent latency).
+
+    A harness-owned view of the sandbox limits the capability supports, so the public API does
+    not depend on the underlying sandbox's own types. Every field is optional; an omitted field
+    keeps its backstop value.
+    """
+
+    max_duration_secs: float
+    """Maximum sandbox CPU seconds. Counts only the interpreter's own CPU time — not wall-clock,
+    and not time spent awaiting sub-agents — so a runaway loop is stopped without penalising slow
+    sub-agent calls."""
+
+    max_memory: int
+    """Maximum sandbox memory, in bytes."""
+
+    max_allocations: int
+    """Maximum number of sandbox allocations."""
+
+
 def _default_resource_limits() -> ResourceLimits:
     """Backstop limits for the sandbox itself (not sub-agent latency).
 
@@ -50,6 +71,22 @@ def _default_resource_limits() -> ResourceLimits:
         'max_memory': 256 * 1024 * 1024,
         'max_allocations': 50_000_000,
     }
+
+
+def _resolve_resource_limits(limits: WorkflowResourceLimits | Literal['unlimited'] | None) -> ResourceLimits:
+    """Resolve the public `resource_limits` value to the limits handed to the sandbox.
+
+    - `None` → the safe backstop (`_default_resource_limits`).
+    - `'unlimited'` → no limits at all (an empty mapping).
+    - a `WorkflowResourceLimits` mapping → merged *onto* the backstop, so a partial dict overrides
+      only the caps it names and the others keep their backstop value (a `{'max_memory': ...}`
+      never silently drops the duration backstop).
+    """
+    if limits is None:
+        return _default_resource_limits()
+    if isinstance(limits, str):  # 'unlimited'
+        return {}
+    return {**_default_resource_limits(), **limits}
 
 
 class _WorkflowArguments(TypedDict):
@@ -73,17 +110,25 @@ The sandbox uses Monty, a subset of Python. Key restrictions:
   the top of the script before use.
 - **No wall-clock or timing primitives** (`asyncio.sleep`, `datetime.now()`, the `time` module).
 
-Each sub-agent below is an async function that takes a `task` string and returns that agent's output
-(structured outputs arrive as JSON-style dicts/lists). Run several at once with `asyncio.gather`
-rather than awaiting each sequentially:
+Each sub-agent below is an async function. Call it with the `task` keyword argument — write
+`reviewer(task="...")`, not `reviewer("...")`; all parameters are keyword-only. A sub-agent returns
+that agent's output: a string by default, or — if it has a structured `output_type` — a dict, whose
+fields you read by subscript (`r["field"]`), not attribute (`r.field`). Run several at once with
+`asyncio.gather` rather than awaiting each sequentially:
 
 ```python
 import asyncio
 reviews = await asyncio.gather(reviewer(task="check auth"), reviewer(task="check parsing"))
 ```
 
-The value of the script's last expression is captured as the result — do **not** `print()` it. Use
-`print()` only for debug logging.\
+`asyncio.gather` does **not** support `return_exceptions=True`, and a sub-agent that raises cannot be
+caught inside the script: one failure aborts the whole script and you retry it. Design the script so
+sub-agents don't depend on catching each other's errors.
+
+The last expression's value is captured as the result — you do **not** need to `print()` it, and
+printing produces a string representation, not structured data. Use `print()` only for debug logging.
+If `print()` was also called, the result is returned as `{"output": "<printed text>", "result": <last
+expression>}`.\
 """
 
 
@@ -157,8 +202,9 @@ class WorkflowAgent(Generic[AgentDepsT]):
     workflow. Falls back to the agent's `name`."""
 
     description: str | None = None
-    """Description shown to the model in the sub-agent catalog. Falls back to the
-    agent's `name`."""
+    """Description shown to the model in the sub-agent catalog, rendered as the sandbox
+    function's docstring. When omitted, the model sees only the bare signature — set this
+    to tell the model what the sub-agent does and what to pass as `task`."""
 
     @property
     def resolved_name(self) -> str | None:
@@ -170,13 +216,14 @@ class WorkflowAgent(Generic[AgentDepsT]):
 class DynamicWorkflowToolset(AbstractToolset[AgentDepsT]):
     """Single-tool toolset that runs sub-agent orchestration scripts in a Monty sandbox."""
 
-    agents: Sequence[WorkflowAgent[AgentDepsT]]
+    agents: list[WorkflowAgent[AgentDepsT]]
     """Sub-agents callable from the orchestration script, each as an async function.
 
-    Pass a mutable `list` to reveal sub-agents at runtime: appending a `WorkflowAgent` mid-run
-    (the host holds the list, e.g. via `deps`) makes it callable on the next step. Newcomers are
-    announced to the model via an enqueued message; the tool description stays frozen at the
-    agents present when the run started, so the prompt-cache prefix never changes.
+    A `list` (not a read-only `Sequence`) because the host can append a `WorkflowAgent` mid-run
+    to reveal it: it becomes callable on the next step, announced to the model via an enqueued
+    message, while the tool description stays frozen at the agents present when the run started
+    (so the prompt-cache prefix never changes). Reveal is append-only — a revealed sub-agent
+    cannot be removed or hidden again within the run.
     """
 
     tool_name: str = 'run_workflow'
@@ -189,12 +236,27 @@ class DynamicWorkflowToolset(AbstractToolset[AgentDepsT]):
     """Maximum retries for the `run_workflow` tool (syntax/runtime errors count as retries)."""
 
     forward_usage: bool = True
-    """Share the parent run's `usage` with sub-agents so `usage_limits` bounds the whole tree."""
+    """Share the parent run's `usage` accumulator with sub-agents, so the whole tree's token and
+    request spend is tallied in one place. Note: the parent's configured `usage_limits` value is
+    not forwarded into sub-agent runs (`RunContext` does not expose it); set `sub_agent_usage_limits`
+    to bound sub-agents, and use `max_agent_calls` for an exact ceiling on sub-agent runs."""
 
-    resource_limits: ResourceLimits | None = None
-    """Monty sandbox limits guarding the orchestration script's own CPU/memory (not sub-agents).
+    sub_agent_usage_limits: UsageLimits | None = None
+    """`UsageLimits` applied to every sub-agent run, replacing pydantic-ai's default.
 
-    `None` applies a safe backstop (30s CPU, 256 MB); pass `{}` to disable all limits.
+    Each sub-agent run is sequential, so its own limits are enforced exactly. With
+    `forward_usage=False`, a per-sub-agent `total_tokens_limit` of `T` together with
+    `max_agent_calls` of `N` bound the whole tree to at most `N * T` tokens — a hard ceiling. With
+    `forward_usage=True` the limit is checked against the shared counter instead, giving a tree-wide
+    cap that is best-effort under concurrent fan-out (sub-agents can pass the check before any of
+    them increments it). `None` keeps the default (`request_limit=50`, no token limit)."""
+
+    resource_limits: WorkflowResourceLimits | Literal['unlimited'] | None = None
+    """Sandbox limits guarding the orchestration script's own CPU/memory (not sub-agents).
+
+    `None` applies a safe backstop (30s CPU, 256 MB); `'unlimited'` removes all limits; a
+    `WorkflowResourceLimits` mapping is merged onto the backstop, so a partial dict overrides only
+    the caps it names and the others keep their backstop value.
     """
 
     toolset_id: str | None = None
@@ -231,7 +293,7 @@ class DynamicWorkflowToolset(AbstractToolset[AgentDepsT]):
             if name in self._by_name:
                 raise UserError(f'DynamicWorkflow has two sub-agents named {name!r}; names must be unique.')
             self._by_name[name] = entry
-        self._baseline_catalog = {name: entry.description or entry.agent.name for name, entry in self._by_name.items()}
+        self._baseline_catalog = {name: entry.description for name, entry in self._by_name.items()}
 
     @property
     def id(self) -> str | None:
@@ -264,7 +326,7 @@ class DynamicWorkflowToolset(AbstractToolset[AgentDepsT]):
             if not name or not _is_valid_sandbox_name(name) or name in self._by_name:
                 continue
             self._by_name[name] = entry
-            ctx.enqueue(_render_reveal(name, entry.description or entry.agent.name, self.tool_name))
+            ctx.enqueue(_render_reveal(name, entry.description, self.tool_name))
 
     async def get_tools(self, ctx: RunContext[AgentDepsT]) -> dict[str, ToolsetTool[AgentDepsT]]:
         self._reveal_pending(ctx)
@@ -316,6 +378,7 @@ class DynamicWorkflowToolset(AbstractToolset[AgentDepsT]):
                     task,
                     deps=ctx.deps,
                     usage=ctx.usage if self.forward_usage else None,
+                    usage_limits=self.sub_agent_usage_limits,
                 )
             except Exception as exc:
                 # Don't leak host internals (file paths, deps/agent reprs) to the model;
@@ -323,7 +386,7 @@ class DynamicWorkflowToolset(AbstractToolset[AgentDepsT]):
                 raise RuntimeError(f'sub-agent {agent_name!r} raised {type(exc).__name__}') from exc
             return to_jsonable_python(result.output)
 
-        limits = self.resource_limits if self.resource_limits is not None else _default_resource_limits()
+        limits = _resolve_resource_limits(self.resource_limits)
         capture = PrintCapture()
         in_workflow_token = _in_workflow.set(True)
         try:

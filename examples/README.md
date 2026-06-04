@@ -1,96 +1,108 @@
-# DynamicWorkflow in practice
+# DynamicWorkflow examples
 
-`DynamicWorkflow` is **inspired by [Claude Code's dynamic workflows](https://claude.com/blog/introducing-dynamic-workflows-in-claude-code)**:
-instead of delegating to one sub-agent per tool call, the model writes a single orchestration
-script that fans work out, chains it, votes across it, and loops until done.
+`DynamicWorkflow` gives the orchestrating model one tool, `run_workflow`. Instead of delegating to
+one sub-agent per model turn, the model writes a single Python script that calls the sub-agents as
+async functions — fan out with `asyncio.gather`, chain one into the next, vote across several, loop
+— in **one** tool call. Only the script's final value returns to the model; the intermediate
+results stay in the sandbox.
 
-We take that idea further on two foundations:
+Both examples are real tasks on real code, each a full Pydantic AI `Agent` per sub-agent — no toy
+stand-ins.
 
-- **[Monty](https://github.com/pydantic/monty) runs the script.** The orchestration is real,
-  sandboxed Python — and a *suspended* Monty program is a tiny serializable value you can
-  snapshot, fork, and resume. That turns "run a script" into "checkpoint, branch, and survive a
-  crash."
-- **The Pydantic way: typed all the way through.** Sub-agents are full Pydantic AI `Agent`s with
-  Pydantic `output_type`s, a shared typed `deps` object threads the whole tree, and even the
-  sandbox snapshot states are narrowed types. No stringly-typed handoffs.
+| File | What it shows | Needs |
+| --- | --- | --- |
+| [`dynamic_workflow_audit.py`](./dynamic_workflow_audit.py) | **Audit a whole package in one tool call** — a reviewer per file in parallel, a verifier that *refutes* each finding, then a synthesizer that ranks the survivors. Read-only, and Logfire-traced. | an Anthropic key |
+| [`dynamic_workflow_migrate.py`](./dynamic_workflow_migrate.py) | **Migrate a package, in one tool call** — one migrator per file in parallel rewrites `os.path` to `pathlib`, an adversarial reviewer checks each, and a retry loop runs until every file converges. Real edits, in a throwaway temp dir. | an Anthropic key |
 
-And it stays **cache-stable by construction**: the orchestration tool defers its instructions
-until needed, and new sub-agents can be revealed mid-run without ever changing the prompt-cache
-prefix.
+## audit — orchestrate a whole codebase in one tool call
 
-These two examples show it working:
+`dynamic_workflow_audit.py` shows the pattern the capability is built for: **scale plus adversarial
+convergence**. Point it at any Python package — it only reads. In one `run_workflow` call the model
+writes a script that:
 
-| File | What it demonstrates |
-| --- | --- |
-| [`dynamic_workflow_speculative_repair.py`](./dynamic_workflow_speculative_repair.py) | Typed handoffs, sub-agents with **confined capabilities**, **deferred loading**, **runtime sub-agent reveal** — a whole repair tournament in one tool call. |
-| [`dynamic_workflow_fork_and_resume.py`](./dynamic_workflow_fork_and_resume.py) | The Monty foundation: **fork a live orchestration** from a 508-byte snapshot and **resume it across processes**. |
+1. reviews every file in parallel — one **reviewer** sub-agent each — collecting typed findings;
+2. **refutes** every finding in parallel — a separate **verifier** re-reads the code, and a finding
+   survives only if it holds up (this kills the false positives a single pass waves through); then
+3. hands the survivors to a **synthesizer** that dedupes and ranks them into one report.
 
-## Example 1 — a self-verifying repair tournament
+Concretely — here is the script a **Claude model actually wrote** for this task, given the exact
+sub-agent catalog and instructions the orchestrator receives (reproduced verbatim, and verified to
+execute in the Monty sandbox). The whole audit, in one turn:
 
-`dynamic_workflow_speculative_repair.py`. The orchestrator is handed a failing test and, in
-**one** tool call, writes a script that:
+```python
+import asyncio
+import json
 
-1. runs a **scout** sub-agent to reproduce the failure and return a typed `Diagnosis`,
-2. fans out three **fixer** sub-agents in parallel, each pursuing a different strategy and
-   returning a typed `FixProposal` (it *proposes* a diff, it doesn't apply one — so the fan-out
-   never collides),
-3. has a **referee** sub-agent score each proposal, and
-4. returns the highest-scoring, smallest diff — in ordinary Python control flow.
+files = ["__init__.py", "_capability.py", "_toolset.py"]
 
-What makes it more than "spawn N agents":
+# 1. Review every file at once — one reviewer sub-agent per file.
+reviews = await asyncio.gather(*[reviewer(task=f) for f in files])
 
-- **Each leaf is a confined capability surface.** The scout gets a read-only `FileSystem` and a
-  `Shell` allowlisted to `pytest`/`git`; the fixer gets `CodeMode` over a `FileSystem` that
-  can't touch the test dir. Containment lives on each sub-agent, exactly where the blast radius
-  is.
-- **Typed all the way down.** `Diagnosis`, `FixProposal`, `Score` are Pydantic models; the
-  script indexes real fields. A shared typed `deps` threads through every sub-agent.
-- **Loads on demand, stays cache-stable.** `DynamicWorkflow` is `defer_loading=True` — about one
-  line of prompt until the model actually orchestrates. And a heavyweight `security_audit`
-  sub-agent is **revealed at runtime**, appended to the live catalog only when the diagnosis
-  flags auth code — *without* changing the cached `run_workflow` description, so the prompt-cache
-  prefix never moves.
+findings = []
+for review in reviews:
+    if review:
+        findings.extend(review)
 
-- **One ceiling on the whole tree.** `max_agent_calls` is an exact, host-enforced cap that holds
-  even under concurrent fan-out, alongside Monty CPU/memory limits on the script itself.
+# 2. Refute every finding at once — it survives only if an independent verifier confirms it.
+verdicts = await asyncio.gather(
+    *[verifier(task=json.dumps(finding)) for finding in findings]
+)
+confirmed = [
+    finding
+    for finding, verdict in zip(findings, verdicts)
+    if verdict["confirmed"]
+]
 
-## Example 2 — fork a live orchestration, resume across a crash
-
-`dynamic_workflow_fork_and_resume.py` runs against the real `pydantic_monty` API — no agents, no
-key. Verified output:
-
-```
-snapshot at the decision point: 508 bytes
-prefix executed: 1 time (the expensive context built once)
-prefix executed after 3 forks: 1 time (still once — branches diverged for free)
-  branch 'codemod': shared(100) + strategy -> 105
-  branch 'rewrite': shared(100) + strategy -> 130
-  branch 'shim':    shared(100) + strategy -> 112
-winner: 'rewrite' (the host keeps it; the losing forks are discarded)
-resumed from the persisted snapshot in a fresh load: {'after-restart': 107}
+# 3. Rank the survivors into one report — the only value the orchestrator ever sees.
+report = await synthesizer(task=json.dumps(confirmed))
+report
 ```
 
-A suspended Monty program — locals and all — is ~half a kilobyte of bytes you can `dump`,
-`load`, and `load` *again* to fork. The example drives the orchestration to a decision point,
-snapshots the live state, then:
+Why this is the amazing part — the same audit delegated one sub-agent per tool call would be, for
+12 files: ~12 review turns, then ~12 verify turns, then a synthesis turn — **25+ model round-trips**,
+with every file's findings flowing back through the orchestrator's context and bloating it as it
+goes. As one script it is **a single `run_workflow` call**: the 12 reviews and 12 verifications run
+concurrently inside it, and the orchestrator's context only ever gains the final report. More files
+makes the gap wider, not the orchestrator's job harder.
 
-- **Best-of-N from a shared live prefix.** Build context once (map the repo, gather the
-  diagnosis), snapshot, fork into N strategy branches. The proof it's shared and not recomputed:
-  `prefix executed: 1 time` holds after three forks — the branches diverge for free.
-- **Durable, cross-process resume.** The snapshot is just bytes — write it to a database (or a
-  durable-execution engine like Temporal/DBOS) at each suspension, and after a crash or a redeploy
-  in a fresh process you load those bytes back and the orchestration picks up exactly where it
-  paused, with every variable and partial result intact.
+Run it with a key (and `LOGFIRE_TOKEN` for a shareable trace of the whole tree — the orchestrator
+turn, the `run_workflow` call, and every nested reviewer / verifier / synthesizer run):
 
-Each `resume` step is narrowed to its snapshot type (`FunctionSnapshot` → `MontyComplete`), so
-even the checkpoint machinery is typed. Tournament-from-prefix and durable resume are the
-roadmap for the capability — this example exists to show the foundation is real and measured.
+```bash
+export ANTHROPIC_API_KEY=sk-...
+export LOGFIRE_TOKEN=...   # optional, for a shareable public trace
+uv run --extra code-mode --with anthropic --with logfire \
+    python examples/dynamic_workflow_audit.py path/to/some/package
+```
+
+## migrate — orchestration that writes
+
+`dynamic_workflow_migrate.py` is where the agents *change* code, not just read it. It plants a small
+package that still uses `os.path` into a fresh temp dir (so your repo is never touched), then hands
+it to the orchestrator. In one `run_workflow` call the model writes a script that:
+
+1. fans out a **migrator** sub-agent per file, in parallel — each reads its file, rewrites it to
+   `pathlib`, and writes it back (the files differ, so the parallel edits never collide);
+2. fans out a read-only **reviewer** sub-agent per file that *adversarially* checks the result —
+   approve only if no `os.path` survives and behaviour is preserved; and
+3. loops — any rejected file goes back to the migrator with the reviewer's issues, until the whole
+   package converges.
+
+That whole plan — parallel fan-out, an adversarial check, and a retry loop over a list of pending
+files — is ordinary Python in a single model turn. The example prints the exact script the model
+wrote and every migrated file, so you can see the orchestration that happened:
+
+```bash
+export ANTHROPIC_API_KEY=sk-...
+uv run --extra code-mode --with anthropic python examples/dynamic_workflow_migrate.py
+```
 
 ## In one line
 
-Claude Code showed that moving the plan into a script beats turn-by-turn delegation.
-`DynamicWorkflow` puts that script on Monty and does it the Pydantic way — typed end to end,
-cache-stable, and built on a suspended state you can fork and persist.
+`DynamicWorkflow` moves sub-agent coordination from turn-by-turn delegation into one script the
+model writes and runs on Monty — typed handoffs, a cache-stable prompt, and an exact budget across
+the whole tree. (Snapshot-based fork and durable resume are planned — see the
+[`DynamicWorkflow` README](../pydantic_ai_harness/dynamic_workflow/README.md).)
 
 ## Further reading
 

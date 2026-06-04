@@ -20,13 +20,15 @@ from pydantic_ai.messages import (
 )
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 from pydantic_ai.models.test import TestModel
-from pydantic_ai.usage import RunUsage
+from pydantic_ai.usage import RunUsage, UsageLimits
 
 from pydantic_ai_harness import DynamicWorkflow, WorkflowAgent
 from pydantic_ai_harness.dynamic_workflow._toolset import (  # pyright: ignore[reportPrivateUsage]
     DynamicWorkflowToolset,
+    _default_resource_limits,
     _in_workflow,
     _render_catalog,
+    _resolve_resource_limits,
 )
 
 pytestmark = pytest.mark.anyio
@@ -185,6 +187,8 @@ async def test_description_lists_agents_as_functions(make_agent: MakeAgent) -> N
     desc = tools['run_workflow'].tool_def.description
     assert desc is not None
     assert 'async def reviewer(*, task: str) -> Any:' in desc
+    # No description -> bare signature, not a useless `"""reviewer"""` docstring echoing the name.
+    assert '"""reviewer"""' not in desc
 
 
 async def test_descriptions_override(make_agent: MakeAgent) -> None:
@@ -334,6 +338,45 @@ async def test_forward_usage_false_isolates_usage(make_agent: MakeAgent) -> None
     assert ctx.usage.requests == 0
 
 
+async def test_sub_agent_usage_limits_enforced() -> None:
+    sub: Agent[None, str] = Agent(TestModel(), name='limited')
+
+    @sub.tool_plain
+    def helper() -> str:
+        return 'used'
+
+    # A tool-using TestModel agent needs two model requests (call the tool, then answer), so a
+    # request_limit of 1 must trip the second — proving the limit reaches the sub-agent run.
+    ts = DynamicWorkflowToolset[None](
+        agents=[WorkflowAgent(agent=sub)],
+        forward_usage=False,
+        sub_agent_usage_limits=UsageLimits(request_limit=1),
+    )
+    with pytest.raises(ModelRetry) as exc_info:
+        await _run_script(ts, "await limited(task='x')")
+    msg = str(exc_info.value)
+    assert 'limited' in msg
+    assert 'UsageLimitExceeded' in msg
+
+
+async def test_sub_agent_usage_limits_generous_allows_run() -> None:
+    sub: Agent[None, str] = Agent(TestModel(custom_output_text='done'), name='roomy')
+
+    @sub.tool_plain
+    def helper() -> str:
+        return 'used'
+
+    # The same two-request agent runs fine when the limit is high enough, so the cap is the
+    # configured value rather than a blanket rejection.
+    ts = DynamicWorkflowToolset[None](
+        agents=[WorkflowAgent(agent=sub)],
+        forward_usage=False,
+        sub_agent_usage_limits=UsageLimits(request_limit=5),
+    )
+    out = await _run_script(ts, "await roomy(task='x')")
+    assert out == 'done'
+
+
 # --- Errors / output shapes ------------------------------------------------
 
 
@@ -396,9 +439,26 @@ async def test_runaway_loop_stopped_by_duration_cap(make_agent: MakeAgent) -> No
         await _run_script(ts, 'while True:\n    x = 1')
 
 
-async def test_explicit_empty_limits_used_as_is(make_agent: MakeAgent) -> None:
-    # An explicit (non-None) limits value is used as-is rather than the default backstop.
-    ts = DynamicWorkflowToolset[None](agents=[make_agent()], resource_limits={})
+def test_resolve_resource_limits_none_is_backstop() -> None:
+    assert _resolve_resource_limits(None) == _default_resource_limits()
+
+
+def test_resolve_resource_limits_unlimited_removes_all() -> None:
+    assert _resolve_resource_limits('unlimited') == {}
+
+
+def test_resolve_resource_limits_partial_merges_onto_backstop() -> None:
+    # A partial dict overrides only the cap it names; the others keep their backstop value
+    # (so it can't silently drop the duration backstop).
+    resolved = _resolve_resource_limits({'max_memory': 1})
+    # Equality with the full backstop (plus the override) proves the duration/allocation
+    # backstops survive a partial dict rather than being dropped.
+    assert resolved == {**_default_resource_limits(), 'max_memory': 1}
+
+
+async def test_unlimited_runs_without_a_backstop(make_agent: MakeAgent) -> None:
+    # `'unlimited'` resolves to no limits; a trivial script still completes normally.
+    ts = DynamicWorkflowToolset[None](agents=[make_agent()], resource_limits='unlimited')
     out = await _run_script(ts, '1 + 1')
     assert out == 2
 
