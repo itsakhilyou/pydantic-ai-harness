@@ -120,6 +120,8 @@ def session_config(session: AcpSession) -> AcpSessionConfig[None]:
 
 Each helper returns `None` when the client did not advertise the capability, so the `or` falls back to local and the agent works either way. The tool names match the local `FileSystem`/`Shell`, so rich rendering (next section) is identical. `acp_terminal` runs the command in the editor's environment and returns its captured output (see [Limitations](#cancellation-and-limitations)).
 
+If a client advertises filesystem *reads* but not *writes*, `acp_filesystem` keeps editor-native reads and sends writes to the local `FileSystem` rooted at `session.cwd` -- coherent only when the agent shares the workspace disk with the editor (same machine, or an agent inside the editor's container); for a remote editor those writes land on the agent's disk, not the editor's.
+
 ## Tool approval
 
 Mark a tool to require approval and ACP relays the decision to the client, which shows the user an approve/reject prompt:

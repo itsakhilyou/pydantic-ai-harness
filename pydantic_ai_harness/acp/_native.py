@@ -17,20 +17,31 @@ client advertised the matching capability and otherwise return `None` so the cal
 to the local capability.
 """
 
-# Deliberately self-contained: a future I/O-backend seam shared with `FileSystem`/`Shell` (and
-# remote backends) is expected to subsume these toolsets.
+# A read-only ACP client gets editor-native reads with writes delegated to the local `FileSystem`
+# capability; otherwise these toolsets are self-contained. A future shared I/O-backend seam is
+# expected to subsume them.
 
 from __future__ import annotations
 
 import asyncio
 import contextlib
+from collections.abc import Awaitable
+from typing import Protocol
 
 import anyio
 from acp import Client, schema
 from pydantic_ai.tools import AgentDepsT
 from pydantic_ai.toolsets import FunctionToolset
 
+from pydantic_ai_harness.filesystem import FileSystem
+
 from ._session import AcpSession
+
+
+class _LocalFileWriter(Protocol):
+    """Something that can write a file on the local disk -- structurally satisfied by `FileSystemToolset`."""
+
+    def write_file(self, path: str, content: str) -> Awaitable[str]: ...  # pragma: no cover - structural protocol
 
 
 class AcpFileSystemToolset(FunctionToolset[AgentDepsT]):
@@ -42,12 +53,16 @@ class AcpFileSystemToolset(FunctionToolset[AgentDepsT]):
 
     Paths are passed through unchanged; the client resolves and authorizes them against the
     session workspace (this toolset adds no sandboxing of its own).
+
+    If `local_writer` is set (a read-only client -- see [`acp_filesystem`][pydantic_ai_harness.acp.acp_filesystem]),
+    `write_file` goes there instead of to the client, while reads still route through the editor.
     """
 
-    def __init__(self, *, client: Client, session_id: str) -> None:
+    def __init__(self, *, client: Client, session_id: str, local_writer: _LocalFileWriter | None = None) -> None:
         super().__init__()
         self._client = client
         self._session_id = session_id
+        self._local_writer = local_writer
         self.add_function(self.read_file, name='read_file')
         self.add_function(self.write_file, name='write_file')
 
@@ -67,6 +82,8 @@ class AcpFileSystemToolset(FunctionToolset[AgentDepsT]):
             path: Absolute path to the file, as the ACP client expects it.
             content: The complete new contents of the file.
         """
+        if self._local_writer is not None:
+            return await self._local_writer.write_file(path, content)
         await self._client.write_text_file(content=content, path=path, session_id=self._session_id)
         return f'Wrote {path} ({len(content)} characters).'
 
@@ -74,9 +91,18 @@ class AcpFileSystemToolset(FunctionToolset[AgentDepsT]):
 def acp_filesystem(session: AcpSession) -> AcpFileSystemToolset[None] | None:
     """Build an ACP-client-backed filesystem toolset for `session`, or `None` if unsupported.
 
-    Returns an [`AcpFileSystemToolset`][pydantic_ai_harness.acp.AcpFileSystemToolset] only when
-    the client advertised both `fs/read_text_file` and `fs/write_text_file` during `initialize`;
-    otherwise returns `None` so the caller can fall back to a local toolset:
+    Returns an [`AcpFileSystemToolset`][pydantic_ai_harness.acp.AcpFileSystemToolset] whenever the
+    client advertised `fs/read_text_file` during `initialize`:
+
+    - read + write advertised: reads and writes both route through the editor.
+    - read only (no `fs/write_text_file`): reads route through the editor, while writes go to the
+      local [`FileSystem`][pydantic_ai_harness.FileSystem] rooted at `session.cwd`. This is coherent
+      only when the agent shares the workspace disk with the editor (same machine, or an agent
+      running inside the editor's container) -- for a *remote* editor the writes land on the agent's
+      disk, not the editor's.
+
+    Returns `None` only when the client advertised no readable filesystem, so the caller can fall
+    back to a fully local toolset:
 
     ```python
     def session_config(session: AcpSession) -> AcpSessionConfig[None]:
@@ -89,9 +115,12 @@ def acp_filesystem(session: AcpSession) -> AcpFileSystemToolset[None] | None:
     """
     capabilities = session.client_capabilities
     fs = capabilities.fs if capabilities is not None else None
-    if fs is None or not fs.read_text_file or not fs.write_text_file:
+    if fs is None or not fs.read_text_file:
         return None
-    return AcpFileSystemToolset[None](client=session.client, session_id=session.session_id)
+    if fs.write_text_file:
+        return AcpFileSystemToolset[None](client=session.client, session_id=session.session_id)
+    local_writer = FileSystem(root_dir=session.cwd).get_toolset()
+    return AcpFileSystemToolset[None](client=session.client, session_id=session.session_id, local_writer=local_writer)
 
 
 def _format_terminal_output(result: schema.TerminalOutputResponse) -> str:

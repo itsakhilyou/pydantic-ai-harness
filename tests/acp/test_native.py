@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import anyio
 import pytest
 from acp import Client, schema
@@ -72,16 +74,40 @@ async def test_acp_filesystem_builds_a_working_toolset_when_fs_is_advertised() -
     assert await toolset.read_file('/ws/a.py') == 'hi'  # the built toolset routes through the same client
 
 
+async def test_acp_filesystem_read_only_client_reads_via_acp_and_writes_locally(tmp_path: Path) -> None:
+    # A read-only client keeps editor-native reads, but writes go to the local workspace disk
+    # rather than the client (coherent only when the agent shares that disk -- see the helper docs).
+    client = RecordingClient({'notes.txt': 'hello'})
+    session = _session(client, _fs_caps(read=True, write=False))
+    session = AcpSession(
+        cwd=str(tmp_path),
+        additional_directories=session.additional_directories,
+        mcp_servers=session.mcp_servers,
+        client_capabilities=session.client_capabilities,
+        client=client,
+        session_id=session.session_id,
+    )
+    toolset = acp_filesystem(session)
+    assert isinstance(toolset, AcpFileSystemToolset)
+
+    assert await toolset.read_file('notes.txt') == 'hello'
+    assert client.reads == [('notes.txt', 'sid')]  # the read routed through the editor
+    await toolset.write_file('out.txt', 'data')
+    assert client.writes == []  # the client was never asked to write
+    assert (tmp_path / 'out.txt').read_text() == 'data'  # the write landed on local disk
+
+
 @pytest.mark.parametrize(
     'capabilities',
     [
         pytest.param(None, id='no-capabilities'),
         pytest.param(schema.ClientCapabilities(), id='no-fs'),
         pytest.param(_fs_caps(read=False, write=True), id='no-read'),
-        pytest.param(_fs_caps(read=True, write=False), id='no-write'),
     ],
 )
-def test_acp_filesystem_returns_none_when_fs_is_unsupported(capabilities: schema.ClientCapabilities | None) -> None:
+def test_acp_filesystem_returns_none_when_no_readable_filesystem(
+    capabilities: schema.ClientCapabilities | None,
+) -> None:
     assert acp_filesystem(_session(RecordingClient(), capabilities)) is None
 
 
