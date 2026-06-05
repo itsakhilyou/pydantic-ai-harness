@@ -46,7 +46,7 @@ from pydantic_ai.toolsets import AbstractToolset, FunctionToolset
 from ._content import PromptContentBlock, prompt_blocks_to_user_content
 from ._permission import PermissionPolicy, ToolCallPermission, default_permission_scope
 from ._present import ToolCallContent, ToolCallPresenter, absolutize, default_coding_presenter
-from ._serialize import MAX_TEXT_UPDATE_CHARS, bounded_jsonable, jsonable
+from ._serialize import bounded_jsonable, chunk_text, jsonable
 from ._session import AcpSession, AcpSessionConfig, McpServers, SessionConfigFunc, SessionState, SessionUpdate
 from ._store import SessionStore, StoredSession
 
@@ -59,6 +59,11 @@ def _all_known_model_names() -> tuple[str, ...]:
 
     `KnownModelName` is a `TypeAliasType`, so the members are read from `__value__` (one flat
     `Literal` of `'provider:model'` strings).
+
+    This relies on the alias staying a flat `Literal`; pyai exposes no public enumeration API, so
+    if it is ever recomposed (e.g. a union of per-provider literals) `get_args` would yield
+    non-string members and this would need a real core API instead -- propose one upstream rather
+    than widening the introspection here.
     """
     return get_args(KnownModelName.__value__)
 
@@ -456,8 +461,7 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
 
     async def _emit_text(self, turn: _TurnState, text: str, *, thought: bool) -> None:
         """Stream text to the client as one or more chunked `session/update` notifications."""
-        for start in range(0, len(text), MAX_TEXT_UPDATE_CHARS):
-            chunk = text[start : start + MAX_TEXT_UPDATE_CHARS]
+        for chunk in chunk_text(text):
             update = acp.update_agent_thought_text(chunk) if thought else acp.update_agent_message_text(chunk)
             await self._send_update(turn, update)
 

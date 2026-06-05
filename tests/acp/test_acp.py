@@ -56,7 +56,7 @@ from pydantic_ai_harness.acp import (
 )
 from pydantic_ai_harness.acp._adapter import _TurnState
 from pydantic_ai_harness.acp._present import absolutize
-from pydantic_ai_harness.acp._serialize import MAX_RAW_FIELD_CHARS, MAX_TEXT_UPDATE_CHARS
+from pydantic_ai_harness.acp._serialize import MAX_RAW_FIELD_CHARS, MAX_TEXT_UPDATE_BYTES, _escaped_len, chunk_text
 from pydantic_ai_harness.acp._session import SessionState
 
 pytestmark = pytest.mark.anyio
@@ -537,7 +537,7 @@ class TestStreaming:
         assert isinstance(getattr(update, 'raw_output', None), str)
 
     async def test_large_text_output_is_chunked_under_the_buffer_limit(self) -> None:
-        big = 'x' * (MAX_TEXT_UPDATE_CHARS * 3 + 17)
+        big = 'x' * (MAX_TEXT_UPDATE_BYTES * 3 + 17)
         adapter: PydanticAIACPAgent[None, str] = PydanticAIACPAgent(Agent(TestModel(custom_output_text=big)))
         client = FakeClient()
         session_id = await _start(adapter, client)
@@ -545,10 +545,36 @@ class TestStreaming:
         await adapter.prompt(prompt=[acp.text_block('go')], session_id=session_id)
 
         chunks = [payload for kind, payload in client.events() if kind == 'agent_message_chunk']
-        # Split into several updates, each within the cap, and losslessly reassembled by the client.
+        # Split into several updates, each within the byte budget, and losslessly reassembled.
         assert len(chunks) >= 4
-        assert all(isinstance(chunk, str) and len(chunk) <= MAX_TEXT_UPDATE_CHARS for chunk in chunks)
+        assert all(isinstance(chunk, str) and len(json.dumps(chunk)) - 2 <= MAX_TEXT_UPDATE_BYTES for chunk in chunks)
         assert ''.join(str(chunk) for chunk in chunks) == big
+
+
+class TestChunkText:
+    """`chunk_text` bounds the JSON-escaped byte size of each streamed update (see `_serialize`)."""
+
+    def test_ascii_splits_by_byte_budget(self) -> None:
+        assert list(chunk_text('x' * 25, budget=10)) == ['x' * 10, 'x' * 10, 'x' * 5]
+
+    def test_empty_text_yields_nothing(self) -> None:
+        assert list(chunk_text('')) == []
+
+    def test_non_ascii_stays_within_byte_budget_where_a_char_cap_would_not(self) -> None:
+        # Each emoji escapes to a 12-byte surrogate pair under `ensure_ascii=True`, so a char-count
+        # cap would let a chunk balloon ~12x and overrun the client's read buffer.
+        text = '😀' * 1000
+        chunks = list(chunk_text(text, budget=120))
+        assert ''.join(chunks) == text
+        assert all(len(json.dumps(chunk)) - 2 <= 120 for chunk in chunks)
+        assert all(len(chunk) <= 10 for chunk in chunks)  # 120 budget / 12 bytes per emoji
+
+    def test_escaped_len_covers_every_character_class(self) -> None:
+        assert _escaped_len('"') == 2 and _escaped_len('\n') == 2  # short escapes
+        assert _escaped_len('\x00') == 6  # other control char -> \u00XX
+        assert _escaped_len('a') == 1  # printable ASCII
+        assert _escaped_len('é') == 6  # BMP non-ASCII -> \uXXXX
+        assert _escaped_len('😀') == 12  # astral -> surrogate pair
 
 
 class TestToolCalls:
@@ -1143,18 +1169,23 @@ class TestUnsupportedMethods:
 class TestEntryPoints:
     async def test_run_acp_stdio_serves_the_agent(self, monkeypatch: pytest.MonkeyPatch) -> None:
         served: list[object] = []
+        unstable: list[object] = []
 
-        async def fake_run_agent(agent: object) -> None:
+        async def fake_run_agent(agent: object, **kwargs: object) -> None:
             served.append(agent)
+            unstable.append(kwargs.get('use_unstable_protocol'))
 
         monkeypatch.setattr(acp, 'run_agent', fake_run_agent)
         await run_acp_stdio(Agent(TestModel()))
         assert isinstance(served[0], PydanticAIACPAgent)
+        # Unstable routing must be on, or the advertised `session/set_model` and `session/close`
+        # methods are rejected by the SDK router before reaching the adapter.
+        assert unstable == [True]
 
     async def test_run_acp_stdio_forwards_session_config(self, monkeypatch: pytest.MonkeyPatch) -> None:
         served: list[PydanticAIACPAgent[_Workspace, str]] = []
 
-        async def fake_run_agent(agent: PydanticAIACPAgent[_Workspace, str]) -> None:
+        async def fake_run_agent(agent: PydanticAIACPAgent[_Workspace, str], **kwargs: object) -> None:
             served.append(agent)
 
         monkeypatch.setattr(acp, 'run_agent', fake_run_agent)
@@ -1178,7 +1209,7 @@ class TestEntryPoints:
     def test_run_acp_stdio_sync_serves_the_agent(self, monkeypatch: pytest.MonkeyPatch) -> None:
         served: list[object] = []
 
-        async def fake_run_agent(agent: object) -> None:
+        async def fake_run_agent(agent: object, **kwargs: object) -> None:
             served.append(agent)
 
         monkeypatch.setattr(acp, 'run_agent', fake_run_agent)
@@ -1247,6 +1278,20 @@ class TestEntryPoints:
             await conn.prompt(session_id=session.session_id, prompt=[acp.text_block('go')], message_id=uuid4().hex)
 
         assert client.text() == 'x' * 200_000
+
+    async def test_unstable_methods_route_over_stdio(self) -> None:
+        """`session/set_model` and `session/close` are UNSTABLE in the SDK and rejected by its router
+        unless the server enables unstable routing -- verify both reach the handler over a real wire."""
+        client = FakeClient()
+        script = Path(__file__).parent / '_demo_models_agent.py'
+        async with acp.spawn_agent_process(client, sys.executable, str(script)) as (conn, _proc):
+            await conn.initialize(protocol_version=acp.PROTOCOL_VERSION)
+            session = await conn.new_session(cwd='.', mcp_servers=[])
+            # Each call would raise `method_not_found` if unstable routing were off (the bug guard).
+            model_result = await conn.set_session_model(model_id='openai:gpt-4o', session_id=session.session_id)
+            await conn.close_session(session_id=session.session_id)
+
+        assert model_result is not None
 
 
 def _tool_call(name: str, args: str | dict[str, Any] | None) -> ToolCallPart:
