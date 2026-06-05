@@ -162,6 +162,8 @@ run_acp_stdio_sync(agent, session_store=InMemorySessionStore())
 
 `InMemorySessionStore` keeps sessions for the lifetime of the process. Implement the `SessionStore` protocol (`save`/`load` a `StoredSession`) over a file or database to make them survive a restart -- the stored values are Pydantic models, so they serialize with Pydantic.
 
+Session persistence is for *reopening a conversation*; it is orthogonal to per-run durability. To also make individual turns crash-resilient (or resume a long sub-agent run), add a step-durability capability to the agent -- each ACP turn is one agent run, so the two layers compose with no glue.
+
 ## Model selection
 
 Pass `models` to let the client switch the session's model with `session/set_model` (using Pydantic AI [model names](https://ai.pydantic.dev/models/)). The first is each session's default. A selection is applied as a per-run override -- the shared agent is never mutated -- and is persisted with the session when a `session_store` is set.
@@ -172,10 +174,14 @@ run_acp_stdio_sync(agent, models=['anthropic:claude-sonnet-4-6', 'anthropic:clau
 
 A model id is any string a Pydantic AI model accepts, so newer models not yet in `KnownModelName` work too. Pass `models='all'` to offer every model Pydantic AI knows (its default is then the first known model, so curate the list when you want a specific default). Without `models`, none are advertised and `session/set_model` is rejected.
 
+## Token usage
+
+Each completed turn reports its token counts (input/output/total, plus cached tokens) on the ACP `PromptResponse`, summed across any approval pauses. This is an UNSTABLE ACP field, so clients that don't support it simply ignore it.
+
 ## Cancellation and limitations
 
 - **Cancellation.** `session/cancel` and `session/close` cancel the in-flight turn; close waits for it to unwind before returning. Cooperative async tools stop promptly. A synchronous tool already running in a worker thread cannot be force-stopped, so its side effects may complete after the turn reports `cancelled` -- prefer async tools for cancellation-sensitive work.
-- **Approval detection.** Tools that require approval are recognized when they live in a `FunctionToolset` (which the harness `FileSystem`/`Shell` and `@agent.tool` both use). A tool whose approval requirement is decided dynamically per call starts as `in_progress`.
+- **Approval detection.** Tools that require approval are recognized when they live in a `FunctionToolset` (which the harness `FileSystem`/`Shell` and `@agent.tool` both use). A tool whose approval requirement is decided dynamically per call (by raising `ApprovalRequired` from its body) starts as `in_progress`, and any side effects it ran *before* raising have already happened by the time the client is asked -- use an `ApprovalRequiredToolset` (which gates before the tool body runs) for actions that must not partially execute before approval.
 - **Overwrite diffs.** `write_file` renders a diff against an empty original, so an overwrite understates what it replaced.
 - **Live terminal panes.** `acp_terminal` returns a command's captured output; it does not embed a *live* terminal pane in the tool call, which would need the terminal id at call-start, before the command runs.
 - **Images.** Prompt image blocks are off by default and must be enabled via `prompt_capabilities` with a model that accepts them (see [Prompt content types](#prompt-content-types)). The harness `FileSystem.read_file` is text-only, so the agent cannot open image files from the workspace itself.

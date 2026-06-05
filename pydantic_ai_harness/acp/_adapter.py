@@ -42,6 +42,7 @@ from pydantic_ai.output import OutputDataT
 from pydantic_ai.run import AgentRunResultEvent
 from pydantic_ai.tools import AgentDepsT
 from pydantic_ai.toolsets import AbstractToolset, FunctionToolset
+from pydantic_ai.usage import RunUsage
 
 from ._content import PromptContentBlock, prompt_blocks_to_user_content
 from ._permission import PermissionPolicy, ToolCallPermission, default_permission_scope
@@ -66,6 +67,17 @@ def _all_known_model_names() -> tuple[str, ...]:
     than widening the introspection here.
     """
     return get_args(KnownModelName.__value__)
+
+
+def _to_acp_usage(usage: RunUsage) -> schema.Usage:
+    """Map a Pydantic AI `RunUsage` to ACP's per-turn `Usage` (an UNSTABLE field on `PromptResponse`)."""
+    return schema.Usage(
+        input_tokens=usage.input_tokens,
+        output_tokens=usage.output_tokens,
+        total_tokens=usage.total_tokens,
+        cached_read_tokens=usage.cache_read_tokens,
+        cached_write_tokens=usage.cache_write_tokens,
+    )
 
 
 class _TurnCancelled(Exception):
@@ -351,12 +363,13 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
             raise acp.RequestError.invalid_params({'session_id': session_id})
 
         user_content = prompt_blocks_to_user_content(prompt)
+        usage = RunUsage()
         async with state.lock:
             state.cancel_requested = False
             turn = asyncio.ensure_future(self._run_turn(state, user_content))
             state.active_turn = turn
             try:
-                await turn
+                usage = await turn
             except _TurnCancelled:
                 # Rolled back: omit `user_message_id`, which would signal the message was persisted.
                 return schema.PromptResponse(stop_reason='cancelled')
@@ -372,7 +385,7 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
             finally:
                 state.active_turn = None
                 state.cancel_requested = False
-        return schema.PromptResponse(stop_reason='end_turn', user_message_id=message_id)
+        return schema.PromptResponse(stop_reason='end_turn', user_message_id=message_id, usage=_to_acp_usage(usage))
 
     async def cancel(self, session_id: str, **kwargs: object) -> None:
         """Cancel the in-flight turn for a session, if any."""
@@ -398,12 +411,16 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
                 await state.active_turn
         return schema.CloseSessionResponse()
 
-    async def _run_turn(self, state: SessionState[AgentDepsT], user_content: list[UserContent]) -> None:
-        """Drive the agent (resuming across tool-approval pauses) and stream updates."""
+    async def _run_turn(self, state: SessionState[AgentDepsT], user_content: list[UserContent]) -> RunUsage:
+        """Drive the agent (resuming across tool-approval pauses) and stream updates.
+
+        Returns the turn's total token usage, summed across every run pass (one per approval pause).
+        """
         conn = self._conn
         assert conn is not None
         history = state.history
         config = state.config
+        usage = RunUsage()
         deferred_results: DeferredToolResults | None = None
         run_input: list[UserContent] | None = user_content
         output_type = [self._agent.output_type, DeferredToolRequests]
@@ -433,6 +450,7 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
 
             assert result is not None, 'run_stream_events always yields a final result event'
             history = result.all_messages()
+            usage += result.usage()
             output = result.output
             if isinstance(output, DeferredToolRequests):
                 if not output.approvals and not output.calls:  # pragma: no cover
@@ -452,6 +470,7 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
         if self._session_store is not None:
             state.transcript.extend(turn.updates)
             await self._persist(state)
+        return usage
 
     async def _send_update(self, turn: _TurnState, update: SessionUpdate) -> None:
         """Send one `session/update` to the client, recording it for the transcript when persisting."""

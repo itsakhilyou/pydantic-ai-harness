@@ -23,6 +23,7 @@ to the local capability.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 
 import anyio
 from acp import Client, schema
@@ -139,12 +140,16 @@ class AcpTerminalToolset(FunctionToolset[AgentDepsT]):
             return _format_terminal_output(result)
         except asyncio.CancelledError:
             # Kill the still-running terminal before unwinding, shielded so the cleanup completes
-            # even though this task is being cancelled.
-            with anyio.CancelScope(shield=True):
+            # even though this task is being cancelled. Suppress kill failures: a client error here
+            # must not replace the `CancelledError` the caller needs to see (the spec requires the
+            # turn to end with a `cancelled` stop reason).
+            with anyio.CancelScope(shield=True), contextlib.suppress(Exception):
                 await self._client.kill_terminal(session_id=self._session_id, terminal_id=terminal_id)
             raise
         finally:
-            with anyio.CancelScope(shield=True):
+            # Always release the terminal; suppress failures so a release error never masks the
+            # exception (or successful return) already in flight.
+            with anyio.CancelScope(shield=True), contextlib.suppress(Exception):
                 await self._client.release_terminal(session_id=self._session_id, terminal_id=terminal_id)
 
 

@@ -134,6 +134,26 @@ async def test_run_command_kills_and_releases_the_terminal_on_cancel() -> None:
     assert client.released == ['term-1']  # and released so it is not left behind
 
 
+async def test_run_command_cancel_survives_a_failing_kill() -> None:
+    class _KillRaises(RecordingClient):
+        async def kill_terminal(
+            self, session_id: str, terminal_id: str, **kwargs: object
+        ) -> schema.KillTerminalResponse | None:
+            self.killed.append(terminal_id)
+            raise RuntimeError('client kill failed')
+
+    client = _KillRaises(block_exit=True)
+    ts = AcpTerminalToolset[None](client=client, session_id='sid', cwd='/ws')
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(ts.run_command, 'sleep 100')
+        await client.create_event.wait()
+        tg.cancel_scope.cancel()
+    # The kill failure is suppressed, so cancellation still unwinds cleanly and the terminal is
+    # still released rather than leaked.
+    assert client.killed == ['term-1']
+    assert client.released == ['term-1']
+
+
 async def test_acp_terminal_builds_a_toolset_when_terminal_is_advertised() -> None:
     client = RecordingClient(output='hi')
     toolset = acp_terminal(_session(client, schema.ClientCapabilities(terminal=True)))

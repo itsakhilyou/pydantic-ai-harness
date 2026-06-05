@@ -47,6 +47,7 @@ from pydantic_ai.toolsets import FunctionToolset
 from pydantic_ai_harness.acp import (
     AcpSession,
     AcpSessionConfig,
+    InMemorySessionStore,
     PydanticAIACPAgent,
     ToolCallPresentation,
     chain_presenters,
@@ -58,6 +59,7 @@ from pydantic_ai_harness.acp._adapter import _TurnState
 from pydantic_ai_harness.acp._present import absolutize
 from pydantic_ai_harness.acp._serialize import MAX_RAW_FIELD_CHARS, MAX_TEXT_UPDATE_BYTES, _escaped_len, chunk_text
 from pydantic_ai_harness.acp._session import SessionState
+from tests._acp_clients import RecordingClient  # pyright: ignore[reportMissingTypeStubs]
 
 pytestmark = pytest.mark.anyio
 
@@ -550,6 +552,17 @@ class TestStreaming:
         assert all(isinstance(chunk, str) and len(json.dumps(chunk)) - 2 <= MAX_TEXT_UPDATE_BYTES for chunk in chunks)
         assert ''.join(str(chunk) for chunk in chunks) == big
 
+    async def test_prompt_response_reports_token_usage(self) -> None:
+        adapter: PydanticAIACPAgent[None, str] = PydanticAIACPAgent(Agent(TestModel(custom_output_text='hi')))
+        client = FakeClient()
+        session_id = await _start(adapter, client)
+
+        response = await adapter.prompt(prompt=[acp.text_block('go')], session_id=session_id)
+
+        assert response.usage is not None
+        assert response.usage.input_tokens > 0 and response.usage.output_tokens > 0
+        assert response.usage.total_tokens == response.usage.input_tokens + response.usage.output_tokens
+
 
 class TestChunkText:
     """`chunk_text` bounds the JSON-escaped byte size of each streamed update (see `_serialize`)."""
@@ -712,6 +725,20 @@ class TestPermission:
             ('tool_call_update', 'completed'),
         ]
         assert executed == ['x']
+
+    async def test_approval_turn_with_a_store_persists_each_update_once(self) -> None:
+        # The turn pauses for approval and resumes, accumulating updates across passes. The
+        # persisted transcript must match what the client saw, with no duplicated tool-call start.
+        store = InMemorySessionStore()
+        adapter: PydanticAIACPAgent[None, str] = PydanticAIACPAgent(_approval_agent([]), session_store=store)
+        client = FakeClient(decider=lambda _call: 'allow_once')
+        session_id = await _start(adapter, client)
+
+        await adapter.prompt(prompt=[acp.text_block('delete')], session_id=session_id)
+
+        stored = await store.load(session_id)
+        assert stored is not None
+        assert stored.updates == client.updates
 
     async def test_allow_always_skips_the_prompt_on_later_turns(self) -> None:
         executed: list[str] = []
@@ -926,6 +953,33 @@ class TestCancellation:
         assert response.stop_reason == 'cancelled'
         # The turn is rolled back, so the response must not claim the user message was recorded.
         assert response.user_message_id is None
+
+    async def test_cancelled_turn_with_a_store_persists_nothing(self) -> None:
+        store = InMemorySessionStore()
+        started = asyncio.Event()
+        release = asyncio.Event()
+        agent = Agent(TestModel())
+
+        @agent.tool_plain
+        async def slow_tool() -> str:
+            started.set()
+            await release.wait()
+            return 'done'  # pragma: no cover - cancelled before returning
+
+        adapter: PydanticAIACPAgent[None, str] = PydanticAIACPAgent(agent, session_store=store)
+        client = FakeClient()
+        session_id = await _start(adapter, client)
+        before = await store.load(session_id)
+
+        turn = asyncio.ensure_future(adapter.prompt(prompt=[acp.text_block('go')], session_id=session_id))
+        await asyncio.wait_for(started.wait(), timeout=5)
+        await adapter.cancel(session_id=session_id)
+        response = await asyncio.wait_for(turn, timeout=5)
+
+        assert response.stop_reason == 'cancelled'
+        # The store still holds the pre-turn (empty) snapshot: a cancelled turn commits nothing.
+        assert before is not None and before.messages == [] and before.updates == []
+        assert await store.load(session_id) == before
 
     async def test_cancel_unknown_session_is_a_noop(self) -> None:
         adapter: PydanticAIACPAgent[None, str] = PydanticAIACPAgent(Agent(TestModel()))
@@ -1292,6 +1346,22 @@ class TestEntryPoints:
             await conn.close_session(session_id=session.session_id)
 
         assert model_result is not None
+
+    async def test_native_toolsets_route_over_stdio(self) -> None:
+        """Client-backed fs/terminal tools reach the real client over stdio when mounted per session."""
+        client = RecordingClient(files={'notes.txt': 'hello'}, output='hi')
+        capabilities = schema.ClientCapabilities(
+            fs=schema.FileSystemCapabilities(read_text_file=True, write_text_file=True), terminal=True
+        )
+        script = Path(__file__).parent / '_demo_native_agent.py'
+        async with acp.spawn_agent_process(client, sys.executable, str(script)) as (conn, _proc):
+            await conn.initialize(protocol_version=acp.PROTOCOL_VERSION, client_capabilities=capabilities)
+            session = await conn.new_session(cwd='.', mcp_servers=[])
+            await conn.prompt(session_id=session.session_id, prompt=[acp.text_block('go')], message_id=uuid4().hex)
+
+        # The agent's read_file/run_command calls were served by the client over the wire.
+        assert ('notes.txt', session.session_id) in client.reads
+        assert any(command == 'echo hi' for command, _cwd in client.created)
 
 
 def _tool_call(name: str, args: str | dict[str, Any] | None) -> ToolCallPart:

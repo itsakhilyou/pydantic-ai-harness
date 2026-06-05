@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import acp
 import pytest
+from pydantic import TypeAdapter
 from pydantic_ai import Agent
+from pydantic_ai.messages import ModelRequest, ModelResponse, TextPart, UserPromptPart
 from pydantic_ai.models.test import TestModel
 
 from pydantic_ai_harness.acp import InMemorySessionStore, PydanticAIACPAgent, StoredSession
@@ -15,6 +17,21 @@ pytestmark = pytest.mark.anyio
 
 def _adapter(store: InMemorySessionStore | None) -> PydanticAIACPAgent[None, str]:
     return PydanticAIACPAgent(Agent(TestModel(custom_output_text='hello')), session_store=store)
+
+
+def test_stored_session_round_trips_through_pydantic() -> None:
+    # A durable store serializes `StoredSession` with Pydantic; the whole `SessionUpdate` union
+    # (not just the variants a turn happens to produce) must survive a JSON round-trip.
+    original = StoredSession(
+        messages=[
+            ModelRequest(parts=[UserPromptPart(content='hi')]),
+            ModelResponse(parts=[TextPart(content='yo')]),
+        ],
+        updates=[acp.update_agent_message_text('yo'), acp.update_agent_thought_text('thinking')],
+        model='openai:gpt-4o',
+    )
+    adapter = TypeAdapter(StoredSession)
+    assert adapter.validate_json(adapter.dump_json(original)) == original
 
 
 async def test_initialize_advertises_load_session_only_with_a_store() -> None:
