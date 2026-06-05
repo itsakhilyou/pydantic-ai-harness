@@ -7,8 +7,9 @@ if TYPE_CHECKING:
     from .filesystem import FileSystem
     from .logfire import ManagedPrompt
     from .shell import Shell
+    from .web import SummarizingFetch, WebResearch
 
-__all__ = ['CodeMode', 'FileSystem', 'ManagedPrompt', 'Shell']
+__all__ = ['CodeMode', 'FileSystem', 'ManagedPrompt', 'Shell', 'SummarizingFetch', 'WebResearch']
 
 
 def __getattr__(name: str) -> object:
@@ -28,4 +29,12 @@ def __getattr__(name: str) -> object:
         from .shell import Shell
 
         return Shell
+    if name == 'SummarizingFetch':
+        from .web import SummarizingFetch
+
+        return SummarizingFetch
+    if name == 'WebResearch':
+        from .web import WebResearch
+
+        return WebResearch
     raise AttributeError(f'module {__name__!r} has no attribute {name!r}')
