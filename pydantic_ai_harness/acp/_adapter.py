@@ -1,0 +1,697 @@
+"""Adapt a Pydantic AI agent to the Agent Client Protocol (ACP) agent interface.
+
+ACP (https://agentclientprotocol.com) lets a code editor or terminal UI (the *client*)
+drive a coding agent (the *server*) over stdio JSON-RPC. This module exposes a Pydantic AI
+[`Agent`][pydantic_ai.Agent] as such a server: it streams the agent's output to the client
+as `session/update` notifications and bridges ACP permission requests to Pydantic AI's
+human-in-the-loop tool approval.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import contextlib
+import json
+from collections.abc import Hashable, Sequence
+from dataclasses import dataclass, field
+from inspect import isawaitable
+from typing import Generic, Literal, get_args
+from uuid import uuid4
+
+import acp
+from acp import schema
+from acp.interfaces import Client
+from pydantic_ai import DeferredToolRequests, DeferredToolResults, ToolDenied
+from pydantic_ai.agent import AbstractAgent
+from pydantic_ai.messages import (
+    AgentStreamEvent,
+    FunctionToolCallEvent,
+    FunctionToolResultEvent,
+    PartDeltaEvent,
+    PartStartEvent,
+    RetryPromptPart,
+    TextPart,
+    TextPartDelta,
+    ThinkingPart,
+    ThinkingPartDelta,
+    ToolCallPart,
+    UserContent,
+)
+from pydantic_ai.models import KnownModelName
+from pydantic_ai.output import OutputDataT
+from pydantic_ai.run import AgentRunResultEvent
+from pydantic_ai.tools import AgentDepsT
+from pydantic_ai.toolsets import AbstractToolset, FunctionToolset
+
+from ._content import PromptContentBlock, prompt_blocks_to_user_content
+from ._permission import PermissionPolicy, ToolCallPermission, default_permission_scope
+from ._present import ToolCallContent, ToolCallPresenter, absolutize, default_coding_presenter
+from ._serialize import MAX_TEXT_UPDATE_CHARS, bounded_jsonable, jsonable
+from ._session import AcpSession, AcpSessionConfig, McpServers, SessionConfigFunc, SessionState, SessionUpdate
+from ._store import SessionStore, StoredSession
+
+# Version advertised to the client when the caller does not supply one.
+DEFAULT_VERSION = '0.1.0'
+
+
+def _all_known_model_names() -> tuple[str, ...]:
+    """Every model name Pydantic AI knows -- the string members of the `KnownModelName` alias.
+
+    `KnownModelName` is a `TypeAliasType`, so the members are read from `__value__` (one flat
+    `Literal` of `'provider:model'` strings).
+    """
+    return get_args(KnownModelName.__value__)
+
+
+class _TurnCancelled(Exception):
+    """Raised internally to unwind a turn the client cancelled mid-flight (e.g. via a permission dialog)."""
+
+
+@dataclass(kw_only=True)
+class _TurnState:
+    """Per-turn state shared by the stream handlers, created once per turn in `_run_turn`."""
+
+    conn: Client
+    session_id: str
+    cwd: str
+    approval_names: frozenset[str]
+    # Tool-call ids accumulated across the turn's approval-resume passes: `started` so a call
+    # paused for approval is announced only once, `denied` so a rejected call's result is failed.
+    started: set[str] = field(default_factory=set[str])
+    denied: set[str] = field(default_factory=set[str])
+    # The `session/update`s sent this turn; appended to the session transcript only on commit.
+    updates: list[SessionUpdate] = field(default_factory=list[SessionUpdate])
+
+
+@dataclass(frozen=True, kw_only=True)
+class _ToolCallFields:
+    """The ACP tool-call fields derived from the presenter, shared by the start and permission paths."""
+
+    title: str
+    kind: schema.ToolKind | None
+    content: list[ToolCallContent] | None
+    locations: list[schema.ToolCallLocation] | None
+
+
+class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
+    """An ACP agent backed by a Pydantic AI [`Agent`][pydantic_ai.Agent].
+
+    Each ACP session is an independent conversation, keyed by session ID. Pass the instance to
+    [`run_acp_stdio`][pydantic_ai_harness.acp.run_acp_stdio] (or the lower-level `acp.run_agent`)
+    to serve it over stdio.
+
+    A tool that [requires approval](https://ai.pydantic.dev/tools-toolsets/deferred-tools/)
+    pauses the run and asks the client via `session/request_permission`; "always allow"/"always
+    reject" decisions are remembered for the rest of the session. Per-session workspace setup
+    (the client's `cwd`, additional directories, and MCP servers) is surfaced through the
+    optional `session_config` factory.
+
+    `session/close` cancels any in-flight turn and discards the session. `session/load` (with a
+    `session_store`) and `session/set_model` (with `models`) are supported when configured; fork,
+    resume, modes, and config options are advertised as unsupported. As with any `output_type`
+    override, this adapter is incompatible with agents that define output validators.
+    """
+
+    def __init__(
+        self,
+        agent: AbstractAgent[AgentDepsT, OutputDataT],
+        *,
+        deps: AgentDepsT = None,
+        name: str | None = None,
+        version: str = DEFAULT_VERSION,
+        session_config: SessionConfigFunc[AgentDepsT] | None = None,
+        permission_policy: PermissionPolicy | None = None,
+        prompt_capabilities: schema.PromptCapabilities | None = None,
+        tool_presenter: ToolCallPresenter | None = None,
+        session_store: SessionStore | None = None,
+        models: Sequence[KnownModelName | str] | Literal['all'] | None = None,
+    ) -> None:
+        """Build the adapter.
+
+        Args:
+            agent: The Pydantic AI agent to expose. Its model, tools, and instructions are used as-is.
+            deps: Dependencies passed to every agent run, equivalent to `Agent.run(..., deps=deps)`.
+                Used for sessions that `session_config` does not configure (or when it is not given).
+            name: Name advertised to the client. Defaults to the agent's name, then `'pydantic-ai-agent'`.
+            version: Version advertised to the client.
+            session_config: Optional factory called once per session with the client's
+                [`AcpSession`][pydantic_ai_harness.acp.AcpSession] setup (its `cwd`, additional
+                directories, MCP servers, and capabilities). It returns an
+                [`AcpSessionConfig`][pydantic_ai_harness.acp.AcpSessionConfig] whose `deps` and
+                `toolsets` are applied to every run in that session. May be sync or async.
+            permission_policy: Optional function deciding the scope under which an "always
+                allow"/"always reject" decision is remembered. Defaults to the exact call (tool
+                name plus arguments).
+            prompt_capabilities: Prompt content the agent advertises support for (image, audio,
+                embedded context). Defaults to text-only; enable what the backing model handles,
+                e.g. `schema.PromptCapabilities(image=True, embedded_context=True)`.
+            tool_presenter: Maps a tool call to its rich ACP presentation (`kind`, file
+                `locations`, and diff `content`). Defaults to
+                [`default_coding_presenter`][pydantic_ai_harness.acp.default_coding_presenter],
+                which recognizes the `FileSystem`/`Shell` tools by name (a custom tool sharing a
+                name is also matched). Pass your own presenter (optionally chained ahead of the
+                default with [`chain_presenters`][pydantic_ai_harness.acp.chain_presenters]), or
+                `lambda _call: None` to disable rich rendering.
+            session_store: Optional [`SessionStore`][pydantic_ai_harness.acp.SessionStore] enabling
+                `session/load`: each committed turn is persisted (model history plus client
+                transcript) and a stored session can be reopened. Defaults to `None`, advertising
+                `session/load` as unsupported.
+            models: Optional models the client may switch between with `session/set_model`. The
+                first is each session's default. A selection applies as a per-run override (the
+                shared agent is never mutated) and is persisted with the session. Pass `'all'` to
+                offer every model Pydantic AI knows (its default is then the first known model, so
+                the user should pick one). Defaults to `None`, advertising no models and rejecting
+                `session/set_model`.
+        """
+        self._agent = agent
+        self._deps = deps
+        self._name = name or agent.name or 'pydantic-ai-agent'
+        self._version = version
+        self._session_config = session_config
+        self._permission_policy = permission_policy or default_permission_scope
+        # Text-only by default, so a client is not invited to send image/audio/resource blocks
+        # the backing model may not accept.
+        self._prompt_capabilities = prompt_capabilities or schema.PromptCapabilities()
+        self._tool_presenter = tool_presenter or default_coding_presenter
+        self._session_store = session_store
+        self._models: tuple[str, ...] = _all_known_model_names() if models == 'all' else tuple(models) if models else ()
+        self._client_capabilities: schema.ClientCapabilities | None = None
+        self._conn: Client | None = None
+        # All live sessions, keyed by session id. Each owns its own turn lock (the dispatcher
+        # delivers requests concurrently), so turns within a session are serialized.
+        self._sessions: dict[str, SessionState[AgentDepsT]] = {}
+
+    def on_connect(self, conn: Client) -> None:
+        """Capture the outbound connection used to stream updates and request permission."""
+        self._conn = conn
+
+    async def initialize(
+        self,
+        protocol_version: int,
+        client_capabilities: schema.ClientCapabilities | None = None,
+        client_info: schema.Implementation | None = None,
+        **kwargs: object,
+    ) -> schema.InitializeResponse:
+        """Negotiate the protocol version and advertise the agent's capabilities."""
+        self._client_capabilities = client_capabilities
+        # Echo a supported client version; otherwise answer with the latest version we speak so
+        # an out-of-range client does not negotiate an unsupported one.
+        if 1 <= protocol_version <= acp.PROTOCOL_VERSION:
+            negotiated_version = protocol_version
+        else:
+            negotiated_version = acp.PROTOCOL_VERSION
+        return schema.InitializeResponse(
+            protocol_version=negotiated_version,
+            agent_capabilities=schema.AgentCapabilities(
+                load_session=self._session_store is not None,
+                prompt_capabilities=self._prompt_capabilities,
+                session_capabilities=schema.SessionCapabilities(close=schema.SessionCloseCapabilities()),
+            ),
+            agent_info=schema.Implementation(name=self._name, version=self._version),
+        )
+
+    async def new_session(
+        self,
+        cwd: str,
+        additional_directories: list[str] | None = None,
+        mcp_servers: McpServers = None,
+        **kwargs: object,
+    ) -> schema.NewSessionResponse:
+        """Start a new session with an empty conversation history.
+
+        The session's `cwd` is the workspace the client opened: root the agent's tools at it via
+        `session_config` (see the package README) so file edits and tool-call locations line up
+        with that workspace. A request with MCP servers but no `session_config` is rejected (see
+        `_build_config`).
+        """
+        # `cwd`/`additional_directories` arrive absolute; the ACP router validates that shape.
+        session_id = uuid4().hex
+        config = await self._build_config(session_id, cwd, additional_directories, mcp_servers)
+        # The first configured model is the session default; `None` (no models) uses the agent's own.
+        default_model = self._models[0] if self._models else None
+        state = SessionState(session_id=session_id, config=config, cwd=cwd, model=default_model)
+        self._sessions[session_id] = state
+        # Persist the empty session so the client can reopen it even before its first turn.
+        await self._persist(state)
+        models = self._model_state(state.model) if state.model is not None else None
+        return schema.NewSessionResponse(session_id=session_id, models=models)
+
+    async def load_session(
+        self,
+        cwd: str,
+        session_id: str,
+        additional_directories: list[str] | None = None,
+        mcp_servers: McpServers = None,
+        **kwargs: object,
+    ) -> schema.LoadSessionResponse | None:
+        """Reopen a stored session: restore its model history and replay its transcript to the client.
+
+        Only called when a `session_store` was given (`session/load` is otherwise advertised as
+        unsupported). The run configuration is rebuilt from `cwd`/`mcp_servers` via
+        `session_config`, as in `new_session`.
+
+        Raises:
+            acp.RequestError: if no session with `session_id` is stored.
+        """
+        if self._session_store is None:  # pragma: no cover - load_session is advertised only with a store
+            raise acp.RequestError.method_not_found('session/load')
+        if self._conn is None:  # pragma: no cover - on_connect always runs before load_session
+            raise RuntimeError('load_session called before on_connect()')
+        stored = await self._session_store.load(session_id)
+        if stored is None:
+            raise acp.RequestError.invalid_params(
+                {'session_id': session_id, 'reason': 'no stored session with this id'}
+            )
+        config = await self._build_config(session_id, cwd, additional_directories, mcp_servers)
+        state = SessionState(
+            session_id=session_id,
+            config=config,
+            cwd=cwd,
+            history=list(stored.messages),
+            transcript=list(stored.updates),
+            model=stored.model,
+        )
+        self._sessions[session_id] = state
+        for update in stored.updates:
+            await self._conn.session_update(session_id=session_id, update=update)
+        models = self._model_state(state.model) if state.model is not None else None
+        return schema.LoadSessionResponse(models=models)
+
+    async def _persist(self, state: SessionState[AgentDepsT]) -> None:
+        """Save a session's committed state (history, transcript, selected model), if a store is configured."""
+        if self._session_store is None:
+            return
+        await self._session_store.save(
+            state.session_id,
+            StoredSession(messages=list(state.history), updates=list(state.transcript), model=state.model),
+        )
+
+    def _model_state(self, current_model_id: str) -> schema.SessionModelState:
+        """The available/current models advertised to the client. Call only when models are configured."""
+        return schema.SessionModelState(
+            available_models=[schema.ModelInfo(model_id=model, name=model) for model in self._models],
+            current_model_id=current_model_id,
+        )
+
+    async def _build_config(
+        self, session_id: str, cwd: str, additional_directories: list[str] | None, mcp_servers: McpServers
+    ) -> AcpSessionConfig[AgentDepsT]:
+        """Derive a session's run configuration, calling the `session_config` factory if present.
+
+        Raises:
+            acp.RequestError: if the client provides MCP servers but no `session_config` is
+                installed to connect them.
+        """
+        if self._session_config is None:
+            if mcp_servers:
+                raise acp.RequestError.invalid_params(
+                    {
+                        'reason': 'this agent does not connect MCP servers; provide a session_config '
+                        'that turns mcp_servers into toolsets to use them',
+                        'mcp_server_count': len(mcp_servers),
+                    }
+                )
+            return AcpSessionConfig(deps=self._deps)
+        if self._conn is None:  # pragma: no cover - on_connect always runs before new_session
+            raise RuntimeError('new_session called before on_connect()')
+        session = AcpSession(
+            cwd=cwd,
+            additional_directories=additional_directories or [],
+            mcp_servers=mcp_servers or [],
+            client_capabilities=self._client_capabilities,
+            client=self._conn,
+            session_id=session_id,
+        )
+        result = self._session_config(session)
+        return await result if isawaitable(result) else result
+
+    async def prompt(
+        self,
+        prompt: list[PromptContentBlock],
+        session_id: str,
+        message_id: str | None = None,
+        **kwargs: object,
+    ) -> schema.PromptResponse:
+        """Run one user turn, streaming the agent's output to the client.
+
+        Turns for a session are serialized. The turn runs in a cancellable task so a concurrent
+        `session/cancel` (or a cancelled permission dialog) stops it promptly with a `cancelled`
+        stop reason; a cancelled turn's prompt and partial output are not committed to the
+        session history.
+        """
+        if self._conn is None:  # pragma: no cover - on_connect always runs first in practice
+            raise RuntimeError('prompt() called before on_connect()')
+        state = self._sessions.get(session_id)
+        if state is None:
+            raise acp.RequestError.invalid_params({'session_id': session_id})
+
+        user_content = prompt_blocks_to_user_content(prompt)
+        async with state.lock:
+            state.cancel_requested = False
+            turn = asyncio.ensure_future(self._run_turn(state, user_content))
+            state.active_turn = turn
+            try:
+                await turn
+            except _TurnCancelled:
+                # Rolled back: omit `user_message_id`, which would signal the message was persisted.
+                return schema.PromptResponse(stop_reason='cancelled')
+            except asyncio.CancelledError:
+                if state.cancel_requested:
+                    return schema.PromptResponse(stop_reason='cancelled')
+                # The prompt coroutine itself was cancelled (e.g. connection teardown): stop the
+                # child turn before propagating, so it is not left running on a closing connection.
+                turn.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await turn
+                raise
+            finally:
+                state.active_turn = None
+                state.cancel_requested = False
+        return schema.PromptResponse(stop_reason='end_turn', user_message_id=message_id)
+
+    async def cancel(self, session_id: str, **kwargs: object) -> None:
+        """Cancel the in-flight turn for a session, if any."""
+        state = self._sessions.get(session_id)
+        if state is None:
+            return
+        state.cancel_requested = True
+        if state.active_turn is not None and not state.active_turn.done():
+            state.active_turn.cancel()
+
+    async def close_session(self, session_id: str, **kwargs: object) -> schema.CloseSessionResponse | None:
+        """Cancel any in-flight turn and discard all state for the session.
+
+        Closing an unknown (or already-closed) session is a no-op.
+        """
+        state = self._sessions.pop(session_id, None)
+        if state is not None and state.active_turn is not None and not state.active_turn.done():
+            # End the in-flight prompt with a `cancelled` stop reason, and await the turn so the
+            # close response does not race the session's teardown.
+            state.cancel_requested = True
+            state.active_turn.cancel()
+            with contextlib.suppress(asyncio.CancelledError, _TurnCancelled):
+                await state.active_turn
+        return schema.CloseSessionResponse()
+
+    async def _run_turn(self, state: SessionState[AgentDepsT], user_content: list[UserContent]) -> None:
+        """Drive the agent (resuming across tool-approval pauses) and stream updates."""
+        conn = self._conn
+        assert conn is not None
+        history = state.history
+        config = state.config
+        deferred_results: DeferredToolResults | None = None
+        run_input: list[UserContent] | None = user_content
+        output_type = [self._agent.output_type, DeferredToolRequests]
+        turn = _TurnState(
+            conn=conn, session_id=state.session_id, cwd=state.cwd, approval_names=self._approval_tool_names(config)
+        )
+
+        while True:
+            result = None
+            async with self._agent.run_stream_events(
+                run_input,
+                message_history=history,
+                deferred_tool_results=deferred_results,
+                output_type=output_type,
+                deps=config.deps,
+                toolsets=config.toolsets,
+                # Per-run override for the client's `session/set_model` choice; `None` uses the agent's
+                # own model, never mutating the shared agent.
+                model=state.model,
+            ) as stream:
+                event: AgentStreamEvent | AgentRunResultEvent[object]
+                async for event in stream:
+                    if isinstance(event, AgentRunResultEvent):
+                        result = event.result
+                    else:
+                        await self._emit_event(turn, event)
+
+            assert result is not None, 'run_stream_events always yields a final result event'
+            history = result.all_messages()
+            output = result.output
+            if isinstance(output, DeferredToolRequests):
+                if not output.approvals and not output.calls:  # pragma: no cover
+                    break  # defensive: the run never yields an empty DeferredToolRequests
+                deferred_results = await self._resolve_approvals(turn, state, output)
+                run_input = None
+                continue
+            if output is not None and not isinstance(output, str):
+                # Structured output isn't streamed as text parts, so deliver it as a final message.
+                # (`str` output already streamed via text deltas; `None` has nothing to show.)
+                await self._emit_text(turn, json.dumps(jsonable(output)), thought=False)
+            break
+
+        state.history = history
+        # Commit and persist this turn's updates alongside the history; a cancelled turn never
+        # reaches here, so only committed turns are persisted.
+        if self._session_store is not None:
+            state.transcript.extend(turn.updates)
+            await self._persist(state)
+
+    async def _send_update(self, turn: _TurnState, update: SessionUpdate) -> None:
+        """Send one `session/update` to the client, recording it for the transcript when persisting."""
+        if self._session_store is not None:
+            turn.updates.append(update)
+        await turn.conn.session_update(session_id=turn.session_id, update=update)
+
+    async def _emit_text(self, turn: _TurnState, text: str, *, thought: bool) -> None:
+        """Stream text to the client as one or more chunked `session/update` notifications."""
+        for start in range(0, len(text), MAX_TEXT_UPDATE_CHARS):
+            chunk = text[start : start + MAX_TEXT_UPDATE_CHARS]
+            update = acp.update_agent_thought_text(chunk) if thought else acp.update_agent_message_text(chunk)
+            await self._send_update(turn, update)
+
+    def _tool_call_fields(
+        self, call: ToolCallPart, cwd: str, *, default_kind: schema.ToolKind | None
+    ) -> _ToolCallFields:
+        """Derive the ACP tool-call fields shared by the start and permission paths via the presenter.
+
+        Falls back to the tool name for the title, and to `default_kind` when the presenter
+        offers no `kind`.
+        """
+        presentation = self._tool_presenter(call)
+        presentation = absolutize(presentation, cwd) if presentation is not None else None
+        return _ToolCallFields(
+            title=presentation.title if presentation and presentation.title else call.tool_name,
+            kind=presentation.kind if presentation and presentation.kind else default_kind,
+            content=list(presentation.content) if presentation and presentation.content else None,
+            locations=list(presentation.locations) if presentation and presentation.locations else None,
+        )
+
+    async def _emit_event(self, turn: _TurnState, event: AgentStreamEvent) -> None:
+        """Translate a single Pydantic AI stream event into an ACP `session/update`."""
+        if isinstance(event, PartStartEvent):
+            part = event.part
+            if isinstance(part, TextPart) and part.content:
+                await self._emit_text(turn, part.content, thought=False)
+            elif isinstance(part, ThinkingPart) and part.content:
+                await self._emit_text(turn, part.content, thought=True)
+        elif isinstance(event, PartDeltaEvent):
+            delta = event.delta
+            if isinstance(delta, TextPartDelta) and delta.content_delta:
+                await self._emit_text(turn, delta.content_delta, thought=False)
+            elif isinstance(delta, ThinkingPartDelta) and delta.content_delta:
+                await self._emit_text(turn, delta.content_delta, thought=True)
+        elif isinstance(event, FunctionToolCallEvent):
+            call = event.part
+            if call.tool_call_id in turn.started:
+                return  # the model re-emits the call event when resuming after approval
+            turn.started.add(call.tool_call_id)
+            fields = self._tool_call_fields(call, turn.cwd, default_kind=None)
+            # A call awaiting approval is not running yet: it starts `pending` and
+            # `_resolve_approvals` promotes it once approved. Any other call is already executing.
+            status: schema.ToolCallStatus = 'pending' if call.tool_name in turn.approval_names else 'in_progress'
+            await self._send_update(
+                turn,
+                acp.start_tool_call(
+                    tool_call_id=call.tool_call_id,
+                    title=fields.title,
+                    kind=fields.kind,
+                    status=status,
+                    content=fields.content,
+                    locations=fields.locations,
+                    raw_input=bounded_jsonable(call.args),
+                ),
+            )
+        elif isinstance(event, FunctionToolResultEvent):
+            part = event.part
+            if isinstance(part, RetryPromptPart):
+                status, raw_output = 'failed', part.model_response()
+            elif part.tool_call_id in turn.denied:
+                status, raw_output = 'failed', part.content
+            else:
+                status, raw_output = 'completed', part.content
+            await self._send_update(
+                turn,
+                acp.update_tool_call(
+                    tool_call_id=part.tool_call_id,
+                    status=status,
+                    raw_output=bounded_jsonable(raw_output),
+                ),
+            )
+
+    async def _resolve_approvals(
+        self, turn: _TurnState, state: SessionState[AgentDepsT], requests: DeferredToolRequests
+    ) -> DeferredToolResults:
+        """Ask the client to approve each pending tool call and collect the decisions.
+
+        Records rejected call IDs in `turn.denied` so the eventual result event is reported as failed.
+
+        Raises:
+            _TurnCancelled: if the client cancels a permission request.
+            acp.RequestError: if the agent requests external tool execution, which is unsupported.
+        """
+        if requests.calls:
+            names = sorted({call.tool_name for call in requests.calls})
+            raise acp.RequestError.internal_error(
+                {'reason': 'external tool execution is not supported by the ACP adapter', 'tools': names}
+            )
+
+        results = DeferredToolResults()
+        for call in requests.approvals:
+            scope = self._permission_policy(
+                ToolCallPermission(tool_name=call.tool_name, tool_call_id=call.tool_call_id, args=call.args)
+            )
+            if scope in state.always_allow:
+                results.approvals[call.tool_call_id] = True
+                await self._mark_running(turn, call.tool_call_id)
+                continue
+            if scope in state.always_reject:
+                results.approvals[call.tool_call_id] = ToolDenied('Rejected by the client.')
+                turn.denied.add(call.tool_call_id)
+                continue
+            # Only an approved call is promoted to `in_progress`; a rejected one stays `pending`
+            # until its `failed` result, never shown as running.
+            decision = await self._request_permission(turn, state, call, scope)
+            results.approvals[call.tool_call_id] = decision
+            if isinstance(decision, ToolDenied):
+                turn.denied.add(call.tool_call_id)
+            else:
+                await self._mark_running(turn, call.tool_call_id)
+        return results
+
+    async def _mark_running(self, turn: _TurnState, tool_call_id: str) -> None:
+        """Promote an approved tool call from `pending` to `in_progress`, just before it executes."""
+        await self._send_update(turn, acp.update_tool_call(tool_call_id=tool_call_id, status='in_progress'))
+
+    def _approval_tool_names(self, config: AcpSessionConfig[AgentDepsT]) -> frozenset[str]:
+        """Names of the tools that pause for the client's approval, announced `pending` in `_emit_event`.
+
+        Only `FunctionToolset`-held tools expose `requires_approval` without a live run context;
+        tools from other toolset types are treated as not requiring approval.
+        """
+        toolsets: list[AbstractToolset[AgentDepsT]] = [*self._agent.toolsets, *(config.toolsets or [])]
+        names: set[str] = set()
+        for toolset in toolsets:
+            if isinstance(toolset, FunctionToolset):
+                names.update(name for name, tool in toolset.tools.items() if tool.requires_approval)
+        return frozenset(names)
+
+    async def _request_permission(
+        self, turn: _TurnState, state: SessionState[AgentDepsT], call: ToolCallPart, scope: Hashable
+    ) -> bool | ToolDenied:
+        """Ask the client to approve a single tool call, remembering "always" decisions by `scope`."""
+        fields = self._tool_call_fields(call, turn.cwd, default_kind='execute')
+        response = await turn.conn.request_permission(
+            session_id=turn.session_id,
+            tool_call=schema.ToolCallUpdate(
+                tool_call_id=call.tool_call_id,
+                title=fields.title,
+                kind=fields.kind,
+                status='pending',
+                content=fields.content,
+                locations=fields.locations,
+                raw_input=bounded_jsonable(call.args),
+            ),
+            options=[
+                schema.PermissionOption(kind='allow_once', name='Allow', option_id='allow_once'),
+                schema.PermissionOption(kind='allow_always', name='Always allow', option_id='allow_always'),
+                schema.PermissionOption(kind='reject_once', name='Reject', option_id='reject_once'),
+                schema.PermissionOption(kind='reject_always', name='Always reject', option_id='reject_always'),
+            ],
+        )
+        outcome = response.outcome
+        if isinstance(outcome, schema.DeniedOutcome):
+            # ACP signals a cancelled turn via a "cancelled" permission outcome.
+            raise _TurnCancelled
+        if outcome.option_id == 'allow_always':
+            state.always_allow.add(scope)
+        elif outcome.option_id == 'reject_always':
+            state.always_reject.add(scope)
+        if outcome.option_id in ('allow_once', 'allow_always'):
+            return True
+        return ToolDenied('Rejected by the client.')
+
+    # --- Optional ACP methods not supported by this adapter ------------------------------
+    # The capabilities for these are advertised as off in `initialize`, and the ACP router
+    # rejects unsupported methods at runtime; they are implemented here only to satisfy the
+    # `acp.Agent` interface for type checking.
+
+    async def authenticate(self, method_id: str, **kwargs: object) -> schema.AuthenticateResponse | None:
+        """No authentication is required, so this is a no-op."""
+        return None
+
+    async def list_sessions(
+        self,
+        additional_directories: list[str] | None = None,
+        cursor: str | None = None,
+        cwd: str | None = None,
+        **kwargs: object,
+    ) -> schema.ListSessionsResponse:
+        raise acp.RequestError.method_not_found('session/list')
+
+    async def set_session_mode(
+        self, mode_id: str, session_id: str, **kwargs: object
+    ) -> schema.SetSessionModeResponse | None:
+        raise acp.RequestError.method_not_found('session/set_mode')
+
+    async def set_session_model(
+        self, model_id: str, session_id: str, **kwargs: object
+    ) -> schema.SetSessionModelResponse | None:
+        """Switch the session's model to one of the advertised `models`, persisting the choice.
+
+        Raises:
+            acp.RequestError: if no models were configured (`session/set_model` is then advertised
+                as unsupported), the session is unknown, or `model_id` is not an advertised model.
+        """
+        if not self._models:
+            raise acp.RequestError.method_not_found('session/set_model')
+        state = self._sessions.get(session_id)
+        if state is None:
+            raise acp.RequestError.invalid_params({'session_id': session_id})
+        if model_id not in self._models:
+            raise acp.RequestError.invalid_params({'model_id': model_id, 'reason': 'not an advertised model'})
+        state.model = model_id
+        await self._persist(state)
+        return schema.SetSessionModelResponse()
+
+    async def set_config_option(
+        self, config_id: str, session_id: str, value: str | bool, **kwargs: object
+    ) -> schema.SetSessionConfigOptionResponse | None:
+        raise acp.RequestError.method_not_found('session/set_config_option')
+
+    async def fork_session(
+        self,
+        cwd: str,
+        session_id: str,
+        additional_directories: list[str] | None = None,
+        mcp_servers: McpServers = None,
+        **kwargs: object,
+    ) -> schema.ForkSessionResponse:
+        raise acp.RequestError.method_not_found('session/fork')
+
+    async def resume_session(
+        self,
+        cwd: str,
+        session_id: str,
+        additional_directories: list[str] | None = None,
+        mcp_servers: McpServers = None,
+        **kwargs: object,
+    ) -> schema.ResumeSessionResponse:
+        raise acp.RequestError.method_not_found('session/resume')
+
+    async def ext_method(self, method: str, params: dict[str, object]) -> dict[str, object]:
+        raise acp.RequestError.method_not_found(method)
+
+    async def ext_notification(self, method: str, params: dict[str, object]) -> None:
+        return None

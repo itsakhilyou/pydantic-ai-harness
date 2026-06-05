@@ -8,7 +8,6 @@ from pathlib import Path
 
 from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.tools import AgentDepsT
-from pydantic_ai.toolsets import AgentToolset
 
 from pydantic_ai_harness.shell._toolset import ShellToolset
 
@@ -62,7 +61,7 @@ class Shell(AbstractCapability[AgentDepsT]):
     allow_interactive: bool = False
     """If True, allow interactive commands (vi, nano, ssh, etc.). Blocked by default."""
 
-    def get_toolset(self) -> AgentToolset[AgentDepsT]:
+    def get_toolset(self) -> ShellToolset[AgentDepsT]:
         """Build and return the shell toolset."""
         return ShellToolset[AgentDepsT](
             cwd=Path(self.cwd),
