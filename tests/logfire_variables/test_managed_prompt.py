@@ -1,23 +1,15 @@
 """Tests for the `ManagedPrompt` capability (source package `pydantic_ai_harness.logfire`).
 
-This directory is deliberately named `logfire_variables`, not `logfire`, even though it
-tests the `pydantic_ai_harness.logfire` package. The pyright config scopes test-only report
-overrides with `executionEnvironments = [{ root = 'tests' }]`, which makes `tests/` an import
-root -- so a `tests/logfire/` directory would shadow the third-party `logfire` package for
-every test file's `import logfire`. Keeping the directory off that name avoids the collision.
-
-Style follows `tests/code_mode/test_code_mode.py`: module-level
-`pytestmark = pytest.mark.anyio` and an `anyio_backend` fixture. All resolution runs
-against the code default (no Logfire provider is configured), which is exactly the
-safety-net behavior `ManagedPrompt` relies on. Each test uses a unique slug because the
-default Logfire instance keeps its variable registry across `configure()` calls.
+Shared fixtures (`anyio_backend`, Logfire configuration) live in `conftest.py`, which also explains
+why the directory is named `logfire_variables` rather than `logfire`. Shared helpers live in
+`_helpers.py`, and the variable-naming contract common to all managed-variable capabilities is
+covered in `test_managed_variable.py`. This module focuses on `ManagedPrompt` resolving a prompt
+into the agent's instructions (including template rendering) and the resolution span it records.
 """
 
 from __future__ import annotations
 
 import importlib.metadata
-from collections.abc import Generator
-from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any
 from unittest.mock import patch
@@ -27,7 +19,6 @@ import pytest
 from inline_snapshot import snapshot
 from logfire.testing import CaptureLogfire
 from logfire.variables import LabeledValue, Rollout, VariableConfig, VariablesConfig
-from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from pydantic_ai import Agent, RunContext
 from pydantic_ai.capabilities import Instrumentation
 from pydantic_ai.messages import ModelMessage, ModelRequest
@@ -36,6 +27,8 @@ from pydantic_ai.usage import RunUsage
 
 from pydantic_ai_harness import ManagedPrompt
 from pydantic_ai_harness.logfire import ManagedPrompt as ManagedPromptFromPackage
+
+from ._helpers import variables_provider
 
 pytestmark = pytest.mark.anyio
 
@@ -47,17 +40,6 @@ DEFAULT = 'You are a helpful assistant.'
 # supports the 1.x floor (`pydantic-ai-slim>=1.105.0`), so version-tolerant tests
 # keep both the locked 1.x jobs and the `test on latest` (2.0.0) job green.
 _PYDANTIC_AI_GE_2 = int(importlib.metadata.version('pydantic-ai-slim').split('.')[0]) >= 2
-
-
-@pytest.fixture(autouse=True, scope='module')
-def _configure_logfire() -> None:
-    """Configure Logfire once so variable resolution does not warn (warnings are errors)."""
-    logfire.configure(send_to_logfire=False, console=False)
-
-
-@pytest.fixture
-def anyio_backend() -> str:
-    return 'asyncio'
 
 
 def instructions_seen(result_messages: list[ModelMessage]) -> list[str]:
@@ -79,25 +61,6 @@ _VOLATILE_SPAN_ATTRIBUTES = (
     'gen_ai.agent.call.id',
     'logfire.metrics',
 )
-
-
-@contextmanager
-def _variables_provider_configured(capfire: CaptureLogfire, variables_config: VariablesConfig) -> Generator[None]:
-    """Reconfigure Logfire with a local variables provider for the duration of the block.
-
-    Restores the module's baseline configuration on exit so the change does not leak
-    into other tests in this module (or any module collected after it).
-    """
-    logfire.configure(
-        send_to_logfire=False,
-        console=False,
-        variables=logfire.LocalVariablesOptions(config=variables_config),
-        additional_span_processors=[SimpleSpanProcessor(capfire.exporter)],
-    )
-    try:
-        yield
-    finally:
-        logfire.configure(send_to_logfire=False, console=False)
 
 
 def span_attributes(capfire: CaptureLogfire) -> list[dict[str, Any]]:
@@ -124,39 +87,9 @@ def test_slug_becomes_prompt_variable_name() -> None:
     assert capability._variable.name == 'prompt__support_agent'
 
 
-def test_hyphenated_slug_is_normalized() -> None:
-    capability = ManagedPrompt('welcome-email', default=DEFAULT)
-    assert capability._variable.name == 'prompt__welcome_email'
-
-
 def test_slug_requires_default() -> None:
     with pytest.raises(TypeError, match='`default` is required'):
         ManagedPrompt('no_default_slug')
-
-
-def test_explicit_logfire_instance_is_used() -> None:
-    capability = ManagedPrompt('with_instance', default=DEFAULT, logfire_instance=logfire.DEFAULT_LOGFIRE_INSTANCE)
-    assert capability._variable.name == 'prompt__with_instance'
-
-
-def test_duplicate_slug_is_allowed() -> None:
-    # Each ManagedPrompt builds its own backing variable, so the same slug can be declared
-    # repeatedly (e.g. shared across agents) without the duplicate-registration error
-    # `logfire.var` would raise.
-    first = ManagedPrompt('shared_slug', default=DEFAULT)
-    second = ManagedPrompt('shared_slug', default=DEFAULT)
-    assert first._variable.name == second._variable.name == 'prompt__shared_slug'
-
-
-def test_prompt_prefix_in_slug_warns_and_is_stripped() -> None:
-    with pytest.warns(UserWarning, match='added automatically'):
-        capability = ManagedPrompt('prompt__already_prefixed', default=DEFAULT)
-    assert capability._variable.name == 'prompt__already_prefixed'
-
-
-def test_invalid_slug_raises() -> None:
-    with pytest.raises(ValueError, match='invalid variable name'):
-        ManagedPrompt('has spaces', default=DEFAULT)
 
 
 async def test_resolves_default_into_instructions() -> None:
@@ -261,7 +194,7 @@ async def test_baggage_propagates_to_run_and_child_spans(capfire: CaptureLogfire
                     'gen_ai.provider.name': 'test',
                     'gen_ai.system': 'test',
                     'gen_ai.request.model': 'test',
-                    'model_request_parameters': '{"function_tools":[{"name":"noop","parameters_json_schema":{"additionalProperties":false,"properties":{},"type":"object"},"description":null,"outer_typed_dict_key":null,"strict":null,"sequential":false,"kind":"function","metadata":null,"timeout":null,"defer_loading":false,"unless_native":null,"with_native":null,"tool_kind":null,"return_schema":null,"include_return_schema":null,"capability_id":null}],"native_tools":[],"output_mode":"text","output_object":null,"output_tools":[],"prompted_output_template":null,"allow_text_output":true,"allow_image_output":false,"instruction_parts":[{"content":"You are a helpful assistant.","dynamic":true,"part_kind":"instruction"}],"thinking":null}',
+                    'model_request_parameters': '{"function_tools":[{"name":"noop","parameters_json_schema":{"additionalProperties":false,"properties":{},"type":"object"},"description":null,"outer_typed_dict_key":null,"strict":null,"sequential":false,"kind":"function","metadata":null,"timeout":null,"defer_loading":false,"unless_native":null,"with_native":null,"tool_kind":null,"return_schema":null,"include_return_schema":null}],"native_tools":[],"output_mode":"text","output_object":null,"output_tools":[],"prompted_output_template":null,"allow_text_output":true,"allow_image_output":false,"instruction_parts":[{"content":"You are a helpful assistant.","dynamic":true,"part_kind":"instruction"}],"thinking":null}',
                     'gen_ai.agent.name': 'agent',
                     'gen_ai.tool.definitions': '[{"type":"function","name":"noop","parameters":{"additionalProperties":false,"properties":{},"type":"object"}}]',
                     'logfire.span_type': 'span',
@@ -298,7 +231,7 @@ async def test_baggage_propagates_to_run_and_child_spans(capfire: CaptureLogfire
                     'gen_ai.provider.name': 'test',
                     'gen_ai.system': 'test',
                     'gen_ai.request.model': 'test',
-                    'model_request_parameters': '{"function_tools":[{"name":"noop","parameters_json_schema":{"additionalProperties":false,"properties":{},"type":"object"},"description":null,"outer_typed_dict_key":null,"strict":null,"sequential":false,"kind":"function","metadata":null,"timeout":null,"defer_loading":false,"unless_native":null,"with_native":null,"tool_kind":null,"return_schema":null,"include_return_schema":null,"capability_id":null}],"native_tools":[],"output_mode":"text","output_object":null,"output_tools":[],"prompted_output_template":null,"allow_text_output":true,"allow_image_output":false,"instruction_parts":[{"content":"You are a helpful assistant.","dynamic":true,"part_kind":"instruction"}],"thinking":null}',
+                    'model_request_parameters': '{"function_tools":[{"name":"noop","parameters_json_schema":{"additionalProperties":false,"properties":{},"type":"object"},"description":null,"outer_typed_dict_key":null,"strict":null,"sequential":false,"kind":"function","metadata":null,"timeout":null,"defer_loading":false,"unless_native":null,"with_native":null,"tool_kind":null,"return_schema":null,"include_return_schema":null}],"native_tools":[],"output_mode":"text","output_object":null,"output_tools":[],"prompted_output_template":null,"allow_text_output":true,"allow_image_output":false,"instruction_parts":[{"content":"You are a helpful assistant.","dynamic":true,"part_kind":"instruction"}],"thinking":null}',
                     'gen_ai.agent.name': 'agent',
                     'gen_ai.tool.definitions': '[{"type":"function","name":"noop","parameters":{"additionalProperties":false,"properties":{},"type":"object"}}]',
                     'logfire.span_type': 'span',
@@ -329,6 +262,7 @@ async def test_baggage_propagates_to_run_and_child_spans(capfire: CaptureLogfire
                     'pydantic_ai.all_messages': '[{"role":"user","parts":[{"type":"text","content":"hello"}]},{"role":"assistant","parts":[{"type":"tool_call","id":"pyd_ai_tool_call_id__noop","name":"noop","arguments":{}}]},{"role":"user","parts":[{"type":"tool_call_response","id":"pyd_ai_tool_call_id__noop","name":"noop","result":"ok"}]},{"role":"assistant","parts":[{"type":"text","content":"{\\"noop\\":\\"ok\\"}"}]}]',
                     'gen_ai.system_instructions': '[{"type": "text", "content": "You are a helpful assistant."}]',
                     'logfire.json_schema': '{"type":"object","properties":{"pydantic_ai.all_messages":{"type":"array"},"gen_ai.system_instructions":{"type":"array"},"final_result":{"type":"object"}}}',
+                    'logfire.metrics': '{"gen_ai.client.token.usage": {"details": [{"attributes": {"gen_ai.operation.name": "chat", "gen_ai.provider.name": "test", "gen_ai.request.model": "test", "gen_ai.response.model": "test", "gen_ai.system": "test", "gen_ai.token.type": "input"}, "total": 103}, {"attributes": {"gen_ai.operation.name": "chat", "gen_ai.provider.name": "test", "gen_ai.request.model": "test", "gen_ai.response.model": "test", "gen_ai.system": "test", "gen_ai.token.type": "output"}, "total": 8}], "total": 111}}',
                 },
             },
         ]
@@ -440,8 +374,8 @@ async def test_resolved_property_exposes_active_resolution() -> None:
     assert capability.resolved is None
 
 
-def _remote_prompt_config() -> VariablesConfig:
-    return VariablesConfig(
+async def test_provider_backed_resolution_uses_remote_value_and_label(capfire: CaptureLogfire) -> None:
+    config = VariablesConfig(
         variables={
             'prompt__remote_slug': VariableConfig(
                 name='prompt__remote_slug',
@@ -451,11 +385,11 @@ def _remote_prompt_config() -> VariablesConfig:
             )
         }
     )
-
-
-async def test_provider_backed_resolution_uses_remote_value_and_label(capfire: CaptureLogfire) -> None:
-    with _variables_provider_configured(capfire, _remote_prompt_config()):
-        agent = Agent(TestModel(), capabilities=[ManagedPrompt('remote_slug', default='fallback', label='production')])
+    with variables_provider(capfire, config):
+        agent = Agent(
+            TestModel(),
+            capabilities=[ManagedPrompt('remote_slug', default='fallback', label='production'), Instrumentation()],
+        )
 
         result = await agent.run('hello')
 
@@ -467,18 +401,6 @@ async def test_provider_backed_resolution_uses_remote_value_and_label(capfire: C
     assert resolution['attributes']['reason'] == 'resolved'
     assert resolution['attributes']['value'] == '"You are the PRODUCTION prompt."'
     assert resolution['attributes']['label'] == 'production'
-
-
-async def test_provider_backed_resolution_tags_v1_instrumentation_spans(capfire: CaptureLogfire) -> None:
-    with _variables_provider_configured(capfire, _remote_prompt_config()):
-        agent = Agent(
-            TestModel(),
-            capabilities=[ManagedPrompt('remote_slug', default='fallback', label='production'), Instrumentation()],
-        )
-
-        await agent.run('hello')
-
-    spans = capfire.exporter.exported_spans_as_dict()
     # Child spans are tagged with the resolved label via baggage.
     tagged = {s['name'] for s in spans if s['attributes'].get('logfire.variables.prompt__remote_slug') == 'production'}
     agent_span = 'invoke_agent agent' if _PYDANTIC_AI_GE_2 else 'agent run'

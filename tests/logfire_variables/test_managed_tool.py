@@ -1,21 +1,15 @@
 """Tests for the `ManagedTool` capability (source package `pydantic_ai_harness.logfire`).
 
-This directory is deliberately named `logfire_variables`, not `logfire`, for the same reason
-described in `test_managed_prompt.py`: a `tests/logfire/` directory would shadow the third-party
-`logfire` package for every test file's `import logfire`.
-
-Style follows `test_managed_prompt.py`: module-level `pytestmark = pytest.mark.anyio` and an
-`anyio_backend` fixture. All resolution runs against the code default (no Logfire provider is
-configured) unless a test installs a local provider, which is exactly the safety-net behavior
-`ManagedTool` relies on. Each test uses a unique variable name because the default Logfire
-instance keeps its variable registry across `configure()` calls.
+Shared fixtures (`anyio_backend`, Logfire configuration) live in `conftest.py` and shared helpers
+(`capture_tools`, `get_weather`, `variables_provider`) in `_helpers.py`. The variable-naming
+contract shared with the other managed-variable capabilities is covered in `test_managed_variable.py`;
+this module focuses on `ManagedTool`'s own behavior -- owning a `Tool`, and resolving overrides into
+advertised tool definitions.
 """
 
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Generator
-from contextlib import contextmanager
 from dataclasses import dataclass
 from unittest.mock import patch
 
@@ -23,12 +17,9 @@ import logfire
 import pytest
 from logfire.testing import CaptureLogfire
 from logfire.variables import LabeledValue, Rollout, VariableConfig, VariablesConfig
-from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from pydantic_ai import Agent, Tool
 from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.exceptions import UserError
-from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart
-from pydantic_ai.models.function import AgentInfo, FunctionModel
 from pydantic_ai.models.test import TestModel
 from pydantic_ai.tools import ToolDefinition
 
@@ -37,58 +28,15 @@ from pydantic_ai_harness.logfire import ManagedTool as ManagedToolFromPackage
 from pydantic_ai_harness.logfire import ManagedToolOverride as ManagedToolOverrideFromPackage
 from pydantic_ai_harness.logfire._managed_tool import _with_parameter_descriptions
 
+from ._helpers import capture_tools, get_weather, variables_provider
+
 pytestmark = pytest.mark.anyio
-
-
-def get_weather(city: str) -> str:
-    """A module-level tool function used to build an owned `Tool`."""
-    return f'sunny in {city}'
-
-
-@pytest.fixture(autouse=True, scope='module')
-def _configure_logfire() -> None:
-    """Configure Logfire once so variable resolution does not warn (warnings are errors)."""
-    logfire.configure(send_to_logfire=False, console=False)
-
-
-@pytest.fixture
-def anyio_backend() -> str:
-    return 'asyncio'
-
-
-def _capture_tools(seen: list[ToolDefinition]) -> FunctionModel:
-    """A model that records the advertised function tools it is shown, then ends the run."""
-
-    def respond(_messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
-        seen.extend(info.function_tools)
-        return ModelResponse(parts=[TextPart('done')])
-
-    return FunctionModel(respond)
 
 
 def _weather_agent(*capabilities: AbstractCapability[None]) -> Agent[None, str]:
     agent = Agent(TestModel(), capabilities=list(capabilities))
-
-    @agent.tool_plain
-    def get_weather(city: str) -> str:
-        return f'sunny in {city}'
-
+    agent.tool_plain(get_weather)
     return agent
-
-
-@contextmanager
-def _variables_provider_configured(capfire: CaptureLogfire, variables_config: VariablesConfig) -> Generator[None]:
-    """Reconfigure Logfire with a local variables provider for the duration of the block."""
-    logfire.configure(
-        send_to_logfire=False,
-        console=False,
-        variables=logfire.LocalVariablesOptions(config=variables_config),
-        additional_span_processors=[SimpleSpanProcessor(capfire.exporter)],
-    )
-    try:
-        yield
-    finally:
-        logfire.configure(send_to_logfire=False, console=False)
 
 
 # --- Construction / variable naming ---
@@ -107,33 +55,6 @@ def test_tool_name_becomes_variable_name() -> None:
 def test_explicit_variable_name_overrides_tool_name() -> None:
     capability = ManagedTool('get_weather', variable='weather_config')
     assert capability._variable.name == 'tool__weather_config'
-
-
-def test_hyphenated_name_is_normalized() -> None:
-    capability = ManagedTool('get-weather')
-    assert capability._variable.name == 'tool__get_weather'
-
-
-def test_prefix_in_name_warns_and_is_stripped() -> None:
-    with pytest.warns(UserWarning, match='added automatically'):
-        capability = ManagedTool('get_weather', variable='tool__already_prefixed')
-    assert capability._variable.name == 'tool__already_prefixed'
-
-
-def test_invalid_name_raises() -> None:
-    with pytest.raises(ValueError, match='invalid variable name'):
-        ManagedTool('has spaces')
-
-
-def test_duplicate_name_is_allowed() -> None:
-    first = ManagedTool('shared_tool')
-    second = ManagedTool('shared_tool')
-    assert first._variable.name == second._variable.name == 'tool__shared_tool'
-
-
-def test_explicit_logfire_instance_is_used() -> None:
-    capability = ManagedTool('with_instance', logfire_instance=logfire.DEFAULT_LOGFIRE_INSTANCE)
-    assert capability._variable.name == 'tool__with_instance'
 
 
 def test_accepts_prebuilt_variable() -> None:
@@ -171,7 +92,7 @@ async def test_owned_tool_is_provided_and_managed() -> None:
 
     seen: list[ToolDefinition] = []
     with capability._variable.override(ManagedToolOverride(name='weather_lookup', description='Look up weather.')):
-        await agent.run('hi', model=_capture_tools(seen))
+        await agent.run('hi', model=capture_tools(seen))
         assert seen[0].name == 'weather_lookup'
         assert seen[0].description == 'Look up weather.'
 
@@ -187,7 +108,7 @@ async def test_default_override_leaves_tool_unchanged() -> None:
     seen: list[ToolDefinition] = []
     agent = _weather_agent(ManagedTool('get_weather', variable='default_tool'))
 
-    await agent.run('hi', model=_capture_tools(seen))
+    await agent.run('hi', model=capture_tools(seen))
 
     assert [td.name for td in seen] == ['get_weather']
     assert seen[0].description is None
@@ -199,7 +120,7 @@ async def test_override_description_only() -> None:
     agent = _weather_agent(capability)
 
     with capability._variable.override(ManagedToolOverride(description='Look up the weather.')):
-        await agent.run('hi', model=_capture_tools(seen))
+        await agent.run('hi', model=capture_tools(seen))
 
     assert seen[0].name == 'get_weather'
     assert seen[0].description == 'Look up the weather.'
@@ -211,7 +132,7 @@ async def test_override_parameter_descriptions() -> None:
     agent = _weather_agent(capability)
 
     with capability._variable.override(ManagedToolOverride(parameter_descriptions={'city': 'City name'})):
-        await agent.run('hi', model=_capture_tools(seen))
+        await agent.run('hi', model=capture_tools(seen))
         # Only the parameter's description changes; its type and the schema's structure are untouched.
         city = seen[0].parameters_json_schema['properties']['city']
         assert city['description'] == 'City name'
@@ -229,12 +150,12 @@ async def test_parameter_descriptions_ignores_unknown_params() -> None:
     capability = ManagedTool('get_weather', variable='unknown_param_tool')
     agent = _weather_agent(capability)
 
-    await agent.run('hi', model=_capture_tools(seen))
+    await agent.run('hi', model=capture_tools(seen))
     code_schema = seen[0].parameters_json_schema
 
     seen.clear()
     with capability._variable.override(ManagedToolOverride(parameter_descriptions={'nonexistent': 'x'})):
-        await agent.run('hi', model=_capture_tools(seen))
+        await agent.run('hi', model=capture_tools(seen))
 
     # A description keyed by a parameter that doesn't exist is a no-op; the schema is unchanged.
     assert seen[0].parameters_json_schema == code_schema
@@ -247,12 +168,12 @@ async def test_override_leaves_parameter_schema_structure_untouched() -> None:
     capability = ManagedTool('get_weather', variable='schema_tool')
     agent = _weather_agent(capability)
 
-    await agent.run('hi', model=_capture_tools(seen))
+    await agent.run('hi', model=capture_tools(seen))
     code_schema = seen[0].parameters_json_schema
 
     seen.clear()
     with capability._variable.override(ManagedToolOverride(name='weather_lookup', description='changed')):
-        await agent.run('hi', model=_capture_tools(seen))
+        await agent.run('hi', model=capture_tools(seen))
 
     assert seen[0].parameters_json_schema == code_schema
     assert not hasattr(ManagedToolOverride(), 'parameters_json_schema')
@@ -280,7 +201,7 @@ async def test_override_name_advertises_and_routes_call() -> None:
     seen: list[ToolDefinition] = []
     with capability._variable.override(ManagedToolOverride(name='weather_lookup')):
         # The renamed tool is what the model sees and calls...
-        await agent.run('hi', model=_capture_tools(seen))
+        await agent.run('hi', model=capture_tools(seen))
         assert [td.name for td in seen] == ['weather_lookup']
 
         # ...and calling it routes back to the original `get_weather` implementation.
@@ -296,7 +217,7 @@ async def test_override_name_and_description() -> None:
     override = ManagedToolOverride(name='weather_lookup', description='Look up weather.')
 
     with capability._variable.override(override):
-        await agent.run('hi', model=_capture_tools(seen))
+        await agent.run('hi', model=capture_tools(seen))
 
     assert seen[0].name == 'weather_lookup'
     assert seen[0].description == 'Look up weather.'
@@ -308,7 +229,7 @@ async def test_managing_absent_tool_is_noop() -> None:
     agent = _weather_agent(capability)
 
     with capability._variable.override(ManagedToolOverride(name='renamed', description='nope')):
-        await agent.run('hi', model=_capture_tools(seen))
+        await agent.run('hi', model=capture_tools(seen))
 
     # The override targets a tool the agent doesn't have, so every real tool is left untouched.
     assert [td.name for td in seen] == ['get_weather']
@@ -325,7 +246,7 @@ async def test_rename_collision_raises() -> None:
 
     with capability._variable.override(ManagedToolOverride(name='get_forecast')):
         with pytest.raises(UserError, match='duplicate tool name'):
-            await agent.run('hi', model=_capture_tools([]))
+            await agent.run('hi', model=capture_tools([]))
 
 
 # --- Resolution lifecycle ---
@@ -422,10 +343,10 @@ async def test_provider_backed_resolution_uses_remote_value(capfire: CaptureLogf
         }
     )
     seen: list[ToolDefinition] = []
-    with _variables_provider_configured(capfire, config):
+    with variables_provider(capfire, config):
         capability = ManagedTool('get_weather', variable='remote_tool', label='production')
         agent = _weather_agent(capability)
-        await agent.run('hi', model=_capture_tools(seen))
+        await agent.run('hi', model=capture_tools(seen))
 
     assert seen[0].description == 'The PRODUCTION weather tool.'
 
@@ -454,10 +375,10 @@ async def test_provider_backed_override_serializes_both_fields(capfire: CaptureL
         }
     )
     seen: list[ToolDefinition] = []
-    with _variables_provider_configured(capfire, config):
+    with variables_provider(capfire, config):
         capability = ManagedTool('get_weather', variable='full_remote', label='production')
         agent = _weather_agent(capability)
-        await agent.run('hi', model=_capture_tools(seen))
+        await agent.run('hi', model=capture_tools(seen))
         assert seen[0].name == 'weather_v2'
         assert seen[0].description == 'Get weather'
 
@@ -477,7 +398,7 @@ async def test_concurrent_runs_are_isolated() -> None:
         with capability._variable.override(ManagedToolOverride(description=description)):
             await asyncio.sleep(0)  # yield so the two runs interleave inside their override blocks
             seen: list[ToolDefinition] = []
-            await agent.run('hi', model=_capture_tools(seen))
+            await agent.run('hi', model=capture_tools(seen))
             bucket.append(seen[0].description)
 
     first: list[str | None] = []

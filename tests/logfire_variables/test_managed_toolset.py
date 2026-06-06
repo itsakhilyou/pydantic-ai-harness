@@ -1,82 +1,33 @@
 """Tests for the `ManagedToolset` capability (source package `pydantic_ai_harness.logfire`).
 
-Style mirrors `test_managed_tool.py`: module-level `pytestmark = pytest.mark.anyio`, an
-`anyio_backend` fixture, a `FunctionModel` that captures the advertised tools, and a unique
-variable name per test. `ManagedToolset` manages a whole group of tools from one variable holding
-a `dict[str, ManagedToolOverride]`.
+Shared fixtures live in `conftest.py` and shared helpers in `_helpers.py`; the variable-naming
+contract is covered in `test_managed_variable.py`. This module focuses on `ManagedToolset` managing
+a whole group of tools from one variable holding a `dict[str, ManagedToolOverride]`.
 """
 
 from __future__ import annotations
-
-from collections.abc import Generator
-from contextlib import contextmanager
 
 import logfire
 import pytest
 from logfire.testing import CaptureLogfire
 from logfire.variables import LabeledValue, Rollout, VariableConfig, VariablesConfig
-from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from pydantic_ai import Agent, Tool
 from pydantic_ai.exceptions import UserError
-from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart
-from pydantic_ai.models.function import AgentInfo, FunctionModel
 from pydantic_ai.models.test import TestModel
 from pydantic_ai.tools import ToolDefinition
 
 from pydantic_ai_harness import ManagedToolOverride, ManagedToolset
 from pydantic_ai_harness.logfire import ManagedToolset as ManagedToolsetFromPackage
 
+from ._helpers import advertised, capture_tools, get_forecast, get_weather, variables_provider
+
 pytestmark = pytest.mark.anyio
 
 _ToolOverrides = dict[str, ManagedToolOverride]
 
 
-def get_weather(city: str) -> str:
-    return f'sunny in {city}'
-
-
-def get_forecast(city: str) -> str:
-    return f'forecast for {city}'
-
-
-@pytest.fixture(autouse=True, scope='module')
-def _configure_logfire() -> None:
-    logfire.configure(send_to_logfire=False, console=False)
-
-
-@pytest.fixture
-def anyio_backend() -> str:
-    return 'asyncio'
-
-
-def _capture_tools(seen: list[ToolDefinition]) -> FunctionModel:
-    def respond(_messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
-        seen.extend(info.function_tools)
-        return ModelResponse(parts=[TextPart('done')])
-
-    return FunctionModel(respond)
-
-
 def _weather_toolset(variable: str, default: _ToolOverrides | None = None) -> ManagedToolset[None]:
     return ManagedToolset(variable, tools=[Tool(get_weather), Tool(get_forecast)], default=default)
-
-
-@contextmanager
-def _variables_provider_configured(capfire: CaptureLogfire, variables_config: VariablesConfig) -> Generator[None]:
-    logfire.configure(
-        send_to_logfire=False,
-        console=False,
-        variables=logfire.LocalVariablesOptions(config=variables_config),
-        additional_span_processors=[SimpleSpanProcessor(capfire.exporter)],
-    )
-    try:
-        yield
-    finally:
-        logfire.configure(send_to_logfire=False, console=False)
-
-
-def advertised(seen: list[ToolDefinition]) -> dict[str, str | None]:
-    return {td.name: td.description for td in seen}
 
 
 # --- Construction / variable naming ---
@@ -88,32 +39,6 @@ def test_public_reexport() -> None:
 
 def test_name_becomes_variable_name() -> None:
     assert ManagedToolset('support')._variable.name == 'toolset__support'
-
-
-def test_hyphenated_name_is_normalized() -> None:
-    assert ManagedToolset('support-tools')._variable.name == 'toolset__support_tools'
-
-
-def test_prefix_in_name_warns_and_is_stripped() -> None:
-    with pytest.warns(UserWarning, match='added automatically'):
-        capability = ManagedToolset('toolset__already_prefixed')
-    assert capability._variable.name == 'toolset__already_prefixed'
-
-
-def test_invalid_name_raises() -> None:
-    with pytest.raises(ValueError, match='invalid variable name'):
-        ManagedToolset('has spaces')
-
-
-def test_duplicate_name_is_allowed() -> None:
-    first = ManagedToolset('shared')
-    second = ManagedToolset('shared')
-    assert first._variable.name == second._variable.name == 'toolset__shared'
-
-
-def test_explicit_logfire_instance_is_used() -> None:
-    capability = ManagedToolset('with_instance', logfire_instance=logfire.DEFAULT_LOGFIRE_INSTANCE)
-    assert capability._variable.name == 'toolset__with_instance'
 
 
 def test_accepts_prebuilt_variable() -> None:
@@ -146,7 +71,7 @@ async def test_default_empty_leaves_tools_unchanged() -> None:
     seen: list[ToolDefinition] = []
     agent: Agent[None, str] = Agent(TestModel(), capabilities=[_weather_toolset('default_set')])
 
-    await agent.run('hi', model=_capture_tools(seen))
+    await agent.run('hi', model=capture_tools(seen))
 
     assert advertised(seen) == {'get_weather': None, 'get_forecast': None}
 
@@ -161,7 +86,7 @@ async def test_overrides_multiple_tools_from_one_variable() -> None:
 
     seen: list[ToolDefinition] = []
     with capability._variable.override(overrides):
-        await agent.run('hi', model=_capture_tools(seen))
+        await agent.run('hi', model=capture_tools(seen))
         assert advertised(seen) == {'weather_lookup': 'Look up weather.', 'get_forecast': 'Multi-day forecast.'}
 
         # The renamed tool still routes back to its original implementation.
@@ -181,7 +106,7 @@ async def test_manages_tools_registered_elsewhere() -> None:
 
     seen: list[ToolDefinition] = []
     with capability._variable.override({'search': ManagedToolOverride(description='Web search.')}):
-        await agent.run('hi', model=_capture_tools(seen))
+        await agent.run('hi', model=capture_tools(seen))
 
     assert seen[0].name == 'search'
     assert seen[0].description == 'Web search.'
@@ -193,7 +118,7 @@ async def test_unknown_tool_name_is_ignored() -> None:
 
     seen: list[ToolDefinition] = []
     with capability._variable.override({'nonexistent': ManagedToolOverride(description='nope')}):
-        await agent.run('hi', model=_capture_tools(seen))
+        await agent.run('hi', model=capture_tools(seen))
 
     assert advertised(seen) == {'get_weather': None, 'get_forecast': None}
 
@@ -205,7 +130,7 @@ async def test_collision_across_tools_raises() -> None:
     # Renaming get_weather onto the existing get_forecast name collides.
     with capability._variable.override({'get_weather': ManagedToolOverride(name='get_forecast')}):
         with pytest.raises(UserError, match='duplicate tool name'):
-            await agent.run('hi', model=_capture_tools([]))
+            await agent.run('hi', model=capture_tools([]))
 
 
 async def test_swapping_names_is_allowed() -> None:
@@ -218,7 +143,7 @@ async def test_swapping_names_is_allowed() -> None:
 
     seen: list[ToolDefinition] = []
     with capability._variable.override(overrides):
-        await agent.run('hi', model=_capture_tools(seen))
+        await agent.run('hi', model=capture_tools(seen))
         # Names are swapped, with no spurious collision...
         assert set(advertised(seen)) == {'get_weather', 'get_forecast'}
 
@@ -319,10 +244,10 @@ async def test_provider_backed_resolution(capfire: CaptureLogfire) -> None:
         }
     )
     seen: list[ToolDefinition] = []
-    with _variables_provider_configured(capfire, config):
+    with variables_provider(capfire, config):
         capability = _weather_toolset('remote_set')
         capability.label = 'production'
         agent: Agent[None, str] = Agent(TestModel(), capabilities=[capability])
-        await agent.run('hi', model=_capture_tools(seen))
+        await agent.run('hi', model=capture_tools(seen))
 
     assert advertised(seen) == {'weather_v2': 'Remote weather.', 'get_forecast': None}
