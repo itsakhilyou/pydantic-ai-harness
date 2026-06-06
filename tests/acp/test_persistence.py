@@ -27,7 +27,11 @@ def test_stored_session_round_trips_through_pydantic() -> None:
             ModelRequest(parts=[UserPromptPart(content='hi')]),
             ModelResponse(parts=[TextPart(content='yo')]),
         ],
-        updates=[acp.update_agent_message_text('yo'), acp.update_agent_thought_text('thinking')],
+        updates=[
+            acp.update_user_message_text('hi'),
+            acp.update_agent_message_text('yo'),
+            acp.update_agent_thought_text('thinking'),
+        ],
         model='openai:gpt-4o',
     )
     adapter = TypeAdapter(StoredSession)
@@ -64,8 +68,9 @@ async def test_turn_persists_history_and_transcript() -> None:
     stored = await store.load(session.session_id)
     assert stored is not None
     assert len(stored.messages) > 0  # the model exchange was persisted
-    # The transcript is exactly what the client was shown this turn.
-    assert stored.updates == client.updates
+    # The transcript is the user's prompt (recorded for replay, never sent live -- the client
+    # renders its own prompt) followed by exactly what the client was shown this turn.
+    assert stored.updates == [acp.update_user_message_text('hi'), *client.updates]
 
 
 async def test_load_session_restores_history_and_replays_transcript() -> None:
@@ -83,8 +88,9 @@ async def test_load_session_restores_history_and_replays_transcript() -> None:
     adapter.on_connect(reopened)
     await adapter.load_session(cwd='/ws', session_id=session.session_id)
 
-    # The transcript is replayed verbatim to the new client...
-    assert reopened.updates == shown
+    # The whole conversation is replayed to the new client: the user's turn (which the live
+    # client rendered itself, so it was never sent as an update) followed by what was shown.
+    assert reopened.updates == [acp.update_user_message_text('hi'), *shown]
     # ...and the model history is restored so the next turn continues the conversation.
     stored = await store.load(session.session_id)
     assert stored is not None

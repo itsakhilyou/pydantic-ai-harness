@@ -378,6 +378,30 @@ class TestSessionConfig:
         assert exc.value.data is not None
         assert 'mcp_servers' in str(exc.value.data)
 
+    async def test_initialize_advertises_configured_mcp_capabilities(self) -> None:
+        # A spec-following client only sends HTTP/SSE MCP servers when these are advertised
+        # during initialize, so an embedder whose session_config connects them must say so.
+        adapter: PydanticAIACPAgent[None, str] = PydanticAIACPAgent(
+            Agent(TestModel()),
+            session_config=lambda _session: AcpSessionConfig(deps=None),
+            mcp_capabilities=schema.McpCapabilities(http=True, sse=True),
+        )
+        capabilities = (await adapter.initialize(protocol_version=1)).agent_capabilities
+        assert capabilities is not None
+        assert capabilities.mcp_capabilities == schema.McpCapabilities(http=True, sse=True)
+
+    async def test_initialize_advertises_no_mcp_capabilities_by_default(self) -> None:
+        adapter: PydanticAIACPAgent[None, str] = PydanticAIACPAgent(Agent(TestModel()))
+        capabilities = (await adapter.initialize(protocol_version=1)).agent_capabilities
+        assert capabilities is not None
+        assert capabilities.mcp_capabilities == schema.McpCapabilities(http=False, sse=False)
+
+    def test_mcp_capabilities_without_a_session_config_are_rejected(self) -> None:
+        # Advertising HTTP/SSE support without a session_config would invite server
+        # definitions that `session/new` then rejects; fail at construction instead.
+        with pytest.raises(ValueError, match='session_config'):
+            PydanticAIACPAgent(Agent(TestModel()), mcp_capabilities=schema.McpCapabilities(http=True))
+
     async def test_two_sessions_get_independent_deps(self) -> None:
         adapter = PydanticAIACPAgent(
             _workspace_agent(),
@@ -728,7 +752,8 @@ class TestPermission:
 
     async def test_approval_turn_with_a_store_persists_each_update_once(self) -> None:
         # The turn pauses for approval and resumes, accumulating updates across passes. The
-        # persisted transcript must match what the client saw, with no duplicated tool-call start.
+        # persisted transcript must be the user's prompt plus what the client saw, with no
+        # duplicated tool-call start.
         store = InMemorySessionStore()
         adapter: PydanticAIACPAgent[None, str] = PydanticAIACPAgent(_approval_agent([]), session_store=store)
         client = FakeClient(decider=lambda _call: 'allow_once')
@@ -738,7 +763,7 @@ class TestPermission:
 
         stored = await store.load(session_id)
         assert stored is not None
-        assert stored.updates == client.updates
+        assert stored.updates == [acp.update_user_message_text('delete'), *client.updates]
 
     async def test_allow_always_skips_the_prompt_on_later_turns(self) -> None:
         executed: list[str] = []

@@ -13,9 +13,19 @@ from pydantic_ai.models import KnownModelName
 from pydantic_ai.models.test import TestModel
 
 from pydantic_ai_harness.acp import InMemorySessionStore, PydanticAIACPAgent
+from pydantic_ai_harness.acp._adapter import _all_known_model_names
 from tests._acp_clients import RecordingClient  # pyright: ignore[reportMissingTypeStubs]
 
 pytestmark = pytest.mark.anyio
+
+
+def test_all_known_model_names_are_strings() -> None:
+    # Guards the `KnownModelName.__value__` introspection: it relies on the alias staying one
+    # flat `Literal` of strings (pyai exposes no public enumeration API). If core recomposes it,
+    # this fails loudly instead of `models='all'` silently advertising non-string members.
+    names = _all_known_model_names()
+    assert len(names) > 100
+    assert all(isinstance(name, str) for name in names)
 
 
 def _adapter(

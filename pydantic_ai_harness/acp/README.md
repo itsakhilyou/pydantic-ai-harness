@@ -142,6 +142,16 @@ By default the adapter recognizes the harness `FileSystem` and `Shell` tool call
 
 An ACP client may offer MCP servers during session setup. This adapter does not connect them itself; a `session_config` is the place to turn `session.mcp_servers` into Pydantic AI toolsets. If a client sends MCP servers and no `session_config` is installed to consume them, the session request is rejected (rather than silently ignoring them) so the mismatch is visible.
 
+A spec-following client only sends HTTP/SSE MCP servers when the agent advertises support for those transports during `initialize` (stdio servers are not capability-gated). When your `session_config` connects them, say so:
+
+```python
+PydanticAIACPAgent(
+    agent,
+    session_config=connect_mcp_servers,
+    mcp_capabilities=schema.McpCapabilities(http=True, sse=True),
+)
+```
+
 ## Prompt content types
 
 The agent advertises which prompt content it accepts. The default is **text only**, so a client is not invited to send blocks a text model cannot handle. Enable the kinds your model supports:
@@ -154,7 +164,7 @@ run_acp_stdio_sync(agent, prompt_capabilities=schema.PromptCapabilities(image=Tr
 
 ## Session persistence
 
-Pass a `session_store` to let a client reopen a past conversation with `session/load`. Each committed turn is persisted as two parts -- the model's message history and the client-visible transcript -- and reopening restores the history into the agent and replays the transcript to the client, so its UI is rebuilt as the user last saw it. Without a store, `session/load` is advertised as unsupported.
+Pass a `session_store` to let a client reopen a past conversation with `session/load`. Each committed turn is persisted as two parts -- the model's message history and the client-visible transcript (the user's messages plus everything streamed back) -- and reopening restores the history into the agent and replays the transcript to the client, so its UI is rebuilt as the user last saw it. Without a store, `session/load` is advertised as unsupported.
 
 ```python
 from pydantic_ai_harness.acp import InMemorySessionStore

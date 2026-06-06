@@ -139,6 +139,7 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
         session_config: SessionConfigFunc[AgentDepsT] | None = None,
         permission_policy: PermissionPolicy | None = None,
         prompt_capabilities: schema.PromptCapabilities | None = None,
+        mcp_capabilities: schema.McpCapabilities | None = None,
         tool_presenter: ToolCallPresenter | None = None,
         session_store: SessionStore | None = None,
         models: Sequence[KnownModelName | str] | Literal['all'] | None = None,
@@ -162,6 +163,11 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
             prompt_capabilities: Prompt content the agent advertises support for (image, audio,
                 embedded context). Defaults to text-only; enable what the backing model handles,
                 e.g. `schema.PromptCapabilities(image=True, embedded_context=True)`.
+            mcp_capabilities: MCP transports the agent advertises support for, e.g.
+                `schema.McpCapabilities(http=True, sse=True)`. A spec-following client only sends
+                HTTP/SSE MCP servers when these are advertised (stdio servers are not gated), so
+                set this when the `session_config` connects them. Defaults to neither; requires a
+                `session_config`, since without one MCP servers are rejected at `session/new`.
             tool_presenter: Maps a tool call to its rich ACP presentation (`kind`, file
                 `locations`, and diff `content`). Defaults to
                 [`default_coding_presenter`][pydantic_ai_harness.acp.default_coding_presenter],
@@ -189,6 +195,11 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
         # Text-only by default, so a client is not invited to send image/audio/resource blocks
         # the backing model may not accept.
         self._prompt_capabilities = prompt_capabilities or schema.PromptCapabilities()
+        if mcp_capabilities is not None and session_config is None:
+            # Advertising HTTP/SSE MCP support would invite server definitions that
+            # `_build_config` then rejects; fail at construction instead of per session.
+            raise ValueError('mcp_capabilities requires a session_config that connects the MCP servers')
+        self._mcp_capabilities = mcp_capabilities or schema.McpCapabilities()
         self._tool_presenter = tool_presenter or default_coding_presenter
         self._session_store = session_store
         self._models: tuple[str, ...] = _all_known_model_names() if models == 'all' else tuple(models) if models else ()
@@ -222,6 +233,7 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
             agent_capabilities=schema.AgentCapabilities(
                 load_session=self._session_store is not None,
                 prompt_capabilities=self._prompt_capabilities,
+                mcp_capabilities=self._mcp_capabilities,
                 session_capabilities=schema.SessionCapabilities(close=schema.SessionCloseCapabilities()),
             ),
             agent_info=schema.Implementation(name=self._name, version=self._version),
@@ -366,7 +378,7 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
         usage = RunUsage()
         async with state.lock:
             state.cancel_requested = False
-            turn = asyncio.ensure_future(self._run_turn(state, user_content))
+            turn = asyncio.ensure_future(self._run_turn(state, prompt, user_content))
             state.active_turn = turn
             try:
                 usage = await turn
@@ -411,7 +423,12 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
                 await state.active_turn
         return schema.CloseSessionResponse()
 
-    async def _run_turn(self, state: SessionState[AgentDepsT], user_content: list[UserContent]) -> RunUsage:
+    async def _run_turn(
+        self,
+        state: SessionState[AgentDepsT],
+        prompt: list[PromptContentBlock],
+        user_content: list[UserContent],
+    ) -> RunUsage:
         """Drive the agent (resuming across tool-approval pauses) and stream updates.
 
         Returns the turn's total token usage, summed across every run pass (one per approval pause).
@@ -427,6 +444,12 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
         turn = _TurnState(
             conn=conn, session_id=state.session_id, cwd=state.cwd, approval_names=self._approval_tool_names(config)
         )
+        if self._session_store is not None:
+            # Recorded for replay only, never sent live: the client renders its own prompt during
+            # the turn, but `session/load` must rebuild the user side of the conversation too.
+            # Going through `turn.updates` keeps the cancel semantics: a rolled-back turn does not
+            # persist its user message either (matching the omitted `user_message_id`).
+            turn.updates.extend(acp.update_user_message(block) for block in prompt)
 
         while True:
             result = None
