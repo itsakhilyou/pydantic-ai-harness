@@ -198,7 +198,7 @@ async def test_records_variable_resolution_span(capfire: CaptureLogfire) -> None
             {
                 'name': 'Resolve variable prompt__span_slug',
                 'attributes': {
-                    'code.filepath': '_managed_prompt.py',
+                    'code.filepath': '_managed_variable.py',
                     'code.function': 'wrap_run',
                     'targeting_key': 'null',
                     'logfire.msg_template': 'Resolve variable prompt__span_slug',
@@ -240,7 +240,7 @@ async def test_baggage_propagates_to_run_and_child_spans(capfire: CaptureLogfire
             {
                 'name': 'Resolve variable prompt__baggage_slug',
                 'attributes': {
-                    'code.filepath': '_managed_prompt.py',
+                    'code.filepath': '_managed_variable.py',
                     'code.function': 'wrap_run',
                     'targeting_key': 'null',
                     'logfire.msg_template': 'Resolve variable prompt__baggage_slug',

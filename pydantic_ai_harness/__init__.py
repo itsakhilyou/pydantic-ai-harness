@@ -5,7 +5,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from .code_mode import CodeMode
     from .filesystem import FileSystem
-    from .logfire import ManagedPrompt
+    from .logfire import ManagedPrompt, ManagedTool, ManagedToolOverride, ManagedToolset
     from .shell import LLM_API_KEY_ENV_PATTERNS, Shell
 
 __all__ = [
@@ -13,6 +13,9 @@ __all__ = [
     'FileSystem',
     'LLM_API_KEY_ENV_PATTERNS',
     'ManagedPrompt',
+    'ManagedTool',
+    'ManagedToolOverride',
+    'ManagedToolset',
     'Shell',
 ]
 
@@ -30,6 +33,18 @@ def __getattr__(name: str) -> object:
         from .logfire import ManagedPrompt
 
         return ManagedPrompt
+    if name == 'ManagedTool':
+        from .logfire import ManagedTool
+
+        return ManagedTool
+    if name == 'ManagedToolOverride':
+        from .logfire import ManagedToolOverride
+
+        return ManagedToolOverride
+    if name == 'ManagedToolset':
+        from .logfire import ManagedToolset
+
+        return ManagedToolset
     if name == 'Shell':
         from .shell import Shell
 

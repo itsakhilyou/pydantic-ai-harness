@@ -27,7 +27,7 @@ Extras for specific capabilities:
 
 ```bash
 uv add "pydantic-ai-harness[codemode]"   # CodeMode (adds the Monty sandbox)
-uv add "pydantic-ai-harness[logfire]"     # ManagedPrompt (Logfire-managed prompts)
+uv add "pydantic-ai-harness[logfire]"     # ManagedPrompt / ManagedTool / ManagedToolset (Logfire-managed variables)
 ```
 
 The `code-mode` extra is also supported as an alias.
