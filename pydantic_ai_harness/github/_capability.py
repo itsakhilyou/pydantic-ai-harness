@@ -5,7 +5,6 @@ from __future__ import annotations
 import os
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Generic
 
 from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.exceptions import UserError
@@ -15,29 +14,6 @@ from pydantic_ai.toolsets import AbstractToolset, AgentToolset
 _DEFAULT_IMAGE = 'ghcr.io/github/github-mcp-server'
 _TOKEN_ENV_VARS = ('GITHUB_PERSONAL_ACCESS_TOKEN', 'GITHUB_TOKEN')
 _PAT_ENV_VAR = 'GITHUB_PERSONAL_ACCESS_TOKEN'
-
-
-@dataclass(frozen=True)
-class _ToolNameFilter(Generic[AgentDepsT]):
-    """Combines allow/deny lists with an optional predicate over the server's tool names.
-
-    Applied to the raw GitHub tool names (e.g. `get_issue`, `create_pull_request`),
-    before any `tool_prefix` is added, so the lists stay stable regardless of prefix.
-    """
-
-    allowed: frozenset[str] | None
-    denied: frozenset[str] | None
-    predicate: Callable[[RunContext[AgentDepsT], ToolDefinition], bool | Awaitable[bool]] | None
-
-    def __call__(self, ctx: RunContext[AgentDepsT], tool_def: ToolDefinition) -> bool | Awaitable[bool]:
-        name = tool_def.name
-        if self.allowed is not None and name not in self.allowed:
-            return False
-        if self.denied is not None and name in self.denied:
-            return False
-        if self.predicate is not None:
-            return self.predicate(ctx, tool_def)
-        return True
 
 
 @dataclass
@@ -127,7 +103,10 @@ class GitHub(AbstractCapability[AgentDepsT]):
     """Include the server's own instructions in the agent's system prompt."""
 
     id: str | None = 'github'
-    """Stable identifier for the MCP server, used by durable execution backends."""
+    """Stable identifier for the MCP server, used by durable execution backends.
+
+    Give each one a distinct `id` when attaching more than one GitHub server to an agent.
+    """
 
     def _resolve_token(self) -> str:
         if self.token is not None:
@@ -155,14 +134,28 @@ class GitHub(AbstractCapability[AgentDepsT]):
             environment.update(self.env)
         return environment
 
-    def _build_filter(self) -> _ToolNameFilter[AgentDepsT] | None:
+    def _tool_filter(self) -> Callable[[RunContext[AgentDepsT], ToolDefinition], bool | Awaitable[bool]] | None:
+        """Combine the allow list, deny list, and predicate into one filter over raw tool names.
+
+        Names are matched before any `tool_prefix` is applied, so the lists stay stable
+        regardless of prefix. Returns `None` when no client-side filtering is configured.
+        """
         if self.allowed_tools is None and self.denied_tools is None and self.tool_filter is None:
             return None
-        return _ToolNameFilter(
-            allowed=frozenset(self.allowed_tools) if self.allowed_tools is not None else None,
-            denied=frozenset(self.denied_tools) if self.denied_tools is not None else None,
-            predicate=self.tool_filter,
-        )
+        allowed = frozenset(self.allowed_tools) if self.allowed_tools is not None else None
+        denied = frozenset(self.denied_tools) if self.denied_tools is not None else None
+        predicate = self.tool_filter
+
+        def tool_filter(ctx: RunContext[AgentDepsT], tool_def: ToolDefinition) -> bool | Awaitable[bool]:
+            if allowed is not None and tool_def.name not in allowed:
+                return False
+            if denied is not None and tool_def.name in denied:
+                return False
+            if predicate is not None:
+                return predicate(ctx, tool_def)
+            return True
+
+        return tool_filter
 
     def _build_server(self) -> AbstractToolset[AgentDepsT]:
         try:
@@ -190,7 +183,7 @@ class GitHub(AbstractCapability[AgentDepsT]):
     def get_toolset(self) -> AgentToolset[AgentDepsT] | None:
         """Build the GitHub MCP toolset, applying tool filtering and prefixing."""
         toolset = self._build_server()
-        tool_filter = self._build_filter()
+        tool_filter = self._tool_filter()
         if tool_filter is not None:
             toolset = toolset.filtered(tool_filter)
         if self.tool_prefix is not None:

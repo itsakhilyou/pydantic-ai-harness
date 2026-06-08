@@ -16,12 +16,14 @@ into the container, and filtering tools — boilerplate every project reinvents.
 ## The solution
 
 `GitHub` spawns the `ghcr.io/github/github-mcp-server` container and exposes its
-tools to the agent, with two layers of limiting:
+tools to the agent, with two layers of limiting. Both keep tools out of the
+model's view (and its token budget); they differ in granularity:
 
-- **server-side** — the server only advertises the toolset groups you enable, so
-  the model never sees the rest and no tokens are spent describing them.
-- **client-side** — the advertised tools are filtered before reaching the model,
-  for per-tool control.
+- **server-side** — the server is told to only enable whole toolset groups, so it
+  never advertises the rest. This is the GitHub MCP server's own scoping
+  mechanism (`GITHUB_TOOLSETS`, `GITHUB_READ_ONLY`, `GITHUB_DYNAMIC_TOOLSETS`).
+- **client-side** — the advertised tools are filtered by name before reaching the
+  model, for per-tool control on top of the enabled groups.
 
 ```python
 from pydantic_ai import Agent
@@ -58,18 +60,20 @@ never written into the `docker run` arguments.
 
 ## Limiting tools
 
-### Server-side (cheaper — the model never sees hidden tools)
+### Server-side
 
 | Field | Effect |
 |---|---|
 | `toolsets` | Toolset groups to enable, e.g. `['repos', 'issues', 'pull_requests']`. `None` uses the server default; `['all']` enables everything. Maps to `GITHUB_TOOLSETS`. |
 | `read_only` | Disable every state-mutating tool (`GITHUB_READ_ONLY`). |
-| `dynamic_toolsets` | Let the model discover and enable toolsets on demand instead of listing them all up front. |
+| `dynamic_toolsets` | Start with only discovery tools and let the model enable toolsets on demand (`GITHUB_DYNAMIC_TOOLSETS`), instead of listing them all up front. |
 
-The available groups (`repos`, `issues`, `pull_requests`, `actions`,
-`code_security`, `notifications`, and others) are defined by the GitHub MCP
-server — see its docs for the current list. `GitHub` passes them through
-untouched, so it stays decoupled from the server version.
+Group names (`repos`, `issues`, `pull_requests`, `actions`, `code_security`,
+`notifications`, …) are defined by the
+[GitHub MCP server](https://github.com/github/github-mcp-server#tool-configuration),
+not by this capability — `GitHub` forwards them untouched, so it stays decoupled
+from the server version. These options map to the server's own environment
+variables; the capability sets them in the container's environment.
 
 ### Client-side (per-tool control)
 
