@@ -5,10 +5,11 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from .code_mode import CodeMode
     from .filesystem import FileSystem
+    from .github import GitHub
     from .logfire import ManagedPrompt
     from .shell import Shell
 
-__all__ = ['CodeMode', 'FileSystem', 'ManagedPrompt', 'Shell']
+__all__ = ['CodeMode', 'FileSystem', 'GitHub', 'ManagedPrompt', 'Shell']
 
 
 def __getattr__(name: str) -> object:
@@ -20,6 +21,10 @@ def __getattr__(name: str) -> object:
         from .filesystem import FileSystem
 
         return FileSystem
+    if name == 'GitHub':
+        from .github import GitHub
+
+        return GitHub
     if name == 'ManagedPrompt':
         from .logfire import ManagedPrompt
 
