@@ -51,7 +51,8 @@ from pydantic_ai import Agent
 from pydantic_ai.messages import ModelMessage, ModelResponse, ToolCallPart
 from pydantic_ai.usage import UsageLimits
 
-from pydantic_ai_harness import DynamicWorkflow, FileSystem, WorkflowAgent
+from pydantic_ai_harness import FileSystem
+from pydantic_ai_harness.experimental.dynamic_workflow import DynamicWorkflow, WorkflowAgent
 
 logfire.configure(send_to_logfire='if-token-present', service_name='dynamic-workflow')
 logfire.instrument_pydantic_ai()

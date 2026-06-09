@@ -22,8 +22,8 @@ from pydantic_ai.models.function import AgentInfo, FunctionModel
 from pydantic_ai.models.test import TestModel
 from pydantic_ai.usage import RunUsage, UsageLimits
 
-from pydantic_ai_harness import DynamicWorkflow, WorkflowAgent
-from pydantic_ai_harness.dynamic_workflow._toolset import (  # pyright: ignore[reportPrivateUsage]
+from pydantic_ai_harness.experimental.dynamic_workflow import DynamicWorkflow, WorkflowAgent
+from pydantic_ai_harness.experimental.dynamic_workflow._toolset import (  # pyright: ignore[reportPrivateUsage]
     DynamicWorkflowToolset,
     _default_resource_limits,
     _in_workflow,

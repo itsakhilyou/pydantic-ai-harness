@@ -127,11 +127,11 @@ key the example still plants the sources and prints the task, so you can see the
 `DynamicWorkflow` moves sub-agent coordination from turn-by-turn delegation into one script the
 model writes and runs on Monty — typed handoffs, a cache-stable prompt, and a hard worst-case token
 ceiling across the whole tree. (Snapshot-based fork and durable resume are planned — see the
-[`DynamicWorkflow` README](../pydantic_ai_harness/dynamic_workflow/README.md).)
+[`DynamicWorkflow` README](../pydantic_ai_harness/experimental/dynamic_workflow/README.md).)
 
 ## Further reading
 
-- [`DynamicWorkflow` README](../pydantic_ai_harness/dynamic_workflow/README.md)
+- [`DynamicWorkflow` README](../pydantic_ai_harness/experimental/dynamic_workflow/README.md)
 - [Monty](https://github.com/pydantic/monty)
 - [Capabilities](https://pydantic.dev/docs/ai/core-concepts/capabilities/) ·
   [On-demand capabilities](https://pydantic.dev/docs/ai/core-concepts/capabilities/#on-demand-capabilities)

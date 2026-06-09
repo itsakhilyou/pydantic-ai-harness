@@ -66,7 +66,7 @@ from pydantic import BaseModel
 from pydantic_ai import Agent
 from pydantic_ai.usage import UsageLimits
 
-from pydantic_ai_harness import DynamicWorkflow, WorkflowAgent
+from pydantic_ai_harness.experimental.dynamic_workflow import DynamicWorkflow, WorkflowAgent
 
 # Instrumentation: the trace shows the orchestrator turn, the `run_workflow` tool call (its
 # `code` argument is the exact script the model wrote), and every sub-agent run nested under it.

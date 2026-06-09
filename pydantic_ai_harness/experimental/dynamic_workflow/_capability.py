@@ -9,7 +9,7 @@ from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.tools import AgentDepsT
 from pydantic_ai.usage import UsageLimits
 
-from pydantic_ai_harness.dynamic_workflow._toolset import (
+from pydantic_ai_harness.experimental.dynamic_workflow._toolset import (
     DynamicWorkflowToolset,
     WorkflowAgent,
     WorkflowResourceLimits,
@@ -27,7 +27,7 @@ class DynamicWorkflow(AbstractCapability[AgentDepsT]):
 
     ```python
     from pydantic_ai import Agent
-    from pydantic_ai_harness import DynamicWorkflow
+    from pydantic_ai_harness.experimental.dynamic_workflow import DynamicWorkflow, WorkflowAgent
 
     reviewer = Agent('openai:gpt-5', name='reviewer', instructions='Review code for bugs.')
     summarizer = Agent('openai:gpt-5', name='summarizer', instructions='Summarize findings.')
