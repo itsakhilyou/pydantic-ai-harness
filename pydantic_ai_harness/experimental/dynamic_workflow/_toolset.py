@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import contextvars
 import keyword
+import warnings
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from typing import Annotated, Any, Generic, Literal
@@ -76,6 +77,12 @@ def _default_resource_limits() -> ResourceLimits:
     }
 
 
+# The keys `WorkflowResourceLimits` accepts. A `total=False` TypedDict does not validate keys at
+# runtime, so a typo (e.g. `max_durations_secs`) would otherwise merge through and be silently
+# dropped — quietly disabling the only guard against a pure-CPU `while True`. We reject unknowns.
+_RESOURCE_LIMIT_KEYS = frozenset({'max_duration_secs', 'max_memory', 'max_allocations'})
+
+
 def _resolve_resource_limits(limits: WorkflowResourceLimits | Literal['unlimited'] | None) -> ResourceLimits:
     """Resolve the public `resource_limits` value to the limits handed to the sandbox.
 
@@ -84,11 +91,18 @@ def _resolve_resource_limits(limits: WorkflowResourceLimits | Literal['unlimited
     - a `WorkflowResourceLimits` mapping → merged *onto* the backstop, so a partial dict overrides
       only the caps it names and the others keep their backstop value (a `{'max_memory': ...}`
       never silently drops the duration backstop).
+
+    A mapping with an unrecognized key raises `UserError` rather than silently ignoring it.
     """
     if limits is None:
         return _default_resource_limits()
     if isinstance(limits, str):  # 'unlimited'
         return {}
+    unknown = set(limits) - _RESOURCE_LIMIT_KEYS
+    if unknown:
+        raise UserError(
+            f'Unknown `resource_limits` key(s): {sorted(unknown)}. Valid keys are {sorted(_RESOURCE_LIMIT_KEYS)}.'
+        )
     return {**_default_resource_limits(), **limits}
 
 
@@ -278,9 +292,16 @@ class DynamicWorkflowToolset(AbstractToolset[AgentDepsT]):
     # thus the prompt-cache prefix — never changes mid-run.
     _baseline_catalog: dict[str, str | None] = field(init=False, repr=False)
 
+    # `id()` of reveal entries already warned about (invalid or colliding name), so a persistent
+    # bad append warns once rather than every step. Reset per run via `for_run`'s `replace`.
+    _reveal_warned: set[int] = field(default_factory=set[int], init=False, repr=False)
+
     def __post_init__(self) -> None:
         if not self.agents:
             raise UserError('DynamicWorkflow requires at least one sub-agent in `agents`.')
+        if self.max_agent_calls < 1:
+            raise UserError('DynamicWorkflow `max_agent_calls` must be at least 1.')
+        _resolve_resource_limits(self.resource_limits)  # validate keys now, not at the first tool call
         self._by_name = {}
         for entry in self.agents:
             name = entry.resolved_name
@@ -324,13 +345,34 @@ class DynamicWorkflowToolset(AbstractToolset[AgentDepsT]):
         Synchronous and await-free between snapshotting `agents` and mutating `_by_name`, so a
         concurrently-running `dispatch` never observes a half-revealed agent — the same
         await-free-critical-section reasoning that keeps `max_agent_calls` exact under fan-out.
+
+        A newcomer whose name is invalid, or already taken by a *different* sub-agent, cannot be
+        revealed; the original stays in place (reveal never silently swaps an agent out) and a
+        warning is emitted once so the dropped reveal is not silent. Re-seeing an already-known
+        entry (a baseline agent, or one revealed on an earlier step) is a no-op, identified by
+        object identity so it is never mistaken for a name collision.
         """
         for entry in tuple(self.agents):
             name = entry.resolved_name
-            if not name or not _is_valid_sandbox_name(name) or name in self._by_name:
+            existing = self._by_name.get(name) if name else None
+            if existing is entry:
                 continue
-            self._by_name[name] = entry
-            ctx.enqueue(_render_reveal(name, entry.description, self.tool_name))
+            if name and _is_valid_sandbox_name(name) and existing is None:
+                self._by_name[name] = entry
+                ctx.enqueue(_render_reveal(name, entry.description, self.tool_name))
+                continue
+            if id(entry) not in self._reveal_warned:
+                self._reveal_warned.add(id(entry))
+                reason = (
+                    'the name is already used by another sub-agent'
+                    if existing is not None
+                    else 'a sandbox function name must be a non-keyword Python identifier'
+                )
+                warnings.warn(
+                    f'DynamicWorkflow could not reveal a sub-agent named {name!r}: {reason}. '
+                    'It is not callable; any existing sub-agent of that name is unchanged.',
+                    stacklevel=2,
+                )
 
     async def get_tools(self, ctx: RunContext[AgentDepsT]) -> dict[str, ToolsetTool[AgentDepsT]]:
         self._reveal_pending(ctx)
@@ -364,9 +406,17 @@ class DynamicWorkflowToolset(AbstractToolset[AgentDepsT]):
 
         async def dispatch(agent_name: str, kwargs: dict[str, Any]) -> Any:
             nonlocal budget_exhausted
+            # The sandbox signature is `(*, task: str)`, but Monty does not validate kwargs against
+            # it, so check here: a dropped extra kwarg or a non-string `task` would otherwise run the
+            # sub-agent on silently-wrong input. Each raises before the budget is touched.
             if 'task' not in kwargs:
                 raise TypeError(f'{agent_name}() missing required keyword argument: task')
+            extra = sorted(set(kwargs) - {'task'})
+            if extra:
+                raise TypeError(f'{agent_name}() got unexpected keyword argument(s): {", ".join(extra)}; only task')
             task = kwargs['task']
+            if not isinstance(task, str):
+                raise TypeError(f'{agent_name}() task must be a string, got {type(task).__name__}')
             # Budget check + increment must stay suspension-free: there must be no `await`
             # between them. asyncio only switches tasks at suspension points, so an await-free
             # check-then-increment is atomic across the concurrently-gathered dispatches, which
@@ -414,6 +464,19 @@ class DynamicWorkflowToolset(AbstractToolset[AgentDepsT]):
                     )
                 }
             raise ModelRetry(f'Runtime error in workflow:\n{capture.prepend_to(e.display())}') from e
+        except BaseException as e:
+            # pyo3 surfaces a Rust-side sandbox panic as `pyo3_runtime.PanicException` — a
+            # BaseException (not Exception) subclass that is not importable, so match it by name. A
+            # panic is an internal VM abort the model can provoke (e.g. awaiting the same sub-agent
+            # call twice in one `asyncio.gather`); convert it to a retry instead of letting it tear
+            # down the whole agent run. Anything else (CancelledError, ...) re-raises unchanged.
+            if type(e).__name__ != 'PanicException':
+                raise
+            raise ModelRetry(
+                'The workflow script aborted inside the sandbox. This can happen when the same '
+                'sub-agent call is awaited more than once in one asyncio.gather — give each gathered '
+                'call its own invocation. Revise the script and try again.'
+            ) from e
         finally:
             _in_workflow.reset(in_workflow_token)
 

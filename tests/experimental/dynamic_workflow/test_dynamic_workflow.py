@@ -301,6 +301,29 @@ async def test_max_agent_calls_enforced_exactly() -> None:
     assert len(runs) == 2
 
 
+async def test_max_agent_calls_exact_under_concurrent_fan_out() -> None:
+    runs: list[str] = []
+
+    def model_fn(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        runs.append('x')
+        return ModelResponse(parts=[TextPart('ok')])
+
+    counted: Agent[None, str] = Agent(FunctionModel(model_fn), name='counted')
+    ts = DynamicWorkflowToolset[None](agents=[WorkflowAgent(agent=counted)], max_agent_calls=3)
+    # Fan eight calls out concurrently: the await-free check-then-increment must admit exactly the
+    # budget (3), not race past it. A regression inserting an `await` before the increment fails here.
+    code = 'import asyncio\nawait asyncio.gather(*[counted(task=str(i)) for i in range(8)])'
+    out = await _run_script(ts, code)
+    assert isinstance(out, dict)
+    assert 'budget' in out['error']
+    assert len(runs) == 3
+
+
+def test_max_agent_calls_must_be_positive(make_agent: MakeAgent) -> None:
+    with pytest.raises(UserError, match='max_agent_calls'):
+        DynamicWorkflowToolset[None](agents=[make_agent()], max_agent_calls=0)
+
+
 async def test_nested_workflow_is_refused(make_agent: MakeAgent) -> None:
     # A workflow already in progress (the flag a sub-agent would inherit) refuses to start another.
     ts = DynamicWorkflowToolset[None](agents=[make_agent()])
@@ -322,6 +345,20 @@ async def test_missing_task_kwarg(make_agent: MakeAgent) -> None:
     ts = DynamicWorkflowToolset[None](agents=[make_agent()])
     with pytest.raises(ModelRetry, match='missing required keyword argument'):
         await _run_script(ts, 'await sub(wrong=1)')
+
+
+async def test_extra_kwargs_rejected(make_agent: MakeAgent) -> None:
+    # An extra kwarg must not be silently dropped — the model needs to know it was ignored.
+    ts = DynamicWorkflowToolset[None](agents=[make_agent()])
+    with pytest.raises(ModelRetry, match='unexpected keyword argument'):
+        await _run_script(ts, "await sub(task='x', foo='y')")
+
+
+async def test_non_str_task_rejected(make_agent: MakeAgent) -> None:
+    # A non-string task (a dict/list would otherwise be silently smeared into message parts).
+    ts = DynamicWorkflowToolset[None](agents=[make_agent()])
+    with pytest.raises(ModelRetry, match='task must be a string'):
+        await _run_script(ts, "await sub(task={'k': 'v'})")
 
 
 async def test_forward_usage_true_shares_parent_usage(make_agent: MakeAgent) -> None:
@@ -390,6 +427,29 @@ async def test_runtime_error(make_agent: MakeAgent) -> None:
     ts = DynamicWorkflowToolset[None](agents=[make_agent()])
     with pytest.raises(ModelRetry, match='Runtime error'):
         await _run_script(ts, 'x = 1 / 0')
+
+
+async def test_duplicate_future_in_gather_is_retryable(make_agent: MakeAgent) -> None:
+    # Awaiting the same sub-agent call twice in one gather makes the Monty VM panic; that panic
+    # must surface as a retry, not tear down the whole agent run.
+    ts = DynamicWorkflowToolset[None](agents=[make_agent()])
+    code = 'import asyncio\nf = sub(task="x")\nawait asyncio.gather(f, f)'
+    with pytest.raises(ModelRetry, match='aborted inside the sandbox'):
+        await _run_script(ts, code)
+
+
+async def test_non_panic_base_exception_propagates(make_agent: MakeAgent, monkeypatch: pytest.MonkeyPatch) -> None:
+    # The panic guard catches BaseException but must re-raise anything that is not a VM panic.
+    class _Boom(BaseException):
+        pass
+
+    async def _boom(self: Any, state: Any) -> Any:
+        raise _Boom('boom')
+
+    monkeypatch.setattr('pydantic_ai_harness._monty_exec.MontyExecutor.run', _boom)
+    ts = DynamicWorkflowToolset[None](agents=[make_agent()])
+    with pytest.raises(_Boom):
+        await _run_script(ts, "await sub(task='x')")
 
 
 async def test_print_only_returns_output_dict(make_agent: MakeAgent) -> None:
@@ -463,6 +523,21 @@ async def test_unlimited_runs_without_a_backstop(make_agent: MakeAgent) -> None:
     assert out == 2
 
 
+def test_resolve_resource_limits_rejects_unknown_keys() -> None:
+    # A typo'd key (e.g. plural `max_durations_secs`) must not be silently dropped — that would
+    # quietly disable the duration cap it was meant to set.
+    with pytest.raises(UserError, match='Unknown `resource_limits` key'):
+        _resolve_resource_limits({'max_durations_secs': 5})  # pyright: ignore[reportArgumentType]
+
+
+def test_unknown_resource_limit_key_raises_at_construction(make_agent: MakeAgent) -> None:
+    with pytest.raises(UserError, match='Unknown `resource_limits` key'):
+        DynamicWorkflowToolset[None](
+            agents=[make_agent()],
+            resource_limits={'max_durations_secs': 5},  # pyright: ignore[reportArgumentType]
+        )
+
+
 # --- Lifecycle -------------------------------------------------------------
 
 
@@ -532,14 +607,17 @@ async def test_reveal_skips_invalid_and_duplicate_names(make_agent: MakeAgent) -
     ctx = _ctx_with_queue()
     await ts.get_tools(ctx)
 
-    # A nameless agent and one whose name collides with the baseline are both skipped, no crash.
+    # A nameless agent and one whose name collides with the baseline are both skipped with a
+    # warning (not silently), neither becomes callable, and the original is not shadowed.
     agents.append(WorkflowAgent(agent=_sub_agent(name=None)))
     agents.append(make_agent('shadow', 'base'))
-    await ts.get_tools(ctx)
+    with pytest.warns(UserWarning, match='could not reveal'):
+        await ts.get_tools(ctx)
     assert set(ts._by_name) == {'base'}  # pyright: ignore[reportPrivateUsage]
     assert _enqueued_text(ctx) == ''
 
-    # The original baseline agent still runs — it was not shadowed.
+    # The original baseline agent still runs — it was not shadowed. Re-resolving tools does not
+    # re-warn for the same bad entries (warn-once), so this call emits no warning.
     assert await _run_script(ts, "await base(task='x')", ctx) == 'b'
 
 
