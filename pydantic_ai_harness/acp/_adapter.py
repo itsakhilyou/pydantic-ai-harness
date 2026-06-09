@@ -20,6 +20,7 @@ from typing import Generic, Literal, get_args
 from uuid import uuid4
 
 import acp
+import anyio
 from acp import schema
 from acp.interfaces import Client
 from pydantic_ai import DeferredToolRequests, DeferredToolResults, ToolDenied
@@ -108,9 +109,11 @@ class _TurnState:
     cwd: str
     approval_names: frozenset[str]
     # Tool-call ids accumulated across the turn's approval-resume passes: `started` so a call
-    # paused for approval is announced only once, `denied` so a rejected call's result is failed.
+    # paused for approval is announced only once, `denied` so a rejected call's result is failed,
+    # `resulted` so a cancelled turn can fail only the calls still left without a terminal status.
     started: set[str] = field(default_factory=set[str])
     denied: set[str] = field(default_factory=set[str])
+    resulted: set[str] = field(default_factory=set[str])
     # The `session/update`s sent this turn; appended to the session transcript only on commit.
     updates: list[SessionUpdate] = field(default_factory=list[SessionUpdate])
 
@@ -497,42 +500,51 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
             # persist its user message either (matching the omitted `user_message_id`).
             turn.updates.extend(acp.update_user_message(block) for block in prompt)
 
-        while True:
-            result = None
-            async with self._agent.run_stream_events(
-                run_input,
-                message_history=history,
-                deferred_tool_results=deferred_results,
-                output_type=output_type,
-                deps=config.deps,
-                toolsets=config.toolsets,
-                # Per-run override for the client's `session/set_model` choice; `None` uses the agent's
-                # own model, never mutating the shared agent.
-                model=state.model,
-            ) as stream:
-                event: AgentStreamEvent | AgentRunResultEvent[object]
-                async for event in stream:
-                    if isinstance(event, AgentRunResultEvent):
-                        result = event.result
-                    else:
-                        await self._emit_event(turn, event)
+        try:
+            while True:
+                result = None
+                async with self._agent.run_stream_events(
+                    run_input,
+                    message_history=history,
+                    deferred_tool_results=deferred_results,
+                    output_type=output_type,
+                    deps=config.deps,
+                    toolsets=config.toolsets,
+                    # Per-run override for the client's `session/set_model` choice; `None` uses the agent's
+                    # own model, never mutating the shared agent.
+                    model=state.model,
+                ) as stream:
+                    event: AgentStreamEvent | AgentRunResultEvent[object]
+                    async for event in stream:
+                        if isinstance(event, AgentRunResultEvent):
+                            result = event.result
+                        else:
+                            await self._emit_event(turn, event)
 
-            assert result is not None, 'run_stream_events always yields a final result event'
-            history = result.all_messages()
-            usage += result.usage()
-            output = result.output
-            if isinstance(output, DeferredToolRequests):
-                if not output.approvals and not output.calls:  # pragma: no cover
-                    break  # defensive: the run never yields an empty DeferredToolRequests
-                deferred_results = await self._resolve_approvals(turn, state, output)
-                run_input = None
-                continue
-            if output is not None and not isinstance(output, str):
-                # Structured output isn't streamed as text parts, so deliver it as a final message.
-                # (`str` output already streamed via text deltas; `None` has nothing to show.)
-                await self._emit_text(turn, json.dumps(jsonable(output)), thought=False)
-            stop_reason = _finish_reason_to_stop_reason(result.response.finish_reason)
-            break
+                assert result is not None, 'run_stream_events always yields a final result event'
+                history = result.all_messages()
+                usage += result.usage()
+                output = result.output
+                if isinstance(output, DeferredToolRequests):
+                    if not output.approvals and not output.calls:  # pragma: no cover
+                        break  # defensive: the run never yields an empty DeferredToolRequests
+                    deferred_results = await self._resolve_approvals(turn, state, output)
+                    run_input = None
+                    continue
+                if output is not None and not isinstance(output, str):
+                    # Structured output isn't streamed as text parts, so deliver it as a final message.
+                    # (`str` output already streamed via text deltas; `None` has nothing to show.)
+                    await self._emit_text(turn, json.dumps(jsonable(output)), thought=False)
+                stop_reason = _finish_reason_to_stop_reason(result.response.finish_reason)
+                break
+        except (asyncio.CancelledError, _TurnCancelled):
+            # The turn is ending without finishing its tool calls; close out any still shown as
+            # pending/in_progress so the client stops rendering them as running. Shielded because an
+            # asyncio cancellation would otherwise abort the sends, and live-only: a cancelled turn
+            # never commits its transcript.
+            with anyio.CancelScope(shield=True):
+                await self._fail_outstanding_tool_calls(turn)
+            raise
 
         state.history = history
         # Commit and persist this turn's updates alongside the history; a cancelled turn never
@@ -541,6 +553,20 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
             state.transcript.extend(turn.updates)
             await self._persist(state)
         return usage, stop_reason
+
+    async def _fail_outstanding_tool_calls(self, turn: _TurnState) -> None:
+        """Drive every announced-but-unfinished tool call to a terminal `failed` status.
+
+        Called when a turn is cancelled, so a client does not keep rendering a `pending`/`in_progress`
+        tool call as running. Sent directly (not recorded for the transcript) and best-effort: the
+        connection may already be going away.
+        """
+        for tool_call_id in turn.started - turn.resulted:
+            with contextlib.suppress(Exception):
+                await turn.conn.session_update(
+                    session_id=turn.session_id,
+                    update=acp.update_tool_call(tool_call_id=tool_call_id, status='failed'),
+                )
 
     async def _send_update(self, turn: _TurnState, update: SessionUpdate) -> None:
         """Send one `session/update` to the client, recording it for the transcript when persisting."""
@@ -614,6 +640,7 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
                 status, raw_output = 'failed', part.content
             else:
                 status, raw_output = 'completed', part.content
+            turn.resulted.add(part.tool_call_id)
             await self._send_update(
                 turn,
                 acp.update_tool_call(

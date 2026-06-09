@@ -981,6 +981,8 @@ class TestPermission:
         assert response.stop_reason == 'cancelled'
         assert response.user_message_id is None  # rolled back, so not acknowledged as recorded
         assert executed == []
+        # The tool the dismissed dialog was for is closed out as failed, not left pending forever.
+        assert 'failed' in [status for _id, status, _out in client.tool_completions()]
 
     async def test_external_tool_calls_are_rejected(self) -> None:
         adapter: PydanticAIACPAgent[None, str] = PydanticAIACPAgent(Agent(TestModel()))
@@ -1032,6 +1034,53 @@ class TestCancellation:
         assert response.stop_reason == 'cancelled'
         # The turn is rolled back, so the response must not claim the user message was recorded.
         assert response.user_message_id is None
+
+    async def test_cancel_closes_out_in_flight_tool_calls(self) -> None:
+        started = asyncio.Event()
+        release = asyncio.Event()
+        agent = Agent(TestModel())
+
+        @agent.tool_plain
+        async def slow_tool() -> str:
+            started.set()
+            await release.wait()
+            return 'done'  # pragma: no cover - cancelled before returning
+
+        adapter: PydanticAIACPAgent[None, str] = PydanticAIACPAgent(agent)
+        client = FakeClient()
+        session_id = await _start(adapter, client)
+
+        turn = asyncio.ensure_future(adapter.prompt(prompt=[acp.text_block('go')], session_id=session_id))
+        await asyncio.wait_for(started.wait(), timeout=5)
+        await adapter.cancel(session_id=session_id)
+        response = await asyncio.wait_for(turn, timeout=5)
+
+        assert response.stop_reason == 'cancelled'
+        # The tool was announced `in_progress`; cancelling drives it to a terminal `failed` so the
+        # client stops rendering it as running.
+        [(start_id, _title, start_status)] = client.tool_starts()
+        assert start_status == 'in_progress'
+        assert (start_id, 'failed') in [(cid, status) for cid, status, _out in client.tool_completions()]
+
+    async def test_fail_outstanding_tool_calls_closes_only_unfinished(self) -> None:
+        adapter: PydanticAIACPAgent[None, str] = PydanticAIACPAgent(Agent(TestModel()))
+        client = FakeClient()
+        turn = _TurnState(conn=client, session_id='sid', cwd='.', approval_names=frozenset())
+        turn.started.update({'c1', 'c2'})
+        turn.resulted.add('c2')  # c2 already has a terminal result; only c1 is still outstanding
+
+        await adapter._fail_outstanding_tool_calls(turn)  # pyright: ignore[reportPrivateUsage]
+
+        assert [(cid, status) for cid, status, _out in client.tool_completions()] == [('c1', 'failed')]
+
+    async def test_fail_outstanding_tool_calls_with_none_outstanding_is_a_noop(self) -> None:
+        adapter: PydanticAIACPAgent[None, str] = PydanticAIACPAgent(Agent(TestModel()))
+        client = FakeClient()
+        turn = _TurnState(conn=client, session_id='sid', cwd='.', approval_names=frozenset())
+
+        await adapter._fail_outstanding_tool_calls(turn)  # pyright: ignore[reportPrivateUsage]
+
+        assert client.tool_completions() == []
 
     async def test_cancelled_turn_with_a_store_persists_nothing(self) -> None:
         store = InMemorySessionStore()
