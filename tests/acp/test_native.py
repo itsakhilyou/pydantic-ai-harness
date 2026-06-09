@@ -30,7 +30,6 @@ def _ctx() -> RunContext[None]:
 def _session(client: Client, capabilities: schema.ClientCapabilities | None) -> AcpSession:
     return AcpSession(
         cwd='/ws',
-        additional_directories=[],
         mcp_servers=[],
         client_capabilities=capabilities,
         client=client,
@@ -81,7 +80,6 @@ async def test_acp_filesystem_read_only_client_reads_via_acp_and_writes_locally(
     session = _session(client, _fs_caps(read=True, write=False))
     session = AcpSession(
         cwd=str(tmp_path),
-        additional_directories=session.additional_directories,
         mcp_servers=session.mcp_servers,
         client_capabilities=session.client_capabilities,
         client=client,

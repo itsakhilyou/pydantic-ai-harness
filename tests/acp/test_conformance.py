@@ -7,7 +7,7 @@ cover what direct-call tests cannot: a method the router gates before the adapte
 frame whose serialized bytes overrun the client's read buffer.
 
 Each test names the spec clause it enforces; see `pydantic_ai_harness/acp/CONFORMANCE.md` for the
-full clause-to-test matrix.
+adapter's supported-capability summary.
 """
 
 from __future__ import annotations

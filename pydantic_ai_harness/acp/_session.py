@@ -39,9 +39,9 @@ class AcpSession:
 
     Passed to the adapter's `session_config` factory so an embedder can derive per-session run
     configuration from the workspace the client opened -- for example rooting the agent's
-    dependencies at `cwd`, honoring `additional_directories`, or turning the client-provided
-    `mcp_servers` into toolsets. `client_capabilities` is whatever the client advertised during
-    `initialize` (for example filesystem or terminal support).
+    dependencies at `cwd` or turning the client-provided `mcp_servers` into toolsets.
+    `client_capabilities` is whatever the client advertised during `initialize` (for example
+    filesystem or terminal support).
 
     `client` and `session_id` are the live connection handle for this session: pass them to a
     client-backed toolset (see [`acp_filesystem`][pydantic_ai_harness.acp.acp_filesystem]) to
@@ -49,7 +49,6 @@ class AcpSession:
     """
 
     cwd: str
-    additional_directories: list[str]
     mcp_servers: list[schema.HttpMcpServer | schema.SseMcpServer | schema.McpServerStdio]
     client_capabilities: schema.ClientCapabilities | None
     client: Client

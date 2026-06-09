@@ -117,8 +117,7 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
     A tool that [requires approval](https://ai.pydantic.dev/tools-toolsets/deferred-tools/)
     pauses the run and asks the client via `session/request_permission`; "always allow"/"always
     reject" decisions are remembered for the rest of the session. Per-session workspace setup
-    (the client's `cwd`, additional directories, and MCP servers) is surfaced through the
-    optional `session_config` factory.
+    (the client's `cwd` and MCP servers) is surfaced through the optional `session_config` factory.
 
     `session/close` cancels any in-flight turn and discards the session. `session/load` (with a
     `session_store`) and `session/set_model` (with `models`) are supported when configured; fork,
@@ -150,8 +149,8 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
             name: Name advertised to the client. Defaults to the agent's name, then `'pydantic-ai-agent'`.
             version: Version advertised to the client.
             session_config: Optional factory called once per session with the client's
-                [`AcpSession`][pydantic_ai_harness.acp.AcpSession] setup (its `cwd`, additional
-                directories, MCP servers, and capabilities). It returns an
+                [`AcpSession`][pydantic_ai_harness.acp.AcpSession] setup (its `cwd`, MCP servers,
+                and capabilities). It returns an
                 [`AcpSessionConfig`][pydantic_ai_harness.acp.AcpSessionConfig] whose `deps` and
                 `toolsets` are applied to every run in that session. May be sync or async.
             permission_policy: Optional function deciding the scope under which an "always
@@ -250,9 +249,11 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
         with that workspace. A request with MCP servers but no `session_config` is rejected (see
         `_build_config`).
         """
-        # `cwd`/`additional_directories` arrive absolute; the ACP router validates that shape.
+        # `cwd` arrives absolute; the ACP router validates that shape. `additional_directories` is
+        # part of the `acp.Agent` interface but not consumed: the capability is not advertised, so
+        # a conformant client never sends extra roots, and they are not surfaced to `session_config`.
         session_id = uuid4().hex
-        config = await self._build_config(session_id, cwd, additional_directories, mcp_servers)
+        config = await self._build_config(session_id, cwd, mcp_servers)
         # The first configured model is the session default; `None` (no models) uses the agent's own.
         default_model = self._models[0] if self._models else None
         state = SessionState(session_id=session_id, config=config, cwd=cwd, model=default_model)
@@ -288,7 +289,7 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
             raise acp.RequestError.invalid_params(
                 {'session_id': session_id, 'reason': 'no stored session with this id'}
             )
-        config = await self._build_config(session_id, cwd, additional_directories, mcp_servers)
+        config = await self._build_config(session_id, cwd, mcp_servers)
         state = SessionState(
             session_id=session_id,
             config=config,
@@ -319,9 +320,7 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
             current_model_id=current_model_id,
         )
 
-    async def _build_config(
-        self, session_id: str, cwd: str, additional_directories: list[str] | None, mcp_servers: McpServers
-    ) -> AcpSessionConfig[AgentDepsT]:
+    async def _build_config(self, session_id: str, cwd: str, mcp_servers: McpServers) -> AcpSessionConfig[AgentDepsT]:
         """Derive a session's run configuration, calling the `session_config` factory if present.
 
         Raises:
@@ -342,7 +341,6 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
             raise RuntimeError('new_session called before on_connect()')
         session = AcpSession(
             cwd=cwd,
-            additional_directories=additional_directories or [],
             mcp_servers=mcp_servers or [],
             client_capabilities=self._client_capabilities,
             client=self._conn,

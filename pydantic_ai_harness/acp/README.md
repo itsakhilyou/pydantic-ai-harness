@@ -99,7 +99,7 @@ if __name__ == '__main__':
     run_acp_stdio_sync(agent, session_config=session_config)
 ```
 
-The factory runs once per session with the client's [`AcpSession`][pydantic_ai_harness.acp.AcpSession] setup (its `cwd`, `additional_directories`, `mcp_servers`, and capabilities) and returns an [`AcpSessionConfig`][pydantic_ai_harness.acp.AcpSessionConfig] whose `deps` and `toolsets` apply to every run in that session. This is correct across multiple concurrent sessions in one process, where a single static `FileSystem` could not be.
+The factory runs once per session with the client's [`AcpSession`][pydantic_ai_harness.acp.AcpSession] setup (its `cwd`, `mcp_servers`, and capabilities) and returns an [`AcpSessionConfig`][pydantic_ai_harness.acp.AcpSessionConfig] whose `deps` and `toolsets` apply to every run in that session. This is correct across multiple concurrent sessions in one process, where a single static `FileSystem` could not be.
 
 ## Editor-native filesystem and shell (optional)
 

@@ -351,13 +351,12 @@ class TestSessionConfig:
         adapter.on_connect(client)
         await adapter.initialize(protocol_version=1, client_capabilities=schema.ClientCapabilities())
         mcp = schema.McpServerStdio(name='fs', command='echo', args=[], env=[])
-        session = await adapter.new_session(cwd='/projects/app', additional_directories=['/lib'], mcp_servers=[mcp])
+        session = await adapter.new_session(cwd='/projects/app', mcp_servers=[mcp])
 
         await adapter.prompt(prompt=[acp.text_block('where')], session_id=session.session_id)
 
         # The factory saw the client's full session setup, nothing silently dropped.
         assert seen[0].cwd == '/projects/app'
-        assert seen[0].additional_directories == ['/lib']
         assert [server.name for server in seen[0].mcp_servers] == ['fs']
         assert seen[0].client_capabilities is not None
         # ...and the deps it returned reached the run.
