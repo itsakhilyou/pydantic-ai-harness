@@ -31,6 +31,16 @@ def test_image_with_uri_becomes_image_url() -> None:
     assert item.url == 'https://example.com/a.png'
 
 
+def test_image_with_both_data_and_uri_prefers_inline_data() -> None:
+    # `data` is required and authoritative; `uri` is only a source reference. A block carrying both
+    # must keep the inline bytes rather than be replaced by a link the model may be unable to fetch.
+    raw = b'\x89PNG\r\n'
+    block = acp.image_block(base64.b64encode(raw).decode(), 'image/png', uri='https://example.com/a.png')
+    [item] = prompt_blocks_to_user_content([block])
+    assert isinstance(item, BinaryContent)
+    assert item.data == raw
+
+
 def test_audio_block_becomes_binary_content() -> None:
     block = acp.audio_block(base64.b64encode(b'snd').decode(), 'audio/wav')
     [item] = prompt_blocks_to_user_content([block])

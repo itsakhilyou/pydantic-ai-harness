@@ -35,7 +35,11 @@ def prompt_blocks_to_user_content(blocks: Sequence[PromptContentBlock]) -> list[
         if isinstance(block, schema.TextContentBlock):
             content.append(block.text)
         elif isinstance(block, schema.ImageContentBlock):
-            if block.uri is not None:
+            # ACP requires inline `data`; `uri` is only an optional reference to the image's source.
+            # Prefer the bytes the client actually sent, falling back to the URL only when no inline
+            # data is present (a client sending both must not have its image silently replaced by a
+            # link the model may be unable to fetch).
+            if not block.data and block.uri is not None:
                 content.append(ImageUrl(url=block.uri))
             else:
                 content.append(BinaryContent(data=base64.b64decode(block.data), media_type=block.mime_type))

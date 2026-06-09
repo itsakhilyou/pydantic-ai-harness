@@ -29,6 +29,7 @@ async def run_acp_stdio(
     session_config: SessionConfigFunc[AgentDepsT] | None = None,
     permission_policy: PermissionPolicy | None = None,
     prompt_capabilities: schema.PromptCapabilities | None = None,
+    mcp_capabilities: schema.McpCapabilities | None = None,
     tool_presenter: ToolCallPresenter | None = None,
     session_store: SessionStore | None = None,
     models: Sequence[KnownModelName | str] | Literal['all'] | None = None,
@@ -49,6 +50,9 @@ async def run_acp_stdio(
             See [`PydanticAIACPAgent`][pydantic_ai_harness.acp.PydanticAIACPAgent].
         prompt_capabilities: Prompt content types the agent advertises support for.
             See [`PydanticAIACPAgent`][pydantic_ai_harness.acp.PydanticAIACPAgent].
+        mcp_capabilities: MCP transports the agent advertises support for. Requires a
+            `session_config` that connects them. See
+            [`PydanticAIACPAgent`][pydantic_ai_harness.acp.PydanticAIACPAgent].
         tool_presenter: Maps tool calls to rich ACP presentation (kind, file locations, diffs).
             See [`PydanticAIACPAgent`][pydantic_ai_harness.acp.PydanticAIACPAgent].
         session_store: Enables `session/load` by persisting each session. See
@@ -64,6 +68,7 @@ async def run_acp_stdio(
         session_config=session_config,
         permission_policy=permission_policy,
         prompt_capabilities=prompt_capabilities,
+        mcp_capabilities=mcp_capabilities,
         tool_presenter=tool_presenter,
         session_store=session_store,
         models=models,
@@ -84,6 +89,7 @@ def run_acp_stdio_sync(
     session_config: SessionConfigFunc[AgentDepsT] | None = None,
     permission_policy: PermissionPolicy | None = None,
     prompt_capabilities: schema.PromptCapabilities | None = None,
+    mcp_capabilities: schema.McpCapabilities | None = None,
     tool_presenter: ToolCallPresenter | None = None,
     session_store: SessionStore | None = None,
     models: Sequence[KnownModelName | str] | Literal['all'] | None = None,
@@ -101,6 +107,7 @@ def run_acp_stdio_sync(
             session_config=session_config,
             permission_policy=permission_policy,
             prompt_capabilities=prompt_capabilities,
+            mcp_capabilities=mcp_capabilities,
             tool_presenter=tool_presenter,
             session_store=session_store,
             models=models,
