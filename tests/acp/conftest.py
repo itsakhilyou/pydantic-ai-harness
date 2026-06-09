@@ -14,6 +14,7 @@ import pytest
 collect_ignore = (
     [
         'test_acp.py',
+        'test_conformance.py',
         'test_content.py',
         'test_models.py',
         'test_native.py',
