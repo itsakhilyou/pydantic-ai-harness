@@ -109,8 +109,8 @@ done — instead of delegating to one sub-agent at a time.
 
 The sandbox uses Monty, a subset of Python. Key restrictions:
 - **No classes** and **no third-party libraries**.
-- **Importable standard-library modules**: `asyncio`, `math`, `json`, `re`, `typing`. Import them at
-  the top of the script before use.
+- **Useful standard-library modules**: `asyncio`, `math`, `json`, `re`, `typing`. Import what you use
+  at the top of the script. Other modules are unavailable or stubbed — don't rely on them.
 - **No wall-clock or timing primitives** (`asyncio.sleep`, `datetime.now()`, the `time` module).
 
 Each sub-agent below is an async function. Call it with the `task` keyword argument — write

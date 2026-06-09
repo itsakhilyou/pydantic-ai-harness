@@ -253,7 +253,8 @@ DynamicWorkflow(
 The script runs in Monty, a Python subset:
 
 - No classes, no third-party libraries.
-- Importable standard-library modules: `asyncio`, `math`, `json`, `re`, `typing`.
+- Useful standard-library modules: `asyncio`, `math`, `json`, `re`, `typing`. Other modules are
+  unavailable or stubbed; don't rely on them.
 - No wall-clock or timing primitives (`asyncio.sleep`, `datetime.now()`, the `time` module).
 - `asyncio.gather(...)` runs sub-agents concurrently but does **not** support
   `return_exceptions=True`. A sub-agent that raises aborts the script (the model retries); it
