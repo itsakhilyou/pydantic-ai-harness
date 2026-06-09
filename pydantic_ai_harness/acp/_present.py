@@ -91,7 +91,7 @@ def _present_write(args: Mapping[str, object]) -> ToolCallPresentation | None:
     # `write_file` is usually a create, where omitting `old_text` (the ACP convention for a new
     # file) is correct. On an overwrite the prior contents are unknown from the args alone, so
     # the diff understates what is replaced -- an accepted limitation until reads route through
-    # the client. See docs/acp-coding-agent-decisions.md.
+    # the client.
     diff = acp.tool_diff_content(path=path, new_text=content)
     return ToolCallPresentation(kind='edit', locations=(_location(path),), content=(diff,))
 

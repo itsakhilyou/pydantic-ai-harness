@@ -194,11 +194,11 @@ Each completed turn reports its token counts (input/output/total, plus cached to
 
 - **Cancellation.** `session/cancel` and `session/close` cancel the in-flight turn; close waits for it to unwind before returning. Cooperative async tools stop promptly. A synchronous tool already running in a worker thread cannot be force-stopped, so its side effects may complete after the turn reports `cancelled` -- prefer async tools for cancellation-sensitive work.
 - **Approval detection.** Tools that require approval are recognized when they live in a `FunctionToolset` (which the harness `FileSystem`/`Shell` and `@agent.tool` both use). A tool whose approval requirement is decided dynamically per call (by raising `ApprovalRequired` from its body) starts as `in_progress`, and any side effects it ran *before* raising have already happened by the time the client is asked -- use an `ApprovalRequiredToolset` (which gates before the tool body runs) for actions that must not partially execute before approval.
-- **Overwrite diffs.** `write_file` renders a diff against an empty original, so an overwrite understates what it replaced.
+- **Overwrite diffs.** `write_file` renders an overwrite as if creating a new file (no prior contents), so the diff understates what it replaced.
 - **Live terminal panes.** `acp_terminal` returns a command's captured output; it does not embed a *live* terminal pane in the tool call, which would need the terminal id at call-start, before the command runs.
 - **Images.** Prompt image blocks are off by default and must be enabled via `prompt_capabilities` with a model that accepts them (see [Prompt content types](#prompt-content-types)). The harness `FileSystem.read_file` is text-only, so the agent cannot open image files from the workspace itself.
 - **Slash commands.** The adapter does not yet advertise any commands (`available_commands`), so no slash commands appear in the client. Planned.
-- **MCP and resource metadata** are not yet wired end-to-end; see the package docs for the current boundaries.
+- **MCP servers.** Client-offered MCP servers are surfaced to your `session_config` to turn into toolsets (advertise the transports with `mcp_capabilities`); the adapter does not auto-connect them. Resource metadata is not yet wired end-to-end.
 
 ## API
 
@@ -212,7 +212,10 @@ run_acp_stdio(            # async; serve until the client disconnects
     session_config=None,  # SessionConfigFunc: per-session deps/toolsets from the client's setup
     permission_policy=None,   # scope of remembered "always" approval decisions
     prompt_capabilities=None, # defaults to text-only
+    mcp_capabilities=None,    # MCP transports to advertise; needs a session_config to connect them
     tool_presenter=None,      # defaults to the FileSystem/Shell presenter
+    session_store=None,       # enables session/load by persisting each session
+    models=None,              # models offered to session/set_model ('all' for every known model)
 )
 
 run_acp_stdio_sync(...)   # synchronous wrapper, same arguments
