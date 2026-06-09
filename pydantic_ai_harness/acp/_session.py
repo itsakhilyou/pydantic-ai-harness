@@ -100,7 +100,7 @@ class SessionState(Generic[AgentDepsT]):
     # agent's own model. Applied as a per-run override so the shared agent is never mutated.
     model: str | None = None
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
-    active_turn: asyncio.Task[RunUsage] | None = None
+    active_turn: asyncio.Task[tuple[RunUsage, schema.StopReason]] | None = None
     cancel_requested: bool = False
     always_allow: set[Hashable] = field(default_factory=set[Hashable])
     always_reject: set[Hashable] = field(default_factory=set[Hashable])

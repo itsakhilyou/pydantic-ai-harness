@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+
 import acp
 import pytest
 from pydantic import TypeAdapter
@@ -95,6 +97,59 @@ async def test_load_session_restores_history_and_replays_transcript() -> None:
     stored = await store.load(session.session_id)
     assert stored is not None
     assert adapter._sessions[session.session_id].history == stored.messages  # pyright: ignore[reportPrivateUsage]
+
+
+async def test_load_over_an_active_session_cancels_the_in_flight_turn() -> None:
+    started = asyncio.Event()
+    release = asyncio.Event()
+    unwound = asyncio.Event()
+    agent = Agent(TestModel())
+
+    @agent.tool_plain
+    async def slow_tool() -> str:
+        started.set()
+        try:
+            await release.wait()  # released only by cancellation
+            return 'done'  # pragma: no cover - cancelled by the load
+        finally:
+            unwound.set()
+
+    store = InMemorySessionStore()
+    adapter: PydanticAIACPAgent[None, str] = PydanticAIACPAgent(agent, session_store=store)
+    adapter.on_connect(RecordingClient())
+    await adapter.initialize(protocol_version=1)
+    session = await adapter.new_session(cwd='/ws')
+    turn = asyncio.ensure_future(adapter.prompt(prompt=[acp.text_block('go')], session_id=session.session_id))
+    await asyncio.wait_for(started.wait(), timeout=5)
+
+    # Reopen the still-open session; its in-flight turn must be torn down, not orphaned to later
+    # persist stale state over the restored transcript.
+    await adapter.load_session(cwd='/ws', session_id=session.session_id)
+
+    assert unwound.is_set()
+    response = await asyncio.wait_for(turn, timeout=5)
+    assert response.stop_reason == 'cancelled'
+    # The freshly loaded state replaced the old one and carries no leftover in-flight turn.
+    assert adapter._sessions[session.session_id].active_turn is None  # pyright: ignore[reportPrivateUsage]
+
+
+async def test_load_session_dropped_from_memory_restores_from_the_store() -> None:
+    store = InMemorySessionStore()
+    adapter = _adapter(store)
+    adapter.on_connect(RecordingClient())
+    await adapter.initialize(protocol_version=1)
+    session = await adapter.new_session(cwd='/ws')
+    await adapter.prompt(prompt=[acp.text_block('hi')], session_id=session.session_id)
+
+    # Drop the live session (as a close, or a process restart, would) so only the stored copy
+    # remains -- exercising the load path where no in-memory session is being replaced.
+    await adapter.close_session(session_id=session.session_id)
+    assert session.session_id not in adapter._sessions  # pyright: ignore[reportPrivateUsage]
+
+    adapter.on_connect(RecordingClient())
+    await adapter.load_session(cwd='/ws', session_id=session.session_id)
+
+    assert session.session_id in adapter._sessions  # pyright: ignore[reportPrivateUsage]
 
 
 async def test_load_unknown_session_is_rejected() -> None:

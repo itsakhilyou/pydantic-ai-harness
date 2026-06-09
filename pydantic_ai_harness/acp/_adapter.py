@@ -25,6 +25,7 @@ from pydantic_ai import DeferredToolRequests, DeferredToolResults, ToolDenied
 from pydantic_ai.agent import AbstractAgent
 from pydantic_ai.messages import (
     AgentStreamEvent,
+    FinishReason,
     FunctionToolCallEvent,
     FunctionToolResultEvent,
     PartDeltaEvent,
@@ -64,6 +65,20 @@ def _all_known_model_names() -> tuple[str, ...]:
     # Swap for `known_model_names()` (pydantic-ai#5803) once a released slim ships it and the
     # floor is raised; it's unreleased now, so calling it would break the floor CI job.
     return get_args(KnownModelName.__value__)
+
+
+def _finish_reason_to_stop_reason(finish_reason: FinishReason | None) -> schema.StopReason:
+    """Map the model's terminal `finish_reason` to the ACP stop reason for a completed turn.
+
+    Only `length` and `content_filter` carry a distinct ACP meaning; every other reason (a normal
+    stop, a final tool call, an unknown/missing reason) is reported as a plain `end_turn`.
+    Cancellation is handled by the caller and never reaches here.
+    """
+    if finish_reason == 'length':
+        return 'max_tokens'
+    if finish_reason == 'content_filter':
+        return 'refusal'
+    return 'end_turn'
 
 
 def _to_acp_usage(usage: RunUsage) -> schema.Usage:
@@ -289,6 +304,12 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
             raise acp.RequestError.invalid_params(
                 {'session_id': session_id, 'reason': 'no stored session with this id'}
             )
+        # A client may load a session id that is still open (a reconnecting editor, or a double
+        # load). Tear down any live turn first so the orphaned turn cannot later persist its stale
+        # state over the transcript and history we are about to restore.
+        prior = self._sessions.pop(session_id, None)
+        if prior is not None:
+            await self._cancel_active_turn(prior)
         config = await self._build_config(session_id, cwd, mcp_servers)
         state = SessionState(
             session_id=session_id,
@@ -370,13 +391,12 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
             raise acp.RequestError.invalid_params({'session_id': session_id})
 
         user_content = prompt_blocks_to_user_content(prompt)
-        usage = RunUsage()
         async with state.lock:
             state.cancel_requested = False
             turn = asyncio.ensure_future(self._run_turn(state, prompt, user_content))
             state.active_turn = turn
             try:
-                usage = await turn
+                usage, stop_reason = await turn
             except _TurnCancelled:
                 # Rolled back: omit `user_message_id`, which would signal the message was persisted.
                 return schema.PromptResponse(stop_reason='cancelled')
@@ -392,7 +412,7 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
             finally:
                 state.active_turn = None
                 state.cancel_requested = False
-        return schema.PromptResponse(stop_reason='end_turn', user_message_id=message_id, usage=_to_acp_usage(usage))
+        return schema.PromptResponse(stop_reason=stop_reason, user_message_id=message_id, usage=_to_acp_usage(usage))
 
     async def cancel(self, session_id: str, **kwargs: object) -> None:
         """Cancel the in-flight turn for a session, if any."""
@@ -409,30 +429,39 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
         Closing an unknown (or already-closed) session is a no-op.
         """
         state = self._sessions.pop(session_id, None)
-        if state is not None and state.active_turn is not None and not state.active_turn.done():
-            # End the in-flight prompt with a `cancelled` stop reason, and await the turn so the
-            # close response does not race the session's teardown.
+        if state is not None:
+            await self._cancel_active_turn(state)
+        return schema.CloseSessionResponse()
+
+    async def _cancel_active_turn(self, state: SessionState[AgentDepsT]) -> None:
+        """End a session's in-flight turn (if any) with a `cancelled` stop reason and await its unwind.
+
+        Awaiting the turn keeps the caller from racing the turn's teardown -- the prompt has fully
+        returned `cancelled` and released the session's resources before this returns.
+        """
+        if state.active_turn is not None and not state.active_turn.done():
             state.cancel_requested = True
             state.active_turn.cancel()
             with contextlib.suppress(asyncio.CancelledError, _TurnCancelled):
                 await state.active_turn
-        return schema.CloseSessionResponse()
 
     async def _run_turn(
         self,
         state: SessionState[AgentDepsT],
         prompt: list[PromptContentBlock],
         user_content: list[UserContent],
-    ) -> RunUsage:
+    ) -> tuple[RunUsage, schema.StopReason]:
         """Drive the agent (resuming across tool-approval pauses) and stream updates.
 
-        Returns the turn's total token usage, summed across every run pass (one per approval pause).
+        Returns the turn's total token usage (summed across every run pass, one per approval pause)
+        and the ACP stop reason mapped from the final model response.
         """
         conn = self._conn
         assert conn is not None
         history = state.history
         config = state.config
         usage = RunUsage()
+        stop_reason: schema.StopReason = 'end_turn'
         deferred_results: DeferredToolResults | None = None
         run_input: list[UserContent] | None = user_content
         output_type = [self._agent.output_type, DeferredToolRequests]
@@ -480,6 +509,7 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
                 # Structured output isn't streamed as text parts, so deliver it as a final message.
                 # (`str` output already streamed via text deltas; `None` has nothing to show.)
                 await self._emit_text(turn, json.dumps(jsonable(output)), thought=False)
+            stop_reason = _finish_reason_to_stop_reason(result.response.finish_reason)
             break
 
         state.history = history
@@ -488,7 +518,7 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
         if self._session_store is not None:
             state.transcript.extend(turn.updates)
             await self._persist(state)
-        return usage
+        return usage, stop_reason
 
     async def _send_update(self, turn: _TurnState, update: SessionUpdate) -> None:
         """Send one `session/update` to the client, recording it for the transcript when persisting."""
@@ -590,8 +620,12 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
 
         results = DeferredToolResults()
         for call in requests.approvals:
+            # `args_as_dict()` canonicalizes the call's arguments to a dict: a model may deliver them
+            # as a JSON string (the OpenAI default, and how streamed calls accumulate), and a raw
+            # string would make the scope key sensitive to key order, defeating a remembered "always"
+            # decision for what is the same logical call.
             scope = self._permission_policy(
-                ToolCallPermission(tool_name=call.tool_name, tool_call_id=call.tool_call_id, args=call.args)
+                ToolCallPermission(tool_name=call.tool_name, tool_call_id=call.tool_call_id, args=call.args_as_dict())
             )
             if scope in state.always_allow:
                 results.approvals[call.tool_call_id] = True

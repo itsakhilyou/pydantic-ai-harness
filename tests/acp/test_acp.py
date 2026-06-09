@@ -25,6 +25,7 @@ from pydantic import BaseModel
 from pydantic_ai import Agent, DeferredToolRequests, RunContext
 from pydantic_ai.messages import (
     AgentStreamEvent,
+    FinishReason,
     FunctionToolResultEvent,
     ModelMessage,
     ModelRequest,
@@ -44,6 +45,7 @@ from pydantic_ai.models.function import AgentInfo, DeltaToolCall, FunctionModel
 from pydantic_ai.models.test import TestModel
 from pydantic_ai.toolsets import FunctionToolset
 
+from pydantic_ai_harness import FileSystem, Shell
 from pydantic_ai_harness.acp import (
     AcpSession,
     AcpSessionConfig,
@@ -55,8 +57,8 @@ from pydantic_ai_harness.acp import (
     run_acp_stdio,
     run_acp_stdio_sync,
 )
-from pydantic_ai_harness.acp._adapter import _TurnState
-from pydantic_ai_harness.acp._present import absolutize
+from pydantic_ai_harness.acp._adapter import _finish_reason_to_stop_reason, _TurnState
+from pydantic_ai_harness.acp._present import _HANDLERS, absolutize
 from pydantic_ai_harness.acp._serialize import MAX_RAW_FIELD_CHARS, MAX_TEXT_UPDATE_BYTES, _escaped_len, chunk_text
 from pydantic_ai_harness.acp._session import SessionState
 from tests._acp_clients import RecordingClient  # pyright: ignore[reportMissingTypeStubs]
@@ -587,6 +589,25 @@ class TestStreaming:
         assert response.usage.total_tokens == response.usage.input_tokens + response.usage.output_tokens
 
 
+class TestStopReason:
+    """`_finish_reason_to_stop_reason` maps a completed run's finish reason to the ACP stop reason."""
+
+    @pytest.mark.parametrize(
+        ('finish_reason', 'expected'),
+        [
+            ('length', 'max_tokens'),
+            ('content_filter', 'refusal'),
+            ('stop', 'end_turn'),
+            ('tool_call', 'end_turn'),
+            (None, 'end_turn'),
+        ],
+    )
+    def test_finish_reason_maps_to_stop_reason(
+        self, finish_reason: FinishReason | None, expected: schema.StopReason
+    ) -> None:
+        assert _finish_reason_to_stop_reason(finish_reason) == expected
+
+
 class TestChunkText:
     """`chunk_text` bounds the JSON-escaped byte size of each streamed update (see `_serialize`)."""
 
@@ -837,6 +858,40 @@ class TestPermission:
         # the second call has a different scope, so the client is asked again.
         assert len(client.permission_requests) == 2
         assert deleted == ['tmp.txt', '.env']
+
+    async def test_always_allow_survives_reordered_json_string_args(self) -> None:
+        deleted: list[str] = []
+
+        async def stream(
+            messages: list[ModelMessage], info: AgentInfo
+        ) -> AsyncIterator[str | dict[int, DeltaToolCall]]:
+            if _has_tool_return(messages):
+                yield 'done'
+                return
+            # The same logical call each turn, but the model serializes the argument keys in a
+            # different order (as streaming providers do). The remembered "always allow" must still
+            # match: the scope is keyed on the canonicalized arguments, not their raw text.
+            first_turn = len(_user_texts(messages)) == 1
+            args = '{"path": "x", "force": true}' if first_turn else '{"force": true, "path": "x"}'
+            yield {0: DeltaToolCall(name='delete_file', json_args=args)}
+
+        agent = Agent(FunctionModel(stream_function=stream))
+
+        @agent.tool_plain(requires_approval=True)
+        def delete_file(path: str, force: bool) -> str:
+            deleted.append(path)
+            return 'deleted'
+
+        adapter: PydanticAIACPAgent[None, str] = PydanticAIACPAgent(agent)
+        client = FakeClient(decider=lambda _call: 'allow_always')
+        session_id = await _start(adapter, client)
+
+        await adapter.prompt(prompt=[acp.text_block('go')], session_id=session_id)
+        await adapter.prompt(prompt=[acp.text_block('again')], session_id=session_id)
+
+        # One prompt only: the reordered second call resolves to the same scope and auto-approves.
+        assert len(client.permission_requests) == 1
+        assert deleted == ['x', 'x']
 
     async def test_permission_policy_can_widen_scope_to_the_tool_name(self) -> None:
         deleted: list[str] = []
@@ -1394,6 +1449,13 @@ def _tool_call(name: str, args: str | dict[str, Any] | None) -> ToolCallPart:
 
 class TestDefaultCodingPresenter:
     """Unit tests for the mapping from a recognized tool call to its ACP presentation."""
+
+    def test_handler_names_match_the_filesystem_and_shell_tools(self) -> None:
+        # Recognition couples to tool names, so a rename in those capabilities would silently
+        # degrade rich rendering to generic JSON. This fails loudly instead.
+        fs_tools = set(FileSystem[None](root_dir='.').get_toolset().tools)
+        shell_tools = set(Shell[None](cwd='.').get_toolset().tools)
+        assert set(_HANDLERS) <= fs_tools | shell_tools
 
     def test_edit_file_yields_edit_kind_location_and_diff(self) -> None:
         presentation = default_coding_presenter(
