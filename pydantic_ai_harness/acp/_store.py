@@ -36,8 +36,17 @@ class SessionStore(Protocol):
     """Where the adapter saves and restores sessions so `session/load` can reopen them.
 
     `save` is called after each committed turn (and once when the session is created); `load`
-    returns a previously saved session or `None` if the id is unknown.
+    returns a previously saved session or `None` if the id is unknown. The adapter does not catch
+    exceptions raised by `save` or `load`: they propagate to the client as a request error on the
+    operation that triggered them.
     """
+
+    # Known shortcoming (not yet addressed): the adapter neither retries nor degrades on store
+    # failures. A `save` that raises (a full disk, an unavailable database) fails its triggering
+    # operation even though the turn already streamed and committed in memory; a `load` that raises
+    # on a corrupt payload surfaces a raw error instead of the clean `invalid_params` an unknown id
+    # gets. A durable store should own its durability errors until the adapter defines explicit
+    # (likely non-fatal and surfaced) handling.
 
     async def save(self, session_id: str, session: StoredSession) -> None: ...  # pragma: no cover - protocol stub
 
