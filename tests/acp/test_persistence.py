@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 
 import acp
 import pytest
@@ -166,3 +167,40 @@ async def test_load_session_without_a_store_is_method_not_found() -> None:
     await adapter.initialize(protocol_version=1)
     with pytest.raises(acp.RequestError):
         await adapter.load_session(cwd='/ws', session_id='whatever')
+
+
+class _FailingStore:
+    """A SessionStore whose operations always raise, standing in for a broken durable backend."""
+
+    async def save(self, session_id: str, session: StoredSession) -> None:
+        raise OSError('disk full')
+
+    async def load(self, session_id: str) -> StoredSession | None:
+        raise OSError('unreadable')
+
+
+async def test_save_failure_is_logged_and_does_not_fail_the_turn(caplog: pytest.LogCaptureFixture) -> None:
+    adapter: PydanticAIACPAgent[None, str] = PydanticAIACPAgent(
+        Agent(TestModel(custom_output_text='ok')), session_store=_FailingStore()
+    )
+    adapter.on_connect(RecordingClient())
+    await adapter.initialize(protocol_version=1)
+    with caplog.at_level(logging.ERROR):
+        session = await adapter.new_session(cwd='/ws')  # persisting the empty session fails...
+        response = await adapter.prompt(prompt=[acp.text_block('hi')], session_id=session.session_id)
+
+    # ...as does persisting the turn, yet the turn the user already saw stream still succeeds; the
+    # durable-write failure is only logged.
+    assert response.stop_reason == 'end_turn'
+    assert 'failed to persist' in caplog.text
+
+
+async def test_load_read_failure_is_reported_as_a_clean_error() -> None:
+    adapter: PydanticAIACPAgent[None, str] = PydanticAIACPAgent(Agent(TestModel()), session_store=_FailingStore())
+    adapter.on_connect(RecordingClient())
+    await adapter.initialize(protocol_version=1)
+    with pytest.raises(acp.RequestError) as excinfo:
+        await adapter.load_session(cwd='/ws', session_id='whatever')
+    # A read/deserialize failure surfaces as a purpose-built internal error, not a leaked exception.
+    assert excinfo.value.code == -32603
+    assert 'could not be read' in str(excinfo.value.data)

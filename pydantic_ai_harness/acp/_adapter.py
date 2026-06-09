@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import logging
 from collections.abc import Hashable, Sequence
 from dataclasses import dataclass, field
 from inspect import isawaitable
@@ -54,6 +55,8 @@ from ._store import SessionStore, StoredSession
 
 # Version advertised to the client when the caller does not supply one.
 DEFAULT_VERSION = '0.1.0'
+
+_logger = logging.getLogger(__name__)
 
 
 def _all_known_model_names() -> tuple[str, ...]:
@@ -293,13 +296,23 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
         `session_config`, as in `new_session`.
 
         Raises:
-            acp.RequestError: if no session with `session_id` is stored.
+            acp.RequestError: if no session with `session_id` is stored, or the stored session
+                cannot be read.
         """
         if self._session_store is None:  # pragma: no cover - load_session is advertised only with a store
             raise acp.RequestError.method_not_found('session/load')
         if self._conn is None:  # pragma: no cover - on_connect always runs before load_session
             raise RuntimeError('load_session called before on_connect()')
-        stored = await self._session_store.load(session_id)
+        try:
+            stored = await self._session_store.load(session_id)
+        except Exception as exc:
+            # A read or deserialization failure is a server-side durability problem, not a bad
+            # client request: surface a clear, purpose-built error rather than leaking the store's
+            # low-level exception (a corrupt payload would otherwise reach the client as raw
+            # pydantic validation detail).
+            raise acp.RequestError.internal_error(
+                {'session_id': session_id, 'reason': 'stored session could not be read'}
+            ) from exc
         if stored is None:
             raise acp.RequestError.invalid_params(
                 {'session_id': session_id, 'reason': 'no stored session with this id'}
@@ -326,13 +339,22 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
         return schema.LoadSessionResponse(models=models)
 
     async def _persist(self, state: SessionState[AgentDepsT]) -> None:
-        """Save a session's committed state (history, transcript, selected model), if a store is configured."""
+        """Save a session's committed state (history, transcript, selected model), if a store is configured.
+
+        A store failure is logged and swallowed rather than failing the operation that triggered the
+        save: the turn (or session) has already streamed and committed in memory, so a durable-write
+        error must not surface as a failure for work the user already saw succeed. The session stays
+        usable and the next successful save catches the store back up.
+        """
         if self._session_store is None:
             return
-        await self._session_store.save(
-            state.session_id,
-            StoredSession(messages=list(state.history), updates=list(state.transcript), model=state.model),
-        )
+        try:
+            await self._session_store.save(
+                state.session_id,
+                StoredSession(messages=list(state.history), updates=list(state.transcript), model=state.model),
+            )
+        except Exception:
+            _logger.exception('failed to persist ACP session %s; durable state is now behind', state.session_id)
 
     def _model_state(self, current_model_id: str) -> schema.SessionModelState:
         """The available/current models advertised to the client. Call only when models are configured."""
