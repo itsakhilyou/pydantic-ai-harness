@@ -60,12 +60,9 @@ def _all_known_model_names() -> tuple[str, ...]:
 
     `KnownModelName` is a `TypeAliasType`, so the members are read from `__value__` (one flat
     `Literal` of `'provider:model'` strings).
-
-    pyai now ships `pydantic_ai.models.known_model_names()` (added in pydantic-ai#5803) as the
-    public, stable replacement for this `__value__` introspection. Switch to it -- and delete this
-    helper -- once the harness's `pydantic-ai-slim` floor is raised to the first release that
-    includes it (not yet released as of this writing).
     """
+    # Swap for `known_model_names()` (pydantic-ai#5803) once a released slim ships it and the
+    # floor is raised; it's unreleased now, so calling it would break the floor CI job.
     return get_args(KnownModelName.__value__)
 
 
