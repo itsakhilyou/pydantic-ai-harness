@@ -37,16 +37,18 @@ class SessionStore(Protocol):
 
     `save` is called after each committed turn (and once when the session is created); `load`
     returns a previously saved session or `None` if the id is unknown. The adapter does not catch
-    exceptions raised by `save` or `load`: they propagate to the client as a request error on the
-    operation that triggered them.
+    exceptions raised by `save` or `load`; the SDK reports them to the client as a JSON-RPC error
+    on the triggering request -- a `pydantic.ValidationError` as `invalid_params`, anything else as
+    a generic internal error.
     """
 
     # Known shortcoming (not yet addressed): the adapter neither retries nor degrades on store
     # failures. A `save` that raises (a full disk, an unavailable database) fails its triggering
-    # operation even though the turn already streamed and committed in memory; a `load` that raises
-    # on a corrupt payload surfaces a raw error instead of the clean `invalid_params` an unknown id
-    # gets. A durable store should own its durability errors until the adapter defines explicit
-    # (likely non-fatal and surfaced) handling.
+    # operation -- a turn, a new session, a model switch -- even though that turn already streamed
+    # and committed in memory; a corrupt `load` surfaces a generic protocol error carrying
+    # low-level deserialization details rather than a graceful, session-level message. A durable
+    # store should own its durability errors until the adapter defines explicit (likely non-fatal
+    # and surfaced) handling.
 
     async def save(self, session_id: str, session: StoredSession) -> None: ...  # pragma: no cover - protocol stub
 
