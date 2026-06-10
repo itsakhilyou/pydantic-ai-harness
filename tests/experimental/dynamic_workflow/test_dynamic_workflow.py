@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable
 from typing import Any
 
@@ -13,6 +14,7 @@ from pydantic_ai.messages import (
     ModelMessage,
     ModelRequest,
     ModelResponse,
+    RetryPromptPart,
     TextPart,
     ToolCallPart,
     ToolReturnPart,
@@ -199,6 +201,15 @@ async def test_descriptions_override(make_agent: MakeAgent) -> None:
     assert '"""Reviews code for bugs."""' in desc
 
 
+async def test_tool_def_is_sequential_with_code_metadata(make_agent: MakeAgent) -> None:
+    # `sequential=True` is what serializes two `run_workflow` calls in one model response;
+    # dropping it would let them race the shared per-run budget counter.
+    ts = DynamicWorkflowToolset[None](agents=[make_agent()])
+    tool_def = (await ts.get_tools(_ctx()))['run_workflow'].tool_def
+    assert tool_def.sequential is True
+    assert tool_def.metadata == {'code_arg_name': 'code', 'code_arg_language': 'python'}
+
+
 async def test_custom_tool_name(make_agent: MakeAgent) -> None:
     ts = DynamicWorkflowToolset[None](agents=[make_agent()], tool_name='orchestrate')
     tools = await ts.get_tools(_ctx())
@@ -333,6 +344,33 @@ async def test_nested_workflow_is_refused(make_agent: MakeAgent) -> None:
             await _run_script(ts, "await sub(task='x')")
     finally:
         _in_workflow.reset(token)
+
+
+async def test_nested_workflow_refused_end_to_end() -> None:
+    # The real claim behind the contextvar: a sub-agent that itself carries a DynamicWorkflow
+    # capability — dispatched through the executor's `ensure_future` (the same context-copy
+    # path `asyncio.gather` uses) — is refused when it tries to run its own workflow.
+    leaf = _sub_agent('leaf-done', 'leaf')
+    inner_retries: list[str] = []
+
+    def inner_fn(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        retries = [
+            p for m in messages if isinstance(m, ModelRequest) for p in m.parts if isinstance(p, RetryPromptPart)
+        ]
+        if retries:
+            inner_retries.append(str(retries[-1].content))
+            return ModelResponse(parts=[TextPart('inner gave up')])
+        return ModelResponse(parts=[ToolCallPart(tool_name='run_workflow', args={'code': "await leaf(task='x')"})])
+
+    inner: Agent[None, str] = Agent(
+        FunctionModel(inner_fn),
+        name='inner',
+        capabilities=[DynamicWorkflow[None](agents=[WorkflowAgent(agent=leaf)])],
+    )
+    ts = DynamicWorkflowToolset[None](agents=[WorkflowAgent(agent=inner)])
+    out = await _run_script(ts, "await inner(task='go')")
+    assert out == 'inner gave up'
+    assert any('do not nest' in r for r in inner_retries)
 
 
 async def test_unknown_agent_raises_model_retry(make_agent: MakeAgent) -> None:
@@ -476,6 +514,62 @@ async def test_runtime_error_includes_prints(make_agent: MakeAgent) -> None:
         await _run_script(ts, "print('before crash')\n1 / 0")
 
 
+async def test_sub_agent_failure_inside_gather_aborts_script(make_agent: MakeAgent) -> None:
+    # One failing sub-agent in a gather aborts the whole script; the retry names the failing
+    # agent and its error type, and the agent run itself is not torn down.
+    def boom(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        raise ValueError('kaboom')
+
+    bad: Agent[None, str] = Agent(FunctionModel(boom), name='bad')
+    ts = DynamicWorkflowToolset[None](agents=[make_agent('ok', 'good'), WorkflowAgent(agent=bad)])
+    code = "import asyncio\nawait asyncio.gather(good(task='a'), bad(task='b'))"
+    with pytest.raises(ModelRetry) as exc_info:
+        await _run_script(ts, code)
+    msg = str(exc_info.value)
+    assert "'bad'" in msg
+    assert 'ValueError' in msg
+
+
+async def test_host_errors_cannot_be_caught_in_sandbox() -> None:
+    # Host-raised exceptions (including the budget error) abort the script even under a matching
+    # `except RuntimeError`. The budget-exhausted terminal result relies on this: the surfaced
+    # error is always the budget error when the flag is set, never a later unrelated failure
+    # masked by it. If Monty ever makes host errors catchable, this pins the assumption.
+    counted: Agent[None, str] = Agent(TestModel(custom_output_text='ok'), name='counted')
+    ts = DynamicWorkflowToolset[None](agents=[WorkflowAgent(agent=counted)], max_agent_calls=1)
+    code = "await counted(task='a')\ntry:\n    await counted(task='b')\nexcept RuntimeError:\n    pass\n1 / 0"
+    out = await _run_script(ts, code)
+    # The script aborted at the second call (`1 / 0` never ran) and the terminal result surfaced.
+    assert isinstance(out, dict)
+    assert 'budget' in out['error']
+
+
+async def test_cancellation_awaits_inflight_sub_agents() -> None:
+    # Cancelling the workflow tool call must not return until in-flight sub-agent runs have
+    # fully unwound — `task.cancel()` only schedules the CancelledError; the executor awaits
+    # the cancelled tasks before propagating.
+    started = asyncio.Event()
+    unwound = asyncio.Event()
+
+    async def blocking(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            unwound.set()
+            raise
+        return ModelResponse(parts=[TextPart('never')])  # pragma: no cover
+
+    slow: Agent[None, str] = Agent(FunctionModel(blocking), name='slow')
+    ts = DynamicWorkflowToolset[None](agents=[WorkflowAgent(agent=slow)])
+    run = asyncio.ensure_future(_run_script(ts, "import asyncio\nawait asyncio.gather(slow(task='x'))"))
+    await started.wait()
+    run.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await run
+    assert unwound.is_set()
+
+
 async def test_sub_agent_error_does_not_leak_host_internals() -> None:
     def boom(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
         raise ValueError('SECRET_TOKEN_sk_abc123 at /Users/victim/secret.py')
@@ -553,6 +647,66 @@ async def test_for_run_resets_budget(make_agent: MakeAgent) -> None:
 async def test_for_run_step_preserves_self(make_agent: MakeAgent) -> None:
     ts = DynamicWorkflowToolset[None](agents=[make_agent()])
     assert await ts.for_run_step(_ctx()) is ts
+
+
+async def test_for_run_tolerates_bad_append_from_earlier_run(make_agent: MakeAgent) -> None:
+    # An invalid append that `_reveal_pending` skipped stays in the shared `agents` list; a later
+    # run must degrade the same way (skip with a warning), not hard-fail at toolset setup.
+    agents = [make_agent('b', 'base')]
+    ts = DynamicWorkflowToolset[None](agents=agents)
+    ctx = _ctx_with_queue()
+    await ts.get_tools(ctx)
+    agents.append(WorkflowAgent(agent=_sub_agent(name=None)))
+    with pytest.warns(UserWarning, match='could not reveal'):
+        await ts.get_tools(ctx)
+
+    with pytest.warns(UserWarning, match='has no `name`'):
+        fresh = await ts.for_run(_ctx())
+    assert isinstance(fresh, DynamicWorkflowToolset)
+    assert set(fresh._by_name) == {'base'}  # pyright: ignore[reportPrivateUsage]
+    assert fresh._call_count == 0  # pyright: ignore[reportPrivateUsage]
+    # The skipped entry was pre-seeded as warned, so resolving tools in the new run does not
+    # re-warn (filterwarnings='error' would fail this call if it did) and `base` still works.
+    assert await _run_script(fresh, "await base(task='x')", _ctx_with_queue()) == 'b'
+
+
+async def test_for_run_tolerates_duplicate_append_from_earlier_run(make_agent: MakeAgent) -> None:
+    # Same as above for the duplicate-name case: the original keeps the name, the shadow is skipped.
+    agents = [make_agent('b', 'base')]
+    ts = DynamicWorkflowToolset[None](agents=agents)
+    agents.append(make_agent('shadow', 'base'))
+    with pytest.warns(UserWarning, match='must be unique'):
+        fresh = await ts.for_run(_ctx())
+    assert isinstance(fresh, DynamicWorkflowToolset)
+    assert await _run_script(fresh, "await base(task='x')", _ctx_with_queue()) == 'b'
+
+
+# --- Executor cancellation cleanup ------------------------------------------
+
+
+async def test_cancellation_closes_unscheduled_coroutines() -> None:
+    # In global-sequential mode (durable backends) deferred calls are kept as bare, unscheduled
+    # coroutines. On cancellation those must be `close()`d, not cancelled — covers the
+    # coroutine branch of the executor's cleanup, unreachable through DynamicWorkflowToolset.
+    from pydantic_monty import MontyRepl
+
+    from pydantic_ai_harness._monty_exec import MontyExecutor
+
+    started = asyncio.Event()
+
+    async def dispatch(name: str, kwargs: dict[str, Any]) -> Any:
+        started.set()
+        await asyncio.Event().wait()  # block forever; only cancellation ends this
+
+    repl = MontyRepl()
+    state = repl.feed_start("import asyncio\nawait asyncio.gather(sub(task='a'), sub(task='b'))")
+    executor = MontyExecutor(dispatch=dispatch, valid_names={'sub'}, global_sequential=True)
+    # The first call is awaited inline and blocks; the second is still a bare coroutine.
+    task = asyncio.ensure_future(executor.run(state))
+    await started.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
 
 
 # --- Runtime reveal --------------------------------------------------------

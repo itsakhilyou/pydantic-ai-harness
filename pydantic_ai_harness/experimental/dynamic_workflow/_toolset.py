@@ -8,10 +8,11 @@ and composes their results — fan-out, chaining, voting, loops — in one step.
 from __future__ import annotations
 
 import contextvars
+import copy
 import keyword
 import warnings
 from collections.abc import Mapping
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from typing import Annotated, Any, Generic, Literal
 
 from pydantic import Field, TypeAdapter
@@ -90,7 +91,7 @@ def _resolve_resource_limits(limits: WorkflowResourceLimits | Literal['unlimited
     - `'unlimited'` → no limits at all (an empty mapping).
     - a `WorkflowResourceLimits` mapping → merged *onto* the backstop, so a partial dict overrides
       only the caps it names and the others keep their backstop value (a `{'max_memory': ...}`
-      never silently drops the duration backstop).
+      never silently drops the allocations backstop).
 
     A mapping with an unrecognized key raises `UserError` rather than silently ignoring it.
     """
@@ -278,7 +279,7 @@ class DynamicWorkflowToolset(AbstractToolset[AgentDepsT]):
     """
 
     toolset_id: str | None = None
-    """Stable toolset id (used for durable execution); defaults to the tool name."""
+    """Stable toolset id; defaults to the tool name."""
 
     # Per-run count of sub-agent calls. Reset on `for_run`, preserved across `for_run_step`.
     _call_count: int = field(default=0, init=False, repr=False)
@@ -302,31 +303,61 @@ class DynamicWorkflowToolset(AbstractToolset[AgentDepsT]):
         if self.max_agent_calls < 1:
             raise UserError('DynamicWorkflow `max_agent_calls` must be at least 1.')
         _resolve_resource_limits(self.resource_limits)  # validate keys now, not at the first tool call
-        self._by_name = {}
+        self._by_name, _ = self._index_agents(strict=True)
+        self._baseline_catalog = {name: entry.description for name, entry in self._by_name.items()}
+
+    def _index_agents(self, *, strict: bool) -> tuple[dict[str, WorkflowAgent[AgentDepsT]], set[int]]:
+        """Index `agents` by resolved sandbox name.
+
+        With `strict=True` an unusable entry (no name, invalid name, duplicate) raises `UserError`;
+        with `strict=False` it is skipped with a warning and its `id()` is returned so the caller
+        can suppress a second warning from `_reveal_pending`. The lenient mode exists for `for_run`:
+        a mid-run append that `_reveal_pending` tolerated must not hard-fail every later run.
+        """
+        by_name: dict[str, WorkflowAgent[AgentDepsT]] = {}
+        skipped: set[int] = set()
         for entry in self.agents:
             name = entry.resolved_name
             if not name:
-                raise UserError(
+                problem = (
                     'DynamicWorkflow sub-agent has no `name` and its agent has no `name`; '
                     'set `WorkflowAgent(name=...)` so it can be exposed as a sandbox function.'
                 )
-            if not _is_valid_sandbox_name(name):
-                raise UserError(
+            elif not _is_valid_sandbox_name(name):
+                problem = (
                     f'DynamicWorkflow sub-agent name {name!r} cannot be exposed as a sandbox function: '
                     'it must be a Python identifier that is not a reserved keyword. Rename it.'
                 )
-            if name in self._by_name:
-                raise UserError(f'DynamicWorkflow has two sub-agents named {name!r}; names must be unique.')
-            self._by_name[name] = entry
-        self._baseline_catalog = {name: entry.description for name, entry in self._by_name.items()}
+            elif name in by_name:
+                problem = f'DynamicWorkflow has two sub-agents named {name!r}; names must be unique.'
+            else:
+                by_name[name] = entry
+                continue
+            if strict:
+                raise UserError(problem)
+            skipped.add(id(entry))
+            warnings.warn(f'{problem} It is not callable in this run.', stacklevel=3)
+        return by_name, skipped
 
     @property
     def id(self) -> str | None:
         return self.toolset_id or self.tool_name
 
     async def for_run(self, ctx: RunContext[AgentDepsT]) -> AbstractToolset[AgentDepsT]:
-        """Fresh instance per run so the sub-agent-call budget is per-run."""
-        return replace(self)
+        """Fresh instance per run so the sub-agent-call budget is per-run.
+
+        `dataclasses.replace` would re-run `__post_init__`, whose strict validation raises on an
+        unusable entry that a mid-run append left in `agents` — turning one bad reveal into a hard
+        failure of every later run. Clone shallowly instead (keeping `agents` shared, so appends
+        stay visible to this run) and rebuild the per-run state leniently.
+        """
+        clone = copy.copy(self)
+        clone._call_count = 0
+        clone._by_name, skipped = self._index_agents(strict=False)
+        clone._baseline_catalog = {name: entry.description for name, entry in clone._by_name.items()}
+        # Seed with the entries already warned about so `_reveal_pending` doesn't warn again.
+        clone._reveal_warned = skipped
+        return clone
 
     async def for_run_step(self, ctx: RunContext[AgentDepsT]) -> AbstractToolset[AgentDepsT]:
         """Preserve the per-run budget across steps."""
@@ -453,6 +484,9 @@ class DynamicWorkflowToolset(AbstractToolset[AgentDepsT]):
         except MontySyntaxError as e:
             raise ModelRetry(f'Syntax error in workflow:\n{capture.prepend_to(e.display())}') from e
         except MontyRuntimeError as e:
+            # Host-raised exceptions cannot be caught inside the sandbox (even a matching
+            # `except RuntimeError` aborts), so when this flag is set the budget error is
+            # the one that surfaced — it cannot be masking a later, unrelated failure.
             if budget_exhausted:
                 # Retrying can't help — the per-run budget is spent. Return a terminal result
                 # so the model concludes instead of burning retries into a hard failure.

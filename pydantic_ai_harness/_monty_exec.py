@@ -106,11 +106,20 @@ class MontyExecutor:
                 else:
                     state = await self._resolve_futures(state)
         finally:
-            for call in self._pending.values():  # pragma: no cover
+            cancelled: list[asyncio.Task[Any]] = []
+            for call in self._pending.values():
                 if isinstance(call, asyncio.Task):
                     call.cancel()
+                    cancelled.append(call)
                 else:
                     call.close()
+            if cancelled:
+                # `cancel()` only schedules a `CancelledError` at each task's next suspension
+                # point; await them so dispatched work (e.g. sub-agent runs mutating shared
+                # usage) has fully unwound before this returns. `return_exceptions=True` keeps
+                # one task's teardown error from masking the original exception, and the
+                # results are deliberately discarded.
+                await asyncio.gather(*cancelled, return_exceptions=True)
         return state
 
     async def _handle_function(self, snapshot: FunctionSnapshot) -> MontyState:
@@ -124,18 +133,21 @@ class MontyExecutor:
             )
 
         original_name = self.sanitized_to_original.get(name, name)
-        call = self.dispatch(original_name, snapshot.kwargs)
 
         if name in self.sequential_names:
             # Rendered as `def` (sync), so the sandbox code doesn't `await` the result —
             # resolve inline. Await pending parallel tasks first (barrier) for ordering.
+            # The dispatch coroutine is created only after the barrier: it is not in
+            # `_pending`, so if it existed while the barrier awaits and we were cancelled
+            # there, `run`'s cleanup would never close it.
             for cid in list(self._pending):
                 self._pre_resolved[cid] = await _await_external(self._pending.pop(cid))
             # The wrapped outcome (`{'return_value': ...}` / `{'exception': ...}`) is already
             # exactly the payload `resume` expects.
-            return snapshot.resume(await _await_external(call))
+            return snapshot.resume(await _await_external(self.dispatch(original_name, snapshot.kwargs)))
 
         # Deferred execution — resolved later at FutureSnapshot.
+        call = self.dispatch(original_name, snapshot.kwargs)
         if self.global_sequential:
             # Keep the bare coroutine unscheduled; it's awaited one-at-a-time to avoid interleaving.
             self._pending[snapshot.call_id] = call
