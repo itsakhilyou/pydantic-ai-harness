@@ -2,6 +2,10 @@
 
 Let an agent orchestrate several sub-agents from a single Python script it writes itself.
 
+> **Experimental.** Importing `pydantic_ai_harness.experimental.dynamic_workflow` emits a
+> `HarnessExperimentalWarning`: the API may change in any release. Silence it with
+> `warnings.filterwarnings('ignore', category=HarnessExperimentalWarning)` once you've accepted that.
+
 ## Why
 
 When an orchestrator coordinates sub-agents by calling them **one per tool call**, two costs add
@@ -206,6 +210,8 @@ A sub-agent function returns that agent's output serialized to a JSON-compatible
 | list / scalar           | the list / scalar    |
 
 The value of the script's last expression becomes the `run_workflow` result — do not `print()` it.
+If the script also called `print()`, the result is wrapped as `{"output": "<printed text>",
+"result": <last expression>}`; a script whose last expression is `None` returns `{}`.
 
 ## Budget and safety
 
@@ -270,8 +276,10 @@ DynamicWorkflow(
     max_retries=3,
     forward_usage=True,
     sub_agent_usage_limits=None,  # UsageLimits applied to each sub-agent run; None -> pydantic-ai default
-    resource_limits=None,    # None -> backstop (256 MB, 50M allocs, no time cap); 'unlimited' -> off; dict -> merged
+    resource_limits=None,    # None -> backstop (256 MB, 50M allocs, no time cap); 'unlimited' -> off;
+                             # WorkflowResourceLimits dict -> merged onto the backstop
     id=None,                 # required when defer_loading=True
+    description=None,        # one-line catalog entry shown while deferred
     defer_loading=False,
 )
 
