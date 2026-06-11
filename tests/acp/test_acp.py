@@ -1340,12 +1340,10 @@ class TestCancellation:
         session_id = await _start(adapter, client)
 
         prompt_task = asyncio.ensure_future(adapter.prompt(prompt=[acp.text_block('go')], session_id=session_id))
+        # One tick suffices: prompt() sets active_turn before its first suspension point (an
+        # uncontended lock acquire does not yield).
+        await asyncio.sleep(0)
         turn = adapter._sessions[session_id].active_turn  # pyright: ignore[reportPrivateUsage]
-        for _ in range(100):
-            if turn is not None:
-                break
-            await asyncio.sleep(0)
-            turn = adapter._sessions[session_id].active_turn  # pyright: ignore[reportPrivateUsage]
         assert turn is not None, 'the prompt never started its turn'
         # Tear the prompt handler down in the same tick the dismissed dialog ends the turn: the
         # turn's internal rollback signal must not escape (or replace) the handler's cancellation.

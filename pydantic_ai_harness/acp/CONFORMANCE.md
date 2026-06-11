@@ -46,3 +46,6 @@ each behavior against the spec.
 - A turn ended by a usage limit answers with its `max_tokens`/`max_turn_requests` stop reason but
   rolls back like a cancellation (the raising run's messages are not retrievable), so nothing is
   committed or persisted for it.
+- A cancel that lands after the turn has already committed (during the store save) still answers
+  `cancelled`, but with `user_message_id` and usage set: the turn's history and transcript are
+  kept, and only the durable copy may lag until the next save.
