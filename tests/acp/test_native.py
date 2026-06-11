@@ -60,6 +60,26 @@ async def test_write_file_writes_through_the_client() -> None:
     assert '/ws/b.py' in result  # confirmation names the path so the model knows the write landed
 
 
+async def test_relative_paths_resolve_against_the_session_cwd() -> None:
+    # ACP requires absolute paths on the wire, but a model routinely emits workspace-relative
+    # ones (the local FileSystem tools take them); with a cwd the toolset resolves them.
+    client = RecordingClient({'/ws/src/a.py': 'code'})
+    ts = AcpFileSystemToolset[None](client=client, session_id='sid', cwd='/ws')
+    assert await ts.read_file('src/a.py') == 'code'
+    await ts.write_file('src/b.py', 'new')
+    assert client.reads == [('/ws/src/a.py', 'sid')]
+    assert client.writes == [('/ws/src/b.py', 'new', 'sid')]
+
+
+async def test_absolute_paths_and_cwdless_toolsets_pass_paths_through() -> None:
+    client = RecordingClient({'/elsewhere/a.py': 'x', 'raw.txt': 'y'})
+    with_cwd = AcpFileSystemToolset[None](client=client, session_id='sid', cwd='/ws')
+    assert await with_cwd.read_file('/elsewhere/a.py') == 'x'  # absolute paths are not rewritten
+    without_cwd = AcpFileSystemToolset[None](client=client, session_id='sid')
+    assert await without_cwd.read_file('raw.txt') == 'y'  # no cwd: passed through unchanged
+    assert client.reads == [('/elsewhere/a.py', 'sid'), ('raw.txt', 'sid')]
+
+
 async def test_filesystem_registers_read_file_and_write_file_tools() -> None:
     # The tool names match the local FileSystem capability so the default presenter renders them.
     ts = AcpFileSystemToolset[None](client=RecordingClient(), session_id='sid')
@@ -76,7 +96,7 @@ async def test_acp_filesystem_builds_a_working_toolset_when_fs_is_advertised() -
 async def test_acp_filesystem_read_only_client_reads_via_acp_and_writes_locally(tmp_path: Path) -> None:
     # A read-only client keeps editor-native reads, but writes go to the local workspace disk
     # rather than the client (coherent only when the agent shares that disk -- see the helper docs).
-    client = RecordingClient({'notes.txt': 'hello'})
+    client = RecordingClient({str(tmp_path / 'notes.txt'): 'hello'})
     session = _session(client, _fs_caps(read=True, write=False))
     session = AcpSession(
         cwd=str(tmp_path),
@@ -89,7 +109,7 @@ async def test_acp_filesystem_read_only_client_reads_via_acp_and_writes_locally(
     assert isinstance(toolset, AcpFileSystemToolset)
 
     assert await toolset.read_file('notes.txt') == 'hello'
-    assert client.reads == [('notes.txt', 'sid')]  # the read routed through the editor
+    assert client.reads == [(str(tmp_path / 'notes.txt'), 'sid')]  # the read routed through the editor
     await toolset.write_file('out.txt', 'data')
     assert client.writes == []  # the client was never asked to write
     assert (tmp_path / 'out.txt').read_text() == 'data'  # the write landed on local disk

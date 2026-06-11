@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import os.path
 from collections.abc import Awaitable
 from typing import Protocol
 
@@ -51,37 +52,48 @@ class AcpFileSystemToolset(FunctionToolset[AgentDepsT]):
     the editor's live view of the workspace (including unsaved buffers). The tool names match the
     local `FileSystem` capability, so the default presenter renders them the same way.
 
-    Paths are passed through unchanged; the client resolves and authorizes them against the
-    session workspace (this toolset adds no sandboxing of its own).
+    ACP requires absolute paths, but models routinely produce workspace-relative ones (the local
+    `FileSystem` tools take them, and the same agent may run against either backend): when `cwd`
+    is set, relative paths are resolved against it before reaching the wire. The client still
+    resolves and authorizes every path itself (this toolset adds no sandboxing of its own).
 
     If `local_writer` is set (a read-only client -- see [`acp_filesystem`][pydantic_ai_harness.acp.acp_filesystem]),
     `write_file` goes there instead of to the client, while reads still route through the editor.
     """
 
-    def __init__(self, *, client: Client, session_id: str, local_writer: _LocalFileWriter | None = None) -> None:
+    def __init__(
+        self, *, client: Client, session_id: str, cwd: str | None = None, local_writer: _LocalFileWriter | None = None
+    ) -> None:
         super().__init__()
         self._client = client
         self._session_id = session_id
+        self._cwd = cwd
         self._local_writer = local_writer
         self.add_function(self.read_file, name='read_file')
         self.add_function(self.write_file, name='write_file')
+
+    def _absolute(self, path: str) -> str:
+        if self._cwd is None or os.path.isabs(path):
+            return path
+        return os.path.normpath(os.path.join(self._cwd, path))
 
     async def read_file(self, path: str) -> str:
         """Read a text file's contents through the editor.
 
         Args:
-            path: Absolute path to the file, as the ACP client expects it.
+            path: Path to the file; resolved against the session workspace when relative.
         """
-        response = await self._client.read_text_file(path=path, session_id=self._session_id)
+        response = await self._client.read_text_file(path=self._absolute(path), session_id=self._session_id)
         return response.content
 
     async def write_file(self, path: str, content: str) -> str:
         """Write a text file's full contents through the editor.
 
         Args:
-            path: Absolute path to the file, as the ACP client expects it.
+            path: Path to the file; resolved against the session workspace when relative.
             content: The complete new contents of the file.
         """
+        path = self._absolute(path)
         if self._local_writer is not None:
             return await self._local_writer.write_file(path, content)
         await self._client.write_text_file(content=content, path=path, session_id=self._session_id)
@@ -118,9 +130,11 @@ def acp_filesystem(session: AcpSession) -> AcpFileSystemToolset[None] | None:
     if fs is None or not fs.read_text_file:
         return None
     if fs.write_text_file:
-        return AcpFileSystemToolset[None](client=session.client, session_id=session.session_id)
+        return AcpFileSystemToolset[None](client=session.client, session_id=session.session_id, cwd=session.cwd)
     local_writer = FileSystem(root_dir=session.cwd).get_toolset()
-    return AcpFileSystemToolset[None](client=session.client, session_id=session.session_id, local_writer=local_writer)
+    return AcpFileSystemToolset[None](
+        client=session.client, session_id=session.session_id, cwd=session.cwd, local_writer=local_writer
+    )
 
 
 def _format_terminal_output(result: schema.TerminalOutputResponse) -> str:
