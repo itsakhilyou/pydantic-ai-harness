@@ -417,6 +417,14 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
 
         user_content = prompt_blocks_to_user_content(prompt)
         async with state.lock:
+            if self._sessions.get(session_id) is not state:
+                # The session was closed or reloaded while this prompt waited its turn on the
+                # lock. Running now would resurrect the discarded state: `cancel` could no longer
+                # reach the turn, and its commit would persist the orphaned history over the
+                # live session.
+                raise acp.RequestError.invalid_params(
+                    {'session_id': session_id, 'reason': 'session was closed while the prompt was queued'}
+                )
             state.cancel_requested = False
             turn = asyncio.ensure_future(self._run_turn(state, prompt, user_content))
             state.active_turn = turn

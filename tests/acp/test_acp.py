@@ -1254,6 +1254,38 @@ class TestSessionClose:
         adapter.on_connect(FakeClient())
         assert await adapter.close_session(session_id='missing') is not None  # does not raise
 
+    async def test_queued_prompt_is_rejected_when_the_session_closes_mid_wait(self) -> None:
+        store = InMemorySessionStore()
+        started = asyncio.Event()
+        release = asyncio.Event()
+        agent = Agent(TestModel())
+
+        @agent.tool_plain
+        async def slow_tool() -> str:
+            started.set()
+            await release.wait()
+            return 'done'  # pragma: no cover - cancelled by close
+
+        adapter: PydanticAIACPAgent[None, str] = PydanticAIACPAgent(agent, session_store=store)
+        client = FakeClient()
+        session_id = await _start(adapter, client)
+        snapshot = await store.load(session_id)
+
+        first = asyncio.ensure_future(adapter.prompt(prompt=[acp.text_block('one')], session_id=session_id))
+        await asyncio.wait_for(started.wait(), timeout=5)
+        # A second prompt queues on the session's turn lock behind the in-flight first turn.
+        queued = asyncio.ensure_future(adapter.prompt(prompt=[acp.text_block('two')], session_id=session_id))
+        await asyncio.sleep(0)
+        await adapter.close_session(session_id=session_id)
+
+        assert (await asyncio.wait_for(first, timeout=5)).stop_reason == 'cancelled'
+        # The queued prompt must not run against the discarded session state: it would be
+        # uncancellable (cancel no longer finds it) and would persist over the closed session.
+        with pytest.raises(RequestError) as excinfo:
+            await asyncio.wait_for(queued, timeout=5)
+        assert excinfo.value.code == -32602
+        assert await store.load(session_id) == snapshot
+
     async def test_close_awaits_the_in_flight_turn_before_returning(self) -> None:
         started = asyncio.Event()
         release = asyncio.Event()

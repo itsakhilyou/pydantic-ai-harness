@@ -134,6 +134,39 @@ async def test_load_over_an_active_session_cancels_the_in_flight_turn() -> None:
     assert adapter._sessions[session.session_id].active_turn is None  # pyright: ignore[reportPrivateUsage]
 
 
+async def test_queued_prompt_does_not_clobber_a_reloaded_session() -> None:
+    started = asyncio.Event()
+    release = asyncio.Event()
+    agent = Agent(TestModel())
+
+    @agent.tool_plain
+    async def slow_tool() -> str:
+        started.set()
+        await release.wait()
+        return 'done'  # pragma: no cover - cancelled by the load
+
+    store = InMemorySessionStore()
+    adapter: PydanticAIACPAgent[None, str] = PydanticAIACPAgent(agent, session_store=store)
+    adapter.on_connect(RecordingClient())
+    await adapter.initialize(protocol_version=1)
+    session = await adapter.new_session(cwd='/ws')
+    snapshot = await store.load(session.session_id)
+
+    first = asyncio.ensure_future(adapter.prompt(prompt=[acp.text_block('one')], session_id=session.session_id))
+    await asyncio.wait_for(started.wait(), timeout=5)
+    # A second prompt queues on the old state's turn lock; the load then replaces that state.
+    queued = asyncio.ensure_future(adapter.prompt(prompt=[acp.text_block('two')], session_id=session.session_id))
+    await asyncio.sleep(0)
+    await adapter.load_session(cwd='/ws', session_id=session.session_id)
+
+    assert (await asyncio.wait_for(first, timeout=5)).stop_reason == 'cancelled'
+    # The queued prompt held the *replaced* state: letting it run would commit and persist that
+    # orphaned history over the session just restored from the store.
+    with pytest.raises(acp.RequestError):
+        await asyncio.wait_for(queued, timeout=5)
+    assert await store.load(session.session_id) == snapshot
+
+
 async def test_load_session_dropped_from_memory_restores_from_the_store() -> None:
     store = InMemorySessionStore()
     adapter = _adapter(store)
