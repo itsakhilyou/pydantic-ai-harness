@@ -429,17 +429,21 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
             turn = asyncio.ensure_future(self._run_turn(state, prompt, user_content))
             state.active_turn = turn
             try:
-                usage, stop_reason = await turn
+                # Shielded so this coroutine's *own* cancellation (connection teardown) surfaces
+                # here instead of propagating into the turn: with a bare `await turn` the two are
+                # indistinguishable, and answering a request whose handler the connection already
+                # cancelled would deadlock its shutdown (the response future is never resolved).
+                usage, stop_reason = await asyncio.shield(turn)
             except _TurnCancelled:
                 # Rolled back: omit `user_message_id`, which would signal the message was persisted.
                 return schema.PromptResponse(stop_reason='cancelled')
             except asyncio.CancelledError:
-                if state.cancel_requested:
+                if turn.done() and state.cancel_requested:
                     return schema.PromptResponse(stop_reason='cancelled')
                 # The prompt coroutine itself was cancelled (e.g. connection teardown): stop the
                 # child turn before propagating, so it is not left running on a closing connection.
                 turn.cancel()
-                with contextlib.suppress(asyncio.CancelledError):
+                with contextlib.suppress(asyncio.CancelledError, _TurnCancelled):
                     await turn
                 raise
             finally:
@@ -472,11 +476,17 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
         Awaiting the turn keeps the caller from racing the turn's teardown -- the prompt has fully
         returned `cancelled` and released the session's resources before this returns.
         """
-        if state.active_turn is not None and not state.active_turn.done():
+        turn = state.active_turn
+        if turn is not None and not turn.done():
             state.cancel_requested = True
-            state.active_turn.cancel()
-            with contextlib.suppress(asyncio.CancelledError, _TurnCancelled):
-                await state.active_turn
+            turn.cancel()
+            try:
+                # Shielded for the same reason as in `prompt`: only the turn's own unwind may be
+                # swallowed here, never this coroutine's cancellation (see the comment there).
+                await asyncio.shield(turn)
+            except (asyncio.CancelledError, _TurnCancelled):
+                if not turn.done():
+                    raise
 
     async def _run_turn(
         self,

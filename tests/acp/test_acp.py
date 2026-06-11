@@ -1122,6 +1122,50 @@ class TestCancellation:
         await adapter.cancel(session_id=session_id)
         assert adapter._sessions[session_id].active_turn is None  # pyright: ignore[reportPrivateUsage]
 
+    async def test_teardown_cancellation_during_a_session_cancel_still_propagates(self) -> None:
+        started = asyncio.Event()
+        release = asyncio.Event()
+        agent = Agent(TestModel())
+
+        @agent.tool_plain
+        async def slow_tool() -> str:
+            started.set()
+            await release.wait()
+            return 'done'  # pragma: no cover - cancelled before returning
+
+        adapter: PydanticAIACPAgent[None, str] = PydanticAIACPAgent(agent)
+        client = FakeClient()
+        session_id = await _start(adapter, client)
+
+        prompt_task = asyncio.ensure_future(adapter.prompt(prompt=[acp.text_block('go')], session_id=session_id))
+        await asyncio.wait_for(started.wait(), timeout=5)
+        # A session/cancel and connection teardown race: the prompt handler itself is cancelled
+        # while the turn it just cancelled is still unwinding. Its own cancellation must win --
+        # answering a request the connection already abandoned would deadlock its shutdown.
+        await adapter.cancel(session_id=session_id)
+        prompt_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(prompt_task, timeout=5)
+
+    async def test_teardown_cancellation_racing_a_cancelled_permission_dialog_propagates(self) -> None:
+        executed: list[str] = []
+        agent = _approval_agent(executed)
+        adapter: PydanticAIACPAgent[None, str] = PydanticAIACPAgent(agent)
+        client = FakeClient(decider=lambda _call: None)  # the user dismisses the dialog
+        session_id = await _start(adapter, client)
+
+        prompt_task = asyncio.ensure_future(adapter.prompt(prompt=[acp.text_block('go')], session_id=session_id))
+        turn = adapter._sessions[session_id].active_turn  # pyright: ignore[reportPrivateUsage]
+        while turn is None:
+            await asyncio.sleep(0)
+            turn = adapter._sessions[session_id].active_turn  # pyright: ignore[reportPrivateUsage]
+        # Tear the prompt handler down in the same tick the dismissed dialog ends the turn: the
+        # turn's internal rollback signal must not escape (or replace) the handler's cancellation.
+        turn.add_done_callback(lambda _turn: prompt_task.cancel())
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(prompt_task, timeout=5)
+        assert executed == []
+
     async def test_outer_cancellation_propagates_and_stops_the_inner_turn(self) -> None:
         started = asyncio.Event()
         release = asyncio.Event()
@@ -1253,6 +1297,41 @@ class TestSessionClose:
         adapter: PydanticAIACPAgent[None, str] = PydanticAIACPAgent(Agent(TestModel()))
         adapter.on_connect(FakeClient())
         assert await adapter.close_session(session_id='missing') is not None  # does not raise
+
+    async def test_teardown_cancellation_of_close_while_the_turn_unwinds_propagates(self) -> None:
+        started = asyncio.Event()
+        release = asyncio.Event()
+        hold_unwind = asyncio.Event()
+        unwinding = asyncio.Event()
+        agent = Agent(TestModel())
+
+        @agent.tool_plain
+        async def slow_tool() -> str:
+            started.set()
+            try:
+                await release.wait()
+                return 'done'  # pragma: no cover - cancelled by close
+            finally:
+                unwinding.set()
+                await hold_unwind.wait()  # keep the turn's unwind in flight
+
+        adapter: PydanticAIACPAgent[None, str] = PydanticAIACPAgent(agent)
+        client = FakeClient()
+        session_id = await _start(adapter, client)
+        prompt_task = asyncio.ensure_future(adapter.prompt(prompt=[acp.text_block('go')], session_id=session_id))
+        await asyncio.wait_for(started.wait(), timeout=5)
+
+        close_task = asyncio.ensure_future(adapter.close_session(session_id=session_id))
+        await asyncio.wait_for(unwinding.wait(), timeout=5)
+        # The connection tears the close handler down while it waits for the turn's unwind; the
+        # handler's own cancellation must propagate, not be mistaken for the turn's.
+        close_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(close_task, timeout=5)
+
+        hold_unwind.set()
+        response = await asyncio.wait_for(prompt_task, timeout=5)
+        assert response.stop_reason == 'cancelled'
 
     async def test_queued_prompt_is_rejected_when_the_session_closes_mid_wait(self) -> None:
         store = InMemorySessionStore()
