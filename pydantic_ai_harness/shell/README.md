@@ -63,6 +63,44 @@ check.
 > For hard guarantees, run the agent inside OS-level isolation -- a container or
 > sandbox.
 
+## Environment control
+
+By default a spawned command inherits the agent process's full environment. In a
+sandbox that holds LLM API keys, tokens, or other secrets, a command the model
+writes can read them. Two fields control what the subprocess sees:
+
+| Field | Effect |
+|---|---|
+| `env` | Explicit environment that replaces inheritance entirely. The subprocess sees exactly these variables and nothing else. |
+| `denied_env_patterns` | Glob patterns (`fnmatch`) for variable names stripped from the base environment. Mirrors `denied_commands`. |
+
+`env` is a hard boundary: set it and inherited secrets cannot reach the
+subprocess at all (you supply `PATH` and anything else the command needs).
+`denied_env_patterns` is a denylist over the inherited environment -- lighter to
+configure when you only need to drop a few known-sensitive names. The two
+compose: when both are set, patterns also filter the explicit `env`. Leaving
+both unset preserves the inherit-everything default.
+
+```python
+from pydantic_ai_harness import Shell
+from pydantic_ai_harness.shell import LLM_API_KEY_ENV_PATTERNS
+
+# Strip provider credentials from the inherited environment.
+Shell(cwd='./repo', denied_env_patterns=LLM_API_KEY_ENV_PATTERNS)
+
+# Or hand the subprocess a fixed environment, inheriting nothing.
+import os
+Shell(cwd='./repo', env={'PATH': os.environ['PATH'], 'HOME': os.environ['HOME']})
+```
+
+`LLM_API_KEY_ENV_PATTERNS` covers common provider prefixes (`ANTHROPIC_*`,
+`OPENAI_*`, `OPENROUTER_*`, `GOOGLE_*`, `GEMINI_*`, `GATEWAY_*`) plus
+`PYDANTIC_AI_GATEWAY_API_KEY`. It is not the default: stripping environment
+variables silently would break agents that rely on inherited credentials, so it
+is opt-in. Unlike the best-effort command denylist, `env` is a real boundary --
+the subprocess is started with the environment you specify, not filtered after
+the fact.
+
 ## Background processes
 
 `start_command` writes stdout/stderr to temp files and returns a short ID. Use
@@ -96,6 +134,8 @@ Shell(
     max_output_chars=50_000,       # output cap returned to the model
     persist_cwd=False,             # make cd sticky across calls
     allow_interactive=False,       # allow TTY-style commands
+    env=None,                      # explicit env, replacing inheritance (None = inherit)
+    denied_env_patterns=[],        # glob patterns stripped from the inherited env
 )
 ```
 
