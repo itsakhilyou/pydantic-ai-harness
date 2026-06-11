@@ -40,6 +40,7 @@ class RecordingClient(Client):
         self._block_exit = block_exit
         self._block_create = block_create
         self.release_create = asyncio.Event()
+        self.exit_event = asyncio.Event()
         self.created: list[tuple[str, str | None]] = []
         self.killed: list[str] = []
         self.released: list[str] = []
@@ -86,6 +87,7 @@ class RecordingClient(Client):
     async def wait_for_terminal_exit(
         self, session_id: str, terminal_id: str, **kwargs: object
     ) -> schema.WaitForTerminalExitResponse:
+        self.exit_event.set()
         if self._block_exit:
             await asyncio.Event().wait()  # block until cancelled
         return schema.WaitForTerminalExitResponse(exit_code=self._exit_code, signal=self._signal)
