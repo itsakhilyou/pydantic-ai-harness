@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Callable, Hashable
+from collections.abc import Callable, Hashable, Mapping
 from dataclasses import dataclass
 
 from ._serialize import jsonable
@@ -13,12 +13,13 @@ from ._serialize import jsonable
 class ToolCallPermission:
     """A tool call awaiting the client's approval, passed to a `permission_policy`.
 
-    `args` is the tool's arguments (already coerced to JSON-able form).
+    `args` is the tool's arguments, canonicalized to a mapping (so a policy can scope by a
+    specific argument without narrowing first).
     """
 
     tool_name: str
     tool_call_id: str
-    args: object
+    args: Mapping[str, object]
 
 
 # Maps a tool call to the scope key under which an "always allow"/"always reject" decision is

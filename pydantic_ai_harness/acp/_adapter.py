@@ -293,8 +293,7 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
         self._sessions[session_id] = state
         # Persist the empty session so the client can reopen it even before its first turn.
         await self._persist(state)
-        models = self._model_state(state.model) if state.model is not None else None
-        return schema.NewSessionResponse(session_id=session_id, models=models)
+        return schema.NewSessionResponse(session_id=session_id, models=self._model_state(state.model))
 
     async def load_session(
         self,
@@ -314,7 +313,9 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
             acp.RequestError: if no session with `session_id` is stored, or the stored session
                 cannot be read.
         """
-        if self._session_store is None:  # pragma: no cover - load_session is advertised only with a store
+        if self._session_store is None:
+            # Advertised off, but the SDK router routes `session/load` regardless; a client
+            # calling it anyway gets the rejection the advertisement implies.
             raise acp.RequestError.method_not_found('session/load')
         if self._conn is None:  # pragma: no cover - on_connect always runs before load_session
             raise RuntimeError('load_session called before on_connect()')
@@ -350,8 +351,7 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
         self._sessions[session_id] = state
         for update in stored.updates:
             await self._conn.session_update(session_id=session_id, update=update)
-        models = self._model_state(state.model) if state.model is not None else None
-        return schema.LoadSessionResponse(models=models)
+        return schema.LoadSessionResponse(models=self._model_state(state.model))
 
     async def _persist(self, state: SessionState[AgentDepsT]) -> None:
         """Save a session's committed state (history, transcript, selected model), if a store is configured.
@@ -371,8 +371,10 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
         except Exception:
             _logger.exception('failed to persist ACP session %s; durable state is now behind', state.session_id)
 
-    def _model_state(self, current_model_id: str) -> schema.SessionModelState:
-        """The available/current models advertised to the client. Call only when models are configured."""
+    def _model_state(self, current_model_id: str | None) -> schema.SessionModelState | None:
+        """The available/current models advertised to the client, or `None` when none are configured."""
+        if current_model_id is None:
+            return None
         return schema.SessionModelState(
             available_models=[schema.ModelInfo(model_id=model, name=model) for model in self._models],
             current_model_id=current_model_id,

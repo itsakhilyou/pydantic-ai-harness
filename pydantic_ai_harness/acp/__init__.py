@@ -9,7 +9,7 @@ Pydantic AI [`Agent`][pydantic_ai.Agent] to that interface, and
 from ._adapter import PydanticAIACPAgent
 from ._content import PromptContentBlock
 from ._native import AcpFileSystemToolset, AcpTerminalToolset, acp_filesystem, acp_terminal
-from ._permission import PermissionPolicy, ToolCallPermission
+from ._permission import PermissionPolicy, ToolCallPermission, default_permission_scope
 from ._present import (
     ToolCallContent,
     ToolCallPresentation,
@@ -18,7 +18,7 @@ from ._present import (
     default_coding_presenter,
 )
 from ._server import run_acp_stdio, run_acp_stdio_sync
-from ._session import AcpSession, AcpSessionConfig, McpServers, SessionConfigFunc, SessionUpdate
+from ._session import AcpSession, AcpSessionConfig, McpServer, McpServers, SessionConfigFunc, SessionUpdate
 from ._store import InMemorySessionStore, SessionStore, StoredSession
 
 __all__ = [
@@ -27,6 +27,7 @@ __all__ = [
     'AcpSessionConfig',
     'AcpTerminalToolset',
     'InMemorySessionStore',
+    'McpServer',
     'McpServers',
     'PermissionPolicy',
     'PromptContentBlock',
@@ -43,6 +44,7 @@ __all__ = [
     'acp_terminal',
     'chain_presenters',
     'default_coding_presenter',
+    'default_permission_scope',
     'run_acp_stdio',
     'run_acp_stdio_sync',
 ]

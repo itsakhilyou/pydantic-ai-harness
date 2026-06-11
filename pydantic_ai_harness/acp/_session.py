@@ -13,8 +13,11 @@ from pydantic_ai.tools import AgentDepsT
 from pydantic_ai.toolsets import AbstractToolset
 from pydantic_ai.usage import RunUsage
 
+# A single MCP server configuration, in any of the transports ACP carries.
+McpServer: TypeAlias = schema.HttpMcpServer | schema.SseMcpServer | schema.McpServerStdio
+
 # MCP server configuration list, as carried by ACP session methods (matches `acp.Agent`).
-McpServers = list[schema.HttpMcpServer | schema.SseMcpServer | schema.McpServerStdio] | None
+McpServers: TypeAlias = list[McpServer] | None
 
 # A single `session/update` payload, as accepted by the client's `session_update`. The adapter
 # records these per session (the client-visible transcript) so `session/load` can replay them.
@@ -49,7 +52,7 @@ class AcpSession:
     """
 
     cwd: str
-    mcp_servers: list[schema.HttpMcpServer | schema.SseMcpServer | schema.McpServerStdio]
+    mcp_servers: list[McpServer]
     client_capabilities: schema.ClientCapabilities | None
     client: Client
     session_id: str
