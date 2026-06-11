@@ -269,6 +269,23 @@ async def test_save_failure_is_logged_and_does_not_fail_the_turn(caplog: pytest.
     assert 'failed to persist' in caplog.text
 
 
+async def test_set_model_save_failure_is_logged_and_does_not_fail_the_request(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    adapter: PydanticAIACPAgent[None, str] = PydanticAIACPAgent(
+        Agent(TestModel()), models=['test'], session_store=_FailingStore()
+    )
+    adapter.on_connect(RecordingClient())
+    await adapter.initialize(protocol_version=1)
+    session = await adapter.new_session(cwd='/ws')
+    with caplog.at_level(logging.ERROR):
+        response = await adapter.set_session_model(model_id='test', session_id=session.session_id)
+    # The selection took effect in memory; only the durable copy is behind, which is logged.
+    assert response is not None
+    assert adapter._sessions[session.session_id].model == 'test'  # pyright: ignore[reportPrivateUsage]
+    assert 'failed to persist' in caplog.text
+
+
 async def test_load_read_failure_is_reported_as_a_clean_error() -> None:
     adapter: PydanticAIACPAgent[None, str] = PydanticAIACPAgent(Agent(TestModel()), session_store=_FailingStore())
     adapter.on_connect(RecordingClient())

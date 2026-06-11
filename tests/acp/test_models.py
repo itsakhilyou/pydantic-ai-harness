@@ -78,11 +78,21 @@ async def test_set_model_updates_the_session_and_persists() -> None:
 
 
 async def test_selected_model_applies_to_a_run() -> None:
-    # 'test' resolves to TestModel, so the per-run override runs offline -- proving it reaches the run.
+    # The agent's own model is canned to answer 'hi'; the 'test' override resolves to a default
+    # TestModel whose canned answer differs, so the override observably reached the run.
+    client = RecordingClient()
     adapter = _adapter(models=['test'])
-    session_id = await _started(adapter)
+    adapter.on_connect(client)
+    await adapter.initialize(protocol_version=1)
+    session_id = (await adapter.new_session(cwd='/ws')).session_id
     response = await adapter.prompt(prompt=[acp.text_block('hi')], session_id=session_id)
     assert response.stop_reason == 'end_turn'
+    streamed = ''.join(
+        str(getattr(getattr(update, 'content', None), 'text', ''))
+        for update in client.updates
+        if getattr(update, 'session_update', '') == 'agent_message_chunk'
+    )
+    assert streamed == 'success (no tool calls)'  # TestModel's default, not the agent model's 'hi'
 
 
 async def test_selected_model_survives_reload() -> None:

@@ -9,6 +9,7 @@ spawn a real subprocess over stdio, as a TUI client (Zed/Toad) would.
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import sys
 from collections.abc import AsyncIterator, Callable
@@ -25,6 +26,7 @@ from pydantic import BaseModel
 from pydantic_ai import Agent, DeferredToolRequests, RunContext, UsageLimitExceeded
 from pydantic_ai.messages import (
     AgentStreamEvent,
+    BinaryContent,
     FinishReason,
     FunctionToolResultEvent,
     ModelMessage,
@@ -50,6 +52,7 @@ from pydantic_ai_harness.acp import (
     AcpSession,
     AcpSessionConfig,
     InMemorySessionStore,
+    PromptContentBlock,
     PydanticAIACPAgent,
     ToolCallPresentation,
     chain_presenters,
@@ -290,6 +293,36 @@ class TestLifecycle:
         assert capabilities.prompt_capabilities.image is False
         assert capabilities.prompt_capabilities.audio is False
         assert capabilities.prompt_capabilities.embedded_context is True
+
+    async def test_image_block_reaches_the_model_as_binary_content(self) -> None:
+        # End-to-end through prompt(): an opted-in image block must arrive in the model's user
+        # prompt as the decoded bytes, not be dropped or stringified on the way.
+        raw = b'\x89PNG\r\n'
+        adapter: PydanticAIACPAgent[None, str] = PydanticAIACPAgent(
+            Agent(TestModel()), prompt_capabilities=schema.PromptCapabilities(image=True)
+        )
+        client = FakeClient()
+        session_id = await _start(adapter, client)
+
+        blocks: list[PromptContentBlock] = [
+            acp.text_block('look'),
+            acp.image_block(base64.b64encode(raw).decode(), 'image/png'),
+        ]
+        await adapter.prompt(prompt=blocks, session_id=session_id)
+
+        history = adapter._sessions[session_id].history  # pyright: ignore[reportPrivateUsage]
+        prompt_parts = [
+            part
+            for message in history
+            if isinstance(message, ModelRequest)
+            for part in message.parts
+            if isinstance(part, UserPromptPart)
+        ]
+        [user_prompt] = prompt_parts
+        assert not isinstance(user_prompt.content, str)
+        [image] = [item for item in user_prompt.content if isinstance(item, BinaryContent)]
+        assert image.data == raw
+        assert image.media_type == 'image/png'
 
     async def test_name_defaults_to_agent_name(self) -> None:
         adapter: PydanticAIACPAgent[None, str] = PydanticAIACPAgent(Agent(TestModel(), name='my_agent'))
@@ -588,6 +621,30 @@ class TestStreaming:
         assert response.usage.input_tokens > 0 and response.usage.output_tokens > 0
         assert response.usage.total_tokens == response.usage.input_tokens + response.usage.output_tokens
 
+    async def test_usage_sums_across_approval_passes(self) -> None:
+        # An approval pause splits the turn into two model passes; the reported usage must cover
+        # both, not just the resume.
+        executed: list[str] = []
+        adapter: PydanticAIACPAgent[None, str] = PydanticAIACPAgent(_approval_agent(executed))
+        client = FakeClient()  # default decider approves
+        session_id = await _start(adapter, client)
+        approval = await adapter.prompt(prompt=[acp.text_block('go')], session_id=session_id)
+
+        # Baseline: the same final pass alone (a model that answers 'done' with no tool call).
+        async def stream(messages: list[ModelMessage], info: AgentInfo) -> AsyncIterator[str]:
+            yield 'done'
+
+        baseline_adapter: PydanticAIACPAgent[None, str] = PydanticAIACPAgent(
+            Agent(FunctionModel(stream_function=stream))
+        )
+        baseline_session = await _start(baseline_adapter, FakeClient())
+        baseline = await baseline_adapter.prompt(prompt=[acp.text_block('go')], session_id=baseline_session)
+
+        assert approval.usage is not None and baseline.usage is not None
+        # Reporting only the resume pass would equal the baseline's output; the sum must also
+        # include the first pass's tool-call output.
+        assert approval.usage.output_tokens > baseline.usage.output_tokens
+
 
 class TestStopReason:
     """`_finish_reason_to_stop_reason` maps a completed run's finish reason to the ACP stop reason."""
@@ -663,6 +720,12 @@ class TestChunkText:
         assert ''.join(chunks) == text
         assert all(len(json.dumps(chunk)) - 2 <= 120 for chunk in chunks)
         assert all(len(chunk) <= 10 for chunk in chunks)  # 120 budget / 12 bytes per emoji
+
+    def test_exact_budget_fit_yields_a_single_chunk(self) -> None:
+        # The boundary case for `if chunk and size + char_size > budget`: an exact fit must not
+        # split, and one char over must spill into a second chunk -- never an empty trailing one.
+        assert list(chunk_text('abcde', budget=5)) == ['abcde']
+        assert list(chunk_text('abcdef', budget=5)) == ['abcde', 'f']
 
     def test_escaped_len_covers_every_character_class(self) -> None:
         assert _escaped_len('"') == 2 and _escaped_len('\n') == 2  # short escapes
@@ -787,6 +850,9 @@ class TestPermission:
             ('tool_call_update', 'failed'),
         ]
         assert executed == []
+        # The failed update carries the denial as its output, so the client can show why.
+        [(_cid, _status, raw_output)] = client.tool_completions()
+        assert 'Rejected by the client.' in str(raw_output)
 
     async def test_approved_tool_starts_pending_then_in_progress_then_completed(self) -> None:
         executed: list[str] = []
@@ -1008,6 +1074,40 @@ class TestPermission:
         assert len(client.permission_requests) == 2
         assert ran == ['keep']  # only the approved tool executed
 
+    async def test_cancel_while_a_permission_request_is_in_flight(self) -> None:
+        # The spec's normal cancellation interleaving: the user hits stop while a permission
+        # dialog is open, so session/cancel races the unanswered request. The turn must end
+        # `cancelled` and the pending tool call must be driven to a terminal status.
+        requested = asyncio.Event()
+
+        class _BlockedPermissionClient(FakeClient):
+            async def request_permission(
+                self,
+                options: list[schema.PermissionOption],
+                session_id: str,
+                tool_call: schema.ToolCallUpdate,
+                **kwargs: object,
+            ) -> schema.RequestPermissionResponse:
+                requested.set()
+                await asyncio.Event().wait()  # the dialog is never answered; cancel unwinds the turn
+                raise AssertionError('unreachable')  # pragma: no cover
+
+        executed: list[str] = []
+        adapter: PydanticAIACPAgent[None, str] = PydanticAIACPAgent(_approval_agent(executed))
+        client = _BlockedPermissionClient()
+        session_id = await _start(adapter, client)
+
+        turn = asyncio.ensure_future(adapter.prompt(prompt=[acp.text_block('go')], session_id=session_id))
+        await asyncio.wait_for(requested.wait(), timeout=5)
+        await adapter.cancel(session_id=session_id)
+        response = await asyncio.wait_for(turn, timeout=5)
+
+        assert response.stop_reason == 'cancelled'
+        assert executed == []  # the tool never ran
+        [(start_id, _title, start_status)] = client.tool_starts()
+        assert start_status == 'pending'  # announced as awaiting approval
+        assert (start_id, 'failed') in [(cid, status) for cid, status, _out in client.tool_completions()]
+
     async def test_cancel_during_permission_cancels_the_turn(self) -> None:
         executed: list[str] = []
         adapter: PydanticAIACPAgent[None, str] = PydanticAIACPAgent(_approval_agent(executed))
@@ -1146,6 +1246,28 @@ class TestCancellation:
         # The store still holds the pre-turn (empty) snapshot: a cancelled turn commits nothing.
         assert before is not None and before.messages == [] and before.updates == []
         assert await store.load(session_id) == before
+
+    async def test_double_cancel_is_idempotent(self) -> None:
+        started = asyncio.Event()
+        release = asyncio.Event()
+        agent = Agent(TestModel())
+
+        @agent.tool_plain
+        async def slow_tool() -> str:
+            started.set()
+            await release.wait()
+            return 'done'  # pragma: no cover - cancelled before returning
+
+        adapter: PydanticAIACPAgent[None, str] = PydanticAIACPAgent(agent)
+        client = FakeClient()
+        session_id = await _start(adapter, client)
+
+        turn = asyncio.ensure_future(adapter.prompt(prompt=[acp.text_block('go')], session_id=session_id))
+        await asyncio.wait_for(started.wait(), timeout=5)
+        await adapter.cancel(session_id=session_id)
+        await adapter.cancel(session_id=session_id)  # a repeated cancel must not raise or wedge the turn
+        response = await asyncio.wait_for(turn, timeout=5)
+        assert response.stop_reason == 'cancelled'
 
     async def test_cancel_unknown_session_is_a_noop(self) -> None:
         adapter: PydanticAIACPAgent[None, str] = PydanticAIACPAgent(Agent(TestModel()))
@@ -1440,8 +1562,9 @@ class TestErrors:
     async def test_prompt_for_unknown_session_raises_invalid_params(self) -> None:
         adapter: PydanticAIACPAgent[None, str] = PydanticAIACPAgent(Agent(TestModel()))
         adapter.on_connect(FakeClient())
-        with pytest.raises(RequestError):
+        with pytest.raises(RequestError) as excinfo:
             await adapter.prompt(prompt=[acp.text_block('hi')], session_id='missing')
+        assert excinfo.value.code == -32602  # invalid_params
 
     async def test_empty_prompt_is_handled(self) -> None:
         adapter: PydanticAIACPAgent[None, str] = PydanticAIACPAgent(Agent(TestModel(custom_output_text='ok')))
@@ -1483,22 +1606,20 @@ class TestUnsupportedMethods:
 
     async def test_optional_methods_raise_method_not_found(self) -> None:
         adapter: PydanticAIACPAgent[None, str] = PydanticAIACPAgent(Agent(TestModel()))
-        with pytest.raises(RequestError):
-            await adapter.load_session(cwd='.', session_id='s')
-        with pytest.raises(RequestError):
-            await adapter.list_sessions()
-        with pytest.raises(RequestError):
-            await adapter.fork_session(cwd='.', session_id='s')
-        with pytest.raises(RequestError):
-            await adapter.resume_session(cwd='.', session_id='s')
-        with pytest.raises(RequestError):
-            await adapter.set_session_mode(mode_id='m', session_id='s')
-        with pytest.raises(RequestError):
-            await adapter.set_session_model(model_id='m', session_id='s')
-        with pytest.raises(RequestError):
-            await adapter.set_config_option(config_id='c', session_id='s', value=True)
-        with pytest.raises(RequestError):
-            await adapter.ext_method(method='x', params={})
+        calls = [
+            adapter.load_session(cwd='.', session_id='s'),
+            adapter.list_sessions(),
+            adapter.fork_session(cwd='.', session_id='s'),
+            adapter.resume_session(cwd='.', session_id='s'),
+            adapter.set_session_mode(mode_id='m', session_id='s'),
+            adapter.set_session_model(model_id='m', session_id='s'),
+            adapter.set_config_option(config_id='c', session_id='s', value=True),
+            adapter.ext_method(method='x', params={}),
+        ]
+        for call in calls:
+            with pytest.raises(RequestError) as excinfo:
+                await call
+            assert excinfo.value.code == -32601  # method_not_found, as CONFORMANCE.md claims
 
 
 class TestEntryPoints:
