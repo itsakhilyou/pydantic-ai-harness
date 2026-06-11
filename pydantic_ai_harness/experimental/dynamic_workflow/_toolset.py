@@ -454,6 +454,15 @@ class DynamicWorkflowToolset(AbstractToolset[AgentDepsT]):
             # is what makes `max_agent_calls` an exact ceiling under fan-out. Insert an `await`
             # here (e.g. an async permission check) and the count can race past the limit; you
             # would then need an explicit reservation instead.
+            #
+            # This exists precisely because `usage_limits` cannot give an exact ceiling here:
+            # core's own limit check is split from its increment by the model-request `await`
+            # (a TOCTOU race — N gathered sub-agents all pass the check before any increments;
+            # measured ~20x overshoot), and `RunContext` exposes `usage` but not `usage_limits`,
+            # so the parent's configured limit can't be forwarded to sub-agents at all.
+            # TODO: file upstream on pydantic-ai — (a) expose `usage_limits` on `RunContext`,
+            # (b) atomic reserve-then-request in the run loop. Until then, tree-wide token caps
+            # stay best-effort (see `forward_usage` / `sub_agent_usage_limits` docstrings).
             if self._call_count >= self.max_agent_calls:
                 budget_exhausted = True
                 raise RuntimeError(f'sub-agent call budget ({self.max_agent_calls}) exhausted')
