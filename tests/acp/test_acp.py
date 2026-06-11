@@ -51,6 +51,7 @@ from pydantic_ai_harness import FileSystem, Shell
 from pydantic_ai_harness.acp import (
     AcpSession,
     AcpSessionConfig,
+    AcpTerminalToolset,
     InMemorySessionStore,
     PromptContentBlock,
     PydanticAIACPAgent,
@@ -1247,6 +1248,30 @@ class TestCancellation:
         assert before is not None and before.messages == [] and before.updates == []
         assert await store.load(session_id) == before
 
+    async def test_cancel_during_terminal_create_kills_the_terminal_end_to_end(self) -> None:
+        # The full leak path: session/cancel raw-cancels the turn (which pierces anyio shields)
+        # while the editor-native terminal create is in flight. The client started the command
+        # regardless, so the late-learned terminal must still be killed and released.
+        client = RecordingClient(block_create=True)
+        agent = Agent(TestModel(call_tools=['run_command']))
+        toolset = AcpTerminalToolset[None](client=client, session_id='sid', cwd='/ws')
+        adapter: PydanticAIACPAgent[None, str] = PydanticAIACPAgent(
+            agent, session_config=lambda _session: AcpSessionConfig(deps=None, toolsets=[toolset])
+        )
+        adapter.on_connect(client)
+        await adapter.initialize(protocol_version=1)
+        session = await adapter.new_session(cwd='/ws')
+
+        turn = asyncio.ensure_future(adapter.prompt(prompt=[acp.text_block('run')], session_id=session.session_id))
+        await asyncio.wait_for(client.create_event.wait(), timeout=5)
+        await adapter.cancel(session_id=session.session_id)
+        client.release_create.set()  # the client answers the create only after the cancellation
+        response = await asyncio.wait_for(turn, timeout=5)
+
+        assert response.stop_reason == 'cancelled'
+        assert client.killed == ['term-1']
+        assert client.released == ['term-1']
+
     async def test_double_cancel_is_idempotent(self) -> None:
         started = asyncio.Event()
         release = asyncio.Event()
@@ -1316,9 +1341,12 @@ class TestCancellation:
 
         prompt_task = asyncio.ensure_future(adapter.prompt(prompt=[acp.text_block('go')], session_id=session_id))
         turn = adapter._sessions[session_id].active_turn  # pyright: ignore[reportPrivateUsage]
-        while turn is None:
+        for _ in range(100):
+            if turn is not None:
+                break
             await asyncio.sleep(0)
             turn = adapter._sessions[session_id].active_turn  # pyright: ignore[reportPrivateUsage]
+        assert turn is not None, 'the prompt never started its turn'
         # Tear the prompt handler down in the same tick the dismissed dialog ends the turn: the
         # turn's internal rollback signal must not escape (or replace) the handler's cancellation.
         turn.add_done_callback(lambda _turn: prompt_task.cancel())

@@ -175,32 +175,43 @@ class AcpTerminalToolset(FunctionToolset[AgentDepsT]):
         Args:
             command: The shell command line to execute.
         """
-        # Shielded so a cancellation landing mid-create cannot abandon the request: it may already
-        # be on the wire (the client then starts the command regardless), so the response must
-        # still be read to learn the terminal id the cleanup below kills. The deferred
-        # cancellation is delivered at the next await instead.
-        created: schema.CreateTerminalResponse | None = None
-        with anyio.CancelScope(shield=True):
-            created = await self._client.create_terminal(command=command, session_id=self._session_id, cwd=self._cwd)
-        assert created is not None, 'the shielded scope is never cancelled itself, so the create always ran'
-        terminal_id = created.terminal_id
+        # The create runs as its own task so a cancellation landing mid-flight cannot abandon the
+        # request: it may already be on the wire (the client then starts the command regardless),
+        # so its response must still be read to learn the id and clean up. A raw `task.cancel()`
+        # (how the adapter and pydantic-ai deliver cancellation) pierces anyio shields, so the
+        # create must live outside this task; `asyncio.wait` rather than `asyncio.shield` because
+        # shield on 3.12+ reports a late create failure to the loop exception handler even when
+        # the cleanup below retrieves it.
+        create = asyncio.ensure_future(
+            self._client.create_terminal(command=command, session_id=self._session_id, cwd=self._cwd)
+        )
+        terminal_id: str | None = None
         try:
+            await asyncio.wait([create])
+            terminal_id = create.result().terminal_id
             await self._client.wait_for_terminal_exit(session_id=self._session_id, terminal_id=terminal_id)
             result = await self._client.terminal_output(session_id=self._session_id, terminal_id=terminal_id)
             return _format_terminal_output(result)
         except asyncio.CancelledError:
             # Kill the still-running terminal before unwinding, shielded so the cleanup completes
-            # even though this task is being cancelled. Suppress kill failures: a client error here
-            # must not replace the `CancelledError` the caller needs to see (the spec requires the
-            # turn to end with a `cancelled` stop reason).
-            with anyio.CancelScope(shield=True), contextlib.suppress(Exception):
-                await self._client.kill_terminal(session_id=self._session_id, terminal_id=terminal_id)
+            # even though this task is being cancelled (when the cancellation landed during the
+            # create, the id is learned from the still-running create first). Suppress failures: a
+            # client error here must not replace the `CancelledError` the caller needs to see
+            # (the spec requires the turn to end with a `cancelled` stop reason).
+            with anyio.CancelScope(shield=True):
+                if terminal_id is None:
+                    with contextlib.suppress(Exception):
+                        terminal_id = (await create).terminal_id
+                if terminal_id is not None:
+                    with contextlib.suppress(Exception):
+                        await self._client.kill_terminal(session_id=self._session_id, terminal_id=terminal_id)
             raise
         finally:
-            # Always release the terminal; suppress failures so a release error never masks the
-            # exception (or successful return) already in flight.
-            with anyio.CancelScope(shield=True), contextlib.suppress(Exception):
-                await self._client.release_terminal(session_id=self._session_id, terminal_id=terminal_id)
+            # Always release the terminal (if one came into existence); suppress failures so a
+            # release error never masks the exception (or successful return) already in flight.
+            if terminal_id is not None:
+                with anyio.CancelScope(shield=True), contextlib.suppress(Exception):
+                    await self._client.release_terminal(session_id=self._session_id, terminal_id=terminal_id)
 
 
 def acp_terminal(session: AcpSession) -> AcpTerminalToolset[None] | None:

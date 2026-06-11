@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 
 import anyio
@@ -179,17 +180,71 @@ async def test_run_command_kills_and_releases_the_terminal_on_cancel() -> None:
 
 
 async def test_run_command_cancelled_during_create_still_kills_the_terminal() -> None:
-    client = RecordingClient(block_create=True, block_exit=True)
+    # A raw `task.cancel()` -- how the adapter and pydantic-ai actually deliver cancellation, and
+    # which pierces anyio shields -- lands while the create is in flight. The request was already
+    # on the wire, so the client started the command regardless; the late-learned terminal must
+    # still be killed and released, not leaked running in the editor.
+    client = RecordingClient(block_create=True)
     ts = AcpTerminalToolset[None](client=client, session_id='sid', cwd='/ws')
-    async with anyio.create_task_group() as tg:
-        tg.start_soon(ts.run_command, 'sleep 100')
-        await client.create_event.wait()  # the create request is in flight; no terminal id yet
-        tg.cancel_scope.cancel()
-        client.release_create.set()  # the client answers the create only after the cancellation
-    # The request was already on the wire, so the client started the command regardless; the
-    # create is shielded so the id is still learned, and the terminal killed, not leaked.
+    task = asyncio.ensure_future(ts.run_command('sleep 100'))
+    await asyncio.wait_for(client.create_event.wait(), timeout=5)
+    task.cancel()
+    client.release_create.set()  # the client answers the create only after the cancellation
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(task, timeout=5)
     assert client.killed == ['term-1']
     assert client.released == ['term-1']
+
+
+async def test_run_command_cancelled_during_a_failing_create_has_nothing_to_clean_up() -> None:
+    class _CreateFails(RecordingClient):
+        async def create_terminal(
+            self,
+            command: str,
+            session_id: str,
+            args: list[str] | None = None,
+            cwd: str | None = None,
+            env: list[schema.EnvVariable] | None = None,
+            output_byte_limit: int | None = None,
+            **kwargs: object,
+        ) -> schema.CreateTerminalResponse:
+            self.create_event.set()
+            await self.release_create.wait()
+            raise RuntimeError('client could not create a terminal')
+
+    client = _CreateFails()
+    ts = AcpTerminalToolset[None](client=client, session_id='sid', cwd='/ws')
+    task = asyncio.ensure_future(ts.run_command('sleep 100'))
+    await asyncio.wait_for(client.create_event.wait(), timeout=5)
+    task.cancel()
+    client.release_create.set()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(task, timeout=5)
+    # No terminal ever existed: nothing to kill or release, and the create failure must not
+    # replace the cancellation already unwinding.
+    assert client.killed == []
+    assert client.released == []
+
+
+async def test_run_command_create_failure_propagates() -> None:
+    class _CreateRaises(RecordingClient):
+        async def create_terminal(
+            self,
+            command: str,
+            session_id: str,
+            args: list[str] | None = None,
+            cwd: str | None = None,
+            env: list[schema.EnvVariable] | None = None,
+            output_byte_limit: int | None = None,
+            **kwargs: object,
+        ) -> schema.CreateTerminalResponse:
+            raise RuntimeError('no terminal for you')
+
+    client = _CreateRaises()
+    ts = AcpTerminalToolset[None](client=client, session_id='sid', cwd='/ws')
+    with pytest.raises(RuntimeError, match='no terminal'):
+        await ts.run_command('ls')
+    assert client.released == []  # nothing came into existence, so nothing is released
 
 
 async def test_run_command_cancel_survives_a_failing_kill() -> None:

@@ -218,7 +218,7 @@ class _BlockingSaveStore(InMemorySessionStore):
         await super().save(session_id, session)
 
 
-async def test_cancel_landing_in_the_post_commit_save_does_not_report_rollback() -> None:
+async def test_cancel_landing_in_the_post_commit_save_commits_but_answers_cancelled() -> None:
     store = _BlockingSaveStore()
     adapter: PydanticAIACPAgent[None, str] = PydanticAIACPAgent(
         Agent(TestModel(custom_output_text='done')), session_store=store
@@ -233,13 +233,15 @@ async def test_cancel_landing_in_the_post_commit_save_does_not_report_rollback()
     )
     await asyncio.wait_for(store.saving.wait(), timeout=5)
     # The turn is fully committed in memory and is suspended inside the store's save: a cancel
-    # arriving now came too late to roll anything back, so the turn must still report success
-    # (only the durable copy is behind, which the next save catches up).
+    # arriving now came too late to roll anything back. The spec still requires the prompt to
+    # answer `cancelled`, but the committed signals must survive -- `user_message_id` says the
+    # message was recorded, and the session history keeps the turn.
     await adapter.cancel(session_id=session.session_id)
     response = await asyncio.wait_for(turn, timeout=5)
 
-    assert response.stop_reason == 'end_turn'
+    assert response.stop_reason == 'cancelled'
     assert response.user_message_id == 'm1'
+    assert response.usage is not None
     assert len(adapter._sessions[session.session_id].history) >= 2  # pyright: ignore[reportPrivateUsage]
 
 

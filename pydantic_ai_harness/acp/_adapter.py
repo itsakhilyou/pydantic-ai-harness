@@ -452,6 +452,10 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
                 # Rolled back: omit `user_message_id`, which would signal the message was persisted.
                 return schema.PromptResponse(stop_reason='cancelled')
             except asyncio.CancelledError:
+                # `turn.done()` cannot fully prove the cancellation came from the turn: in the one
+                # tick between the turn completing and this coroutine resuming, a teardown cancel
+                # aimed at *this* handler is indistinguishable on 3.10 (3.11's `Task.cancelling()`
+                # would settle it). Accepted residual; every wider window is covered below.
                 if turn.done() and state.cancel_requested:
                     return schema.PromptResponse(stop_reason='cancelled')
                 # The prompt coroutine itself was cancelled (e.g. connection teardown): stop the
@@ -504,6 +508,9 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
                 # swallowed here, never this coroutine's cancellation (see the comment there).
                 await asyncio.shield(turn)
             except (asyncio.CancelledError, _TurnCancelled):
+                # As in `prompt`, `turn.done()` is a heuristic with a one-tick residual: a
+                # teardown cancel landing between the turn completing and this resuming is
+                # swallowed here on 3.10. Accepted.
                 if not turn.done():
                     raise
 
@@ -605,12 +612,14 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
                 await self._persist(state)
             except asyncio.CancelledError:
                 # The turn is already committed: a cancel landing inside the store's save came
-                # too late to roll anything back, so it must not turn a completed turn into a
-                # `cancelled` response. The interrupted save is the same benign failure
+                # too late to roll anything back. The spec still requires the prompt to answer
+                # `cancelled`, so that stop reason is reported alongside the committed signals
+                # (`user_message_id`, usage). The interrupted save is the same benign failure
                 # `_persist` swallows; the next successful save catches the store up.
                 _logger.warning(
                     'persisting ACP session %s was cancelled; durable state is now behind', state.session_id
                 )
+                stop_reason = 'cancelled'
         return usage, stop_reason, True
 
     async def _fail_outstanding_tool_calls(self, turn: _TurnState) -> None:
