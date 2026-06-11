@@ -2,7 +2,7 @@
 
 Used by step-persistence backends to keep large media out of snapshot
 payloads. The walkers operate on JSON-shaped trees (`list`/`dict`/scalars)
-so they never need to know about `pydantic_ai.messages` types directly —
+so they never need to know about `pydantic_ai.messages` types directly --
 they recognize the serialized shape (`{"kind": "binary", "data": "<b64>"}`)
 emitted by `ModelMessagesTypeAdapter.dump_json`.
 
@@ -25,7 +25,7 @@ def _is_json_dict(node: object) -> TypeGuard[dict[str, object]]:
     """Treat any `dict` returned by `json.loads` as `dict[str, object]`.
 
     JSON guarantees string keys, so the runtime `isinstance(..., dict)` check
-    is sufficient — pyright just needs the explicit TypeGuard to propagate
+    is sufficient -- pyright just needs the explicit TypeGuard to propagate
     the value-type narrowing through the walker.
     """
     return isinstance(node, dict)
@@ -34,7 +34,7 @@ def _is_json_dict(node: object) -> TypeGuard[dict[str, object]]:
 def _is_json_list(node: object) -> TypeGuard[list[object]]:
     """Treat any `list` returned by `json.loads` as `list[object]`.
 
-    Same rationale as `_is_json_dict` — JSON lists contain JSON-compatible
+    Same rationale as `_is_json_dict` -- JSON lists contain JSON-compatible
     scalars, and we walk every element regardless.
     """
     return isinstance(node, list)
@@ -53,7 +53,7 @@ async def externalize_media(node: object, *, media_store: MediaStore, threshold_
 
     Each qualifying part becomes a marker dict carrying the canonical
     `media+sha256://` URI; the raw bytes are written to `media_store`.
-    Returns a new tree — input is not mutated.
+    Returns a new tree -- input is not mutated.
     """
     if _is_json_list(node):
         out_list: list[object] = []

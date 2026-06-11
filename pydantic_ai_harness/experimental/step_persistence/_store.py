@@ -85,7 +85,7 @@ class StepStore(Protocol):
         """Return matching `RunRecord`s sorted by `started_at` ascending.
 
         Both filters are optional and AND-combine when both are set. The
-        chronological ordering is part of the protocol — callers may pick
+        chronological ordering is part of the protocol -- callers may pick
         the most recent run with `[-1]`.
         """
         ...  # pragma: no cover
@@ -315,7 +315,7 @@ class FileStepStore:
     ```
 
     Snapshot filenames are a per-run monotonic counter assigned at write
-    time (see `_next_snapshot_seq`), not `step_index` — `ctx.run_step`
+    time (see `_next_snapshot_seq`), not `step_index` -- `ctx.run_step`
     resets each `Agent.run` so a reused `run_id` would otherwise clash.
     The actual `step_index` is preserved as a field inside the JSON.
 
@@ -450,7 +450,7 @@ class FileStepStore:
         """Append-only monotonic counter per run directory.
 
         Using the snapshot's `step_index` as the filename would collide when
-        the same `run_id` is reused across `Agent.run` calls — `ctx.run_step`
+        the same `run_id` is reused across `Agent.run` calls -- `ctx.run_step`
         resets to 0 each call. The physical sequence is independent of
         `step_index`, which lives inside the JSON payload.
         """
@@ -623,16 +623,16 @@ class SqliteStepStore:
 
     - `runs(run_id PK, conversation_id, parent_run_id, agent_name, metadata, started_at)`
     - `events(seq PK AUTOINCREMENT, run_id, kind, step_index, timestamp, ...)`
-    - `snapshots(seq PK AUTOINCREMENT, run_id, step_index, ..., messages)` —
+    - `snapshots(seq PK AUTOINCREMENT, run_id, step_index, ..., messages)` --
       the `AUTOINCREMENT` `seq` mirrors `FileStepStore._next_snapshot_seq`
       so `ctx.run_step` resets across `Agent.run` cannot collide.
-    - `tool_effects(run_id, tool_call_id PK)` — upsert per
+    - `tool_effects(run_id, tool_call_id PK)` -- upsert per
       `(run_id, tool_call_id)`, matching `InMemoryStepStore` semantics.
-    - `media(sha256 PK, media_type, bytes, size_bytes)` — `INSERT OR IGNORE`
+    - `media(sha256 PK, media_type, bytes, size_bytes)` -- `INSERT OR IGNORE`
       for content-addressed dedup.
 
     The `runs.run_id` PK enforces the "explicit `run_id` is single-shot"
-    contract — `register_run` raises `sqlite3.IntegrityError` on reuse,
+    contract -- `register_run` raises `sqlite3.IntegrityError` on reuse,
     which `StepPersistence.before_run` converts to a friendlier
     `ValueError` via its own pre-check.
     """

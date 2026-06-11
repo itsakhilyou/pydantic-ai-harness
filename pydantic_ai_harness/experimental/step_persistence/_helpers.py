@@ -29,7 +29,7 @@ def is_provider_valid(messages: list[ModelMessage]) -> bool:
        tool call (no orphans, duplicates, or out-of-order returns).
 
     A `RetryPromptPart` with `tool_name is None` is an output-validation
-    retry — providers map it as a regular user message, not a tool result,
+    retry -- providers map it as a regular user message, not a tool result,
     so it does not need to resolve an open call.
     """
     open_calls: set[str] = set()
@@ -57,7 +57,7 @@ async def continue_run(store: StepStore, *, run_id: str) -> list[ModelMessage]:
     Pass the return value to `Agent.run(message_history=...)` to continue
     a delegate's prior investigation instead of starting fresh.
 
-    Raises `LookupError` if no continuable snapshot exists for `run_id` — the
+    Raises `LookupError` if no continuable snapshot exists for `run_id` -- the
     run may have crashed mid-tool-call, in which case there is event-log data
     but no safe resume point.
     """

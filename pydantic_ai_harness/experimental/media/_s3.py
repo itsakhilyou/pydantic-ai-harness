@@ -1,7 +1,7 @@
 """S3-compatible media store with handrolled AWS SigV4 signing.
 
 Targets AWS S3, Cloudflare R2, MinIO, and other S3-compatible endpoints.
-Implements path-style URLs (`<endpoint>/<bucket>/<key>`) — the lowest common
+Implements path-style URLs (`<endpoint>/<bucket>/<key>`) -- the lowest common
 denominator across providers. Only PUT / GET / HEAD are implemented;
 multipart, lifecycle, and listing operations are out of scope (any blob we
 store is sub-5GB by construction so multipart is unnecessary).
@@ -59,7 +59,7 @@ def _canonical_uri(path: str) -> str:
     """Percent-encode each path segment but keep `/` separators.
 
     AWS canonicalization requires double-encoding for non-S3 services but
-    single-encoding for S3 — we use single-encoding throughout.
+    single-encoding for S3 -- we use single-encoding throughout.
     """
     return '/' + '/'.join(quote(segment, safe='') for segment in path.lstrip('/').split('/'))
 
@@ -86,12 +86,12 @@ def sign_request(
 ) -> dict[str, str]:
     """Return the headers (including `Authorization`) to send with an S3 request.
 
-    `path` should start with `/` and already include any bucket prefix —
+    `path` should start with `/` and already include any bucket prefix --
     e.g. `/my-bucket/object-key`. Query strings are not supported in v1
     (we never send them for PUT/GET/HEAD of a single object).
 
     `extra_signed_headers` (lowercase keys) are included in the canonical
-    request and signature — e.g. `x-amz-meta-*` user metadata headers.
+    request and signature -- e.g. `x-amz-meta-*` user metadata headers.
     """
     timestamp = now or _utcnow()
     amz_date = timestamp.strftime('%Y%m%dT%H%M%SZ')
@@ -153,7 +153,7 @@ def _meta_headers_from_context(context: MediaContext) -> dict[str, str]:
     """Map `context.metadata` to `x-amz-meta-*` headers (lowercase, ASCII-safe keys).
 
     Raises `ValueError` for keys containing characters disallowed by HTTP
-    header naming. Values are passed through verbatim — callers must keep
+    header naming. Values are passed through verbatim -- callers must keep
     them ASCII-clean (S3 returns 400 for non-ASCII without `*=` RFC 5987
     encoding, which we don't support in v1).
     """
@@ -176,18 +176,18 @@ class S3MediaStore:
 
     Customisation:
 
-    - `key_strategy=` — `Callable[[str, MediaContext], str]`. Default
+    - `key_strategy=` -- `Callable[[str, MediaContext], str]`. Default
       strategy yields `<key_prefix><sha256>.bin`. Override when the bucket
       layout demands a specific path / extension scheme. See the
       `KeyStrategy` docstring for the read-time caveat.
-    - `public_url=` — sync or async callable that takes
+    - `public_url=` -- sync or async callable that takes
       `(uri, MediaContext)` and returns a URL (or `None`). Use
       `make_static_public_url(...)` for public bucket / CDN setups;
       provide your own async callable for presigned URLs (TTL captured in
       the closure; `MediaContext` available for content-type-specific
       response headers etc.). Without a resolver `public_url(...)` returns
       `None`.
-    - `client=` — bring your own `httpx.AsyncClient` for connection pooling.
+    - `client=` -- bring your own `httpx.AsyncClient` for connection pooling.
 
     **Metadata persistence**: `context.metadata` is sent as signed
     `x-amz-meta-*` headers on PUT (subject to ASCII naming rules) and

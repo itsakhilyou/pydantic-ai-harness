@@ -30,7 +30,7 @@ ToolEffectStatus = Literal['started', 'completed', 'failed']
 """Lifecycle status of a tool call recorded in the effect ledger.
 
 A `tool_call_id` whose latest record is `started` was in flight when the
-process last wrote. Treat it as `unknown_after_crash` when replaying — the
+process last wrote. Treat it as `unknown_after_crash` when replaying -- the
 external side effect may or may not have happened.
 """
 
@@ -52,7 +52,7 @@ class StepEvent:
     `ContinuableSnapshot` for resume; pair with `ToolEffectRecord` for
     side-effect status.
 
-    `conversation_id` mirrors pydantic_ai's three-level identity stack —
+    `conversation_id` mirrors pydantic_ai's three-level identity stack --
     conversation (the dialogue) → run (one `Agent.run` call) → step
     (one graph node). Two `Agent.run` calls that share a
     `conversation_id` produce two separate `run_id`s.
@@ -116,7 +116,7 @@ class RunRecord:
 
     `conversation_id` groups runs of the same dialogue (the user-visible
     sequence). `parent_run_id` is the hierarchical link: which run spawned
-    this one. The two are independent axes — a delegate may share a
+    this one. The two are independent axes -- a delegate may share a
     conversation across attempts (different `run_id`s, same `conversation_id`)
     while pointing at a different orchestrator run via `parent_run_id`.
     """

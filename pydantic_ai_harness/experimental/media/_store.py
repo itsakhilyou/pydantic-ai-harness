@@ -1,6 +1,6 @@
 """Local `MediaStore` protocol + `DiskMediaStore` / `SqliteMediaStore`.
 
-The shared URI scheme is `media+sha256://<lowercase-hex>` — content-addressed,
+The shared URI scheme is `media+sha256://<lowercase-hex>` -- content-addressed,
 so the same blob written through any store resolves the same way and dedup
 is automatic.
 """
@@ -34,20 +34,20 @@ _EMPTY_METADATA: Mapping[str, str] = MappingProxyType({})
 class MediaContext:
     """Per-operation context threaded through `MediaStore` methods + callables.
 
-    Extensible bag — new use cases (TTL hints, response-header overrides,
+    Extensible bag -- new use cases (TTL hints, response-header overrides,
     origin run ids for audit, etc.) add a field here without breaking any
     method signature or user-supplied callable. Fields default to `None` /
     empty so callers and resolvers can ignore what they don't care about.
 
     Conventions:
 
-    - `media_type` — IANA media type (`image/png`, `audio/wav`, ...). When
+    - `media_type` -- IANA media type (`image/png`, `audio/wav`, ...). When
       absent, callbacks may guess from `filename` (stdlib `mimetypes`) or
       fall back to a generic default. Never required.
-    - `filename` — original filename for the bytes, if known. Useful for
+    - `filename` -- original filename for the bytes, if known. Useful for
       key strategies that want a recognisable extension, and for resolvers
       that need to set `Content-Disposition` on presigned URLs.
-    - `metadata` — free-form `dict[str, str]` of user-supplied tags.
+    - `metadata` -- free-form `dict[str, str]` of user-supplied tags.
       Persisted by all three concrete stores (`SqliteMediaStore` → JSON
       column, `S3MediaStore` → signed `x-amz-meta-*` headers,
       `DiskMediaStore` → sidecar JSON file). Read back via
@@ -76,10 +76,11 @@ type, response headers, TTL, etc. without breaking the signature later.
 KeyStrategy = Callable[[str, MediaContext], str]
 """User-supplied callable that turns a URI + context into a backend storage key.
 
-Used by `DiskMediaStore` / `SqliteMediaStore` / `S3MediaStore` to derive the
-on-disk path / DB primary key / S3 object key from the canonical URI. Default
-strategy is `<sha256>.bin` (see `default_key_strategy`); override when an
-existing bucket layout or naming convention dictates otherwise.
+Used by `DiskMediaStore` and `S3MediaStore` to derive the on-disk path / S3
+object key from the canonical URI. `SqliteMediaStore` does not take one: its
+primary key is the content digest, so a user-chosen key would break dedup.
+Default strategy is `<sha256>.bin` (see `default_key_strategy`); override when
+an existing bucket layout or naming convention dictates otherwise.
 
 **Caveat**: if your strategy depends on `context.media_type` (e.g. to pick an
 extension), `get(uri)` and `exists(uri)` won't find the blob unless callers
@@ -116,11 +117,11 @@ def make_static_public_url(
 
     The returned callable takes a `media+sha256://<hex>` URI and returns
     `{base}/{key_prefix}<hex>{extension}`. Use this when the bytes live at a
-    known stable URL — e.g. an R2 public bucket (`https://pub-xxx.r2.dev`)
+    known stable URL -- e.g. an R2 public bucket (`https://pub-xxx.r2.dev`)
     or a CDN in front of S3. For presigned URLs or any logic that runs per
     request, pass your own callable instead.
 
-    Ignores `MediaContext` — pass your own callable if URL needs to vary
+    Ignores `MediaContext` -- pass your own callable if URL needs to vary
     with media type, TTL, etc.
     """
     base = base.rstrip('/')
@@ -135,7 +136,7 @@ def make_static_public_url(
 def media_uri_for(data: bytes) -> str:
     """Return the canonical `media+sha256://<hex>` URI for `data`.
 
-    The URI is the same regardless of which store the bytes are written to —
+    The URI is the same regardless of which store the bytes are written to --
     content-addressed so two stores holding the same bytes can be queried
     interchangeably.
     """
@@ -160,7 +161,7 @@ def parse_media_uri(uri: str) -> str:
 class MediaStore(Protocol):
     """Async content-addressed bytes store.
 
-    `put` returns the canonical URI (`media+sha256://<hex>`) for the bytes —
+    `put` returns the canonical URI (`media+sha256://<hex>`) for the bytes --
     callers do not pick the key. Implementations may dedup on the hash.
 
     Every method takes an optional `context: MediaContext` for forward
@@ -196,14 +197,14 @@ class DiskMediaStore:
 
     Customisation:
 
-    - `key_strategy=` — `Callable[[str, MediaContext], str]` overriding the
+    - `key_strategy=` -- `Callable[[str, MediaContext], str]` overriding the
       relative path inside `directory` (e.g. `'images/<digest>.png'`).
       The returned path must be relative and free of `..` segments
       (absolute paths and `..` are both rejected with `ValueError`).
       Caveat: if the strategy uses `context.media_type` etc. to pick the
       filename, the same context must be supplied on `get`/`exists` to
       locate the blob.
-    - `public_url=` — resolver exposing a URL the model can fetch.
+    - `public_url=` -- resolver exposing a URL the model can fetch.
       Without it `public_url(...)` returns `None` (local filesystem paths
       are not addressable from a model).
 
@@ -227,7 +228,7 @@ class DiskMediaStore:
     def _path_for(self, uri: str, context: MediaContext) -> Path:
         relative = self._key_strategy(uri, context)
         candidate = Path(relative)
-        # `Path('/root') / '/abs'` discards `/root` and returns `/abs` — an absolute
+        # `Path('/root') / '/abs'` discards `/root` and returns `/abs` -- an absolute
         # key would silently escape the store directory. Reject both shapes.
         if candidate.is_absolute() or '..' in candidate.parts:
             raise ValueError(f'key_strategy produced traversal-unsafe path: {relative!r}')
@@ -322,13 +323,13 @@ class SqliteMediaStore:
     );
     ```
 
-    `INSERT OR IGNORE` makes writes idempotent — the second `put` with the
+    `INSERT OR IGNORE` makes writes idempotent -- the second `put` with the
     same content is a no-op, not an overwrite. `metadata` is stored as
     canonical JSON of `context.metadata` (empty mapping → `'{}'`) and
     read back via `get_metadata(uri)`.
 
     There is no `key_strategy=` parameter: SqliteMediaStore is
-    content-addressed and the digest IS the primary key — any user-chosen
+    content-addressed and the digest IS the primary key -- any user-chosen
     storage key would either break dedup or be a no-op. Use `table=` if
     you need a non-default table name.
     """

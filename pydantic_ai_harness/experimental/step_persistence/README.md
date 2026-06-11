@@ -32,20 +32,20 @@ snapshots, and graph-node resume are out of scope and tracked separately
 
 ## What it gives you
 
-1. **Append-only step events** — every interesting boundary (run start/end,
+1. **Append-only step events** -- every interesting boundary (run start/end,
    model request, tool call, failure) appends a `StepEvent`. A run killed
    mid-tool-call still leaves a usable event trail.
-2. **Continuable snapshots** — a `ContinuableSnapshot` is saved only at
+2. **Continuable snapshots** -- a `ContinuableSnapshot` is saved only at
    boundaries where the message history is **provider-valid**: every
    `ToolCallPart` has a matching `ToolReturnPart` or `RetryPromptPart`, with
    no orphan, duplicate, or out-of-order returns. Pass the snapshot's
    `messages` back to `Agent.run(message_history=...)` to continue or fork.
-3. **Tool-effect ledger** — every tool call's lifecycle (`started`,
+3. **Tool-effect ledger** -- every tool call's lifecycle (`started`,
    `completed`, `failed`) is recorded against `(run_id, tool_call_id)`.
    After a crash, a tool with a `started` record and no terminal update
    should be treated as `unknown_after_crash`: the side effect may or may
    not have happened.
-4. **Lineage metadata** — `conversation_id` (sequence) and `parent_run_id`
+4. **Lineage metadata** -- `conversation_id` (sequence) and `parent_run_id`
    (hierarchy) are independent axes. See [Three-level identity](#three-level-identity).
 
 ## Quick start
@@ -65,7 +65,7 @@ await librarian.run('Find ThinkingPartDelta and confirm the callable allowance')
 
 That is the whole setup. **`run_id` is always per-`Agent.run` call**,
 matching pydantic_ai's `RunContext.run_id`. For multi-turn logical
-grouping use `conversation_id=` — that is the pydantic_ai-native
+grouping use `conversation_id=` -- that is the pydantic_ai-native
 primitive for it (see [Three-level identity](#three-level-identity)).
 
 `run_id` resolution per call:
@@ -74,7 +74,7 @@ primitive for it (see [Three-level identity](#three-level-identity)).
   Single-shot use cases (deterministic id for testing, replay, debugging,
   a one-off scripted run). Reusing one capability instance with the same
   explicit `run_id` across multiple `.run()` calls **raises `ValueError`
-  in `before_run`** — the tool-effect ledger is keyed by
+  in `before_run`** -- the tool-effect ledger is keyed by
   `(run_id, tool_call_id)` and providers reuse deterministic tool-call
   ids, so a silent collision would erase the `unknown_after_crash`
   signal. Use `conversation_id=` for multi-turn grouping instead.
@@ -86,7 +86,7 @@ primitive for it (see [Three-level identity](#three-level-identity)).
 - **Neither set** → `ctx.run_id` (pydantic_ai's auto-generated id) per
   `.run()` call, falling back to a UUID4.
 
-The orchestrator pattern — one logical agent serving many turns — uses
+The orchestrator pattern -- one logical agent serving many turns -- uses
 `conversation_id`, not a shared `run_id`:
 
 ```python
@@ -124,7 +124,7 @@ runs = await store.list_runs(conversation_id='conv-abc')  # 3 records, chronolog
 ## Continuing a delegate's investigation
 
 pydantic_ai already has `message_history=` for "carry on with this prior
-context". `StepPersistence` does not introduce a parallel mechanism — it
+context". `StepPersistence` does not introduce a parallel mechanism -- it
 exposes one helper that loads the most recent provider-valid snapshot:
 
 ```python
@@ -162,7 +162,7 @@ A run that crashed mid-tool-call has events (`tool_call_started`) but no
 snapshot for that point. `continue_run` returns the snapshot from the
 **previous** safe boundary, not the failed step.
 
-## Run lineage — `parent_run_id`
+## Run lineage -- `parent_run_id`
 
 `parent_run_id` is a lineage label, not a functional dependency. It does
 two things:
@@ -213,7 +213,7 @@ parent-child link.
 ## Inspecting a run tree
 
 `list_runs` returns matches sorted by `started_at` ascending across both
-backends — pick the most recent with `[-1]`.
+backends -- pick the most recent with `[-1]`.
 
 ```python
 # Every delegate of one orchestrator run (chronological)
@@ -242,7 +242,7 @@ unresolved = await store.list_unresolved_tool_effects(run_id=delegates[0].run_id
 events = await store.list_events(run_id='libr-3f2a')
 unresolved = await store.list_unresolved_tool_effects(run_id='libr-3f2a')
 for record in unresolved:
-    # status == 'started' with no terminal update — unknown_after_crash.
+    # status == 'started' with no terminal update -- unknown_after_crash.
     print(f'tool {record.tool_name} ({record.tool_call_id}) may or may not have run')
     print(f'  idempotency_key={record.idempotency_key}  '
           f'effect_summary={record.effect_summary}')
@@ -283,16 +283,16 @@ fields when it writes the terminal `completed` / `failed` entry.
 
 ## Backends
 
-- `InMemoryStepStore` — process-local; great for tests.
-- `FileStepStore(directory)` — directory layout under `<directory>/<run_id>/`:
-    - `run.json` — `RunRecord` (lineage)
-    - `events.jsonl` — append-only `StepEvent`s
-    - `tool_effects.jsonl` — append-only `ToolEffectRecord`s, scoped to this run
-    - `snapshots/{seq}.json` — `ContinuableSnapshot`s, named by a per-run
+- `InMemoryStepStore` -- process-local; great for tests.
+- `FileStepStore(directory)` -- directory layout under `<directory>/<run_id>/`:
+    - `run.json` -- `RunRecord` (lineage)
+    - `events.jsonl` -- append-only `StepEvent`s
+    - `tool_effects.jsonl` -- append-only `ToolEffectRecord`s, scoped to this run
+    - `snapshots/{seq}.json` -- `ContinuableSnapshot`s, named by a per-run
       monotonic counter (NOT `step_index`, which would collide when the
-      same `run_id` is reused across `Agent.run` calls — `ctx.run_step`
+      same `run_id` is reused across `Agent.run` calls -- `ctx.run_step`
       resets to 0 each call).
-- `SqliteStepStore(database='runs.db')` — single SQLite file with tables
+- `SqliteStepStore(database='runs.db')` -- single SQLite file with tables
   `runs`, `events`, `snapshots`, `tool_effects`, and a sibling `media`
   table for externalized blobs (see [Persisting media](#persisting-media)
   below). WAL mode is enabled; `tool_effects` upserts per
@@ -308,7 +308,7 @@ hooks never block the event loop on the file/sqlite backends (I/O is
 dispatched via `anyio.to_thread`).
 
 `FileStepStore` validates `run_id` against `[A-Za-z0-9_.-]{1,200}` (and
-rejects `..`) to prevent path traversal — callers passing user-controlled
+rejects `..`) to prevent path traversal -- callers passing user-controlled
 IDs should still sanitise first.
 
 ## Persisting media
@@ -317,7 +317,7 @@ IDs should still sanitise first.
 base64 inside a snapshot would balloon every file/row containing the
 message. Both `FileStepStore` and `SqliteStepStore` externalize any
 `BinaryContent.data` ≥ **64 KiB** through a configured `MediaStore`,
-leaving a URI reference in the snapshot. Round-trip is transparent —
+leaving a URI reference in the snapshot. Round-trip is transparent --
 `latest_snapshot(...).messages[*]` returns `BinaryContent` with the
 original bytes.
 
@@ -354,18 +354,18 @@ SqliteStepStore(database='runs.db', media_store=None)
 ```
 
 URIs are `media+sha256://<hex>`, content-addressed. The same blob written
-through any `MediaStore` resolves the same way — dedup is automatic and
+through any `MediaStore` resolves the same way -- dedup is automatic and
 moving the underlying storage is a one-line swap. The shipped
 implementations are:
 
-- `DiskMediaStore(directory)` — one file per blob at
+- `DiskMediaStore(directory)` -- one file per blob at
   `<directory>/<sha256>.bin`.
-- `SqliteMediaStore(database=...)` or `SqliteMediaStore(connection=...)` —
+- `SqliteMediaStore(database=...)` or `SqliteMediaStore(connection=...)` --
   one row per blob (`INSERT OR IGNORE` for content-addressed dedup).
 - `S3MediaStore(bucket=, endpoint=, region=, access_key_id=, secret_access_key=)`
-  — path-style URLs + handrolled SigV4. Compatible with AWS S3, Cloudflare
+  -- path-style URLs + handrolled SigV4. Compatible with AWS S3, Cloudflare
   R2 (`region='auto'`), MinIO, and other S3-compatible providers. PUT/GET/HEAD
-  only — no multipart, lifecycle, or listing in v1.
+  only -- no multipart, lifecycle, or listing in v1.
 
 ### Exposing externalized bytes as URLs
 
@@ -373,7 +373,7 @@ Each store accepts a `public_url=` callable that turns the canonical
 `media+sha256://<hex>` URI into a URL the model can fetch directly. The
 forthcoming `MediaExternalizer` capability will use this to swap
 `BinaryContent` parts for `ImageUrl` / `AudioUrl` / etc. before the
-model sees the message — letting providers fetch big media over the wire
+model sees the message -- letting providers fetch big media over the wire
 without re-encoding bytes into the request body.
 
 Static base URL (public R2 bucket, CDN):
@@ -391,7 +391,7 @@ store = S3MediaStore(
 )
 ```
 
-Presigned / rotating-signature URL — pass any async callable that takes
+Presigned / rotating-signature URL -- pass any async callable that takes
 `(uri, MediaContext)`:
 
 ```python
@@ -404,11 +404,11 @@ async def presign(uri: str, ctx: MediaContext) -> str:
 store = S3MediaStore(..., public_url=presign)
 ```
 
-### `MediaContext` — extensible per-operation bag
+### `MediaContext`, extensible per-operation bag
 
-Every `MediaStore` method (`put`, `get`, `exists`, `public_url`) and
-both user-supplied callables (`PublicUrlResolver`, `KeyStrategy`) accept
-a `MediaContext`:
+Every `MediaStore` method (`put`, `get`, `exists`, `public_url`,
+`get_metadata`) and both user-supplied callables (`PublicUrlResolver`,
+`KeyStrategy`) accept a `MediaContext`:
 
 ```python
 @dataclass(frozen=True, kw_only=True)
@@ -421,18 +421,22 @@ class MediaContext:
 All fields default; new fields are added non-breakingly as use cases
 emerge. Pass what you have, ignore the rest.
 
-**Persistence by store** — all three round-trip via `get_metadata(uri)`:
+**Persistence by store.** `get_metadata(uri)` round-trips the
+user-supplied `metadata` mapping on all three stores. `media_type` is
+also persisted but is not part of what `get_metadata` returns (it is
+stored for the byte payload itself, e.g. as the `Content-Type`).
 
 - `SqliteMediaStore` writes `metadata` to a JSON column and `media_type`
   to a dedicated column
 - `S3MediaStore` sends `metadata` as signed `x-amz-meta-*` headers
   (ASCII alphanumeric + dash key names) and `media_type` as
-  `Content-Type`; `get_metadata` reads them back from the HEAD response
+  `Content-Type`; `get_metadata` reads the `x-amz-meta-*` values back
+  from the HEAD response
 - `DiskMediaStore` writes a sidecar JSON file (`<resolved>.meta.json`)
   alongside each blob, atomic via tmp + rename. Sidecars are absent
   only when the put carried no metadata
 
-### `key_strategy` — controlling the backend storage path
+### `key_strategy` -- controlling the backend storage path
 
 Default is `<sha256>.bin`. `DiskMediaStore` and `S3MediaStore` accept
 overrides to fit existing layouts; `SqliteMediaStore` does not (its
@@ -456,22 +460,22 @@ unless the same context is supplied at read time. For pure
 path-organisation strategies (no context dependency) the constraint
 doesn't apply.
 
-`DiskMediaStore` rejects strategies that produce `..`-containing paths
-to prevent traversal.
+`DiskMediaStore` rejects strategies that produce absolute paths or paths
+containing `..` segments, to prevent escaping the store directory.
 
-`DiskMediaStore` and `SqliteMediaStore` accept the same parameter —
-useful when a local HTTP server or signed-URL service fronts the
-directory / DB. Without it `public_url(...)` returns `None` (the model
-never sees a URL unless a resolver is configured and it returns a string).
+Separately, all three stores accept a `public_url=` resolver, useful
+when a CDN, local HTTP server, or signed-URL service fronts the bytes.
+Without it `public_url(...)` returns `None` (the model never sees a URL
+unless a resolver is configured and it returns a string).
 
 pyai providers transparently download bytes from a URL when the target
 model doesn't natively accept that URL type, so emitting a URL is
-always safe — you only ever lose wire savings, never correctness.
+always safe -- you only ever lose wire savings, never correctness.
 
 > **Note on the future `MediaExternalizer` capability.** When it lands,
 > the composition will be
 > `Agent(capabilities=[MediaExternalizer(store), StepPersistence(...)])`
-> and `StepPersistence` will see already-URL-ified messages — the
+> and `StepPersistence` will see already-URL-ified messages -- the
 > externalize walk becomes a no-op. The existing API does not change.
 
 ### Persisting unsupported backends
@@ -479,7 +483,7 @@ always safe — you only ever lose wire savings, never correctness.
 DynamoDB, Postgres, Redis, GCS, and other backends are out of scope for
 this release. Write your own `StepStore` (≈ ten methods on a Protocol) or
 your own `MediaStore` (three methods) and pass it via `store=` /
-`media_store=`. Please open an issue if you ship one — we want to feed
+`media_store=`. Please open an issue if you ship one -- we want to feed
 the eventual shared adapter layer with N≥3 real implementations before
 abstracting.
 

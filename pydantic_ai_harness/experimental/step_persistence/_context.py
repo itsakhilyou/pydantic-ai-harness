@@ -27,7 +27,7 @@ snapshot_saved: ContextVar[bool] = ContextVar(
 
 Set `False` in `wrap_run`, flipped `True` whenever `after_node_run` saves a
 `CallToolsNode` snapshot. `after_run` reads it to skip a redundant terminal
-snapshot — the final `CallToolsNode` already captured the provider-valid tail
+snapshot -- the final `CallToolsNode` already captured the provider-valid tail
 with the correct `step_index`, whereas `after_run` runs with `ctx.run_step`
 reset to 0. Task-isolated like `current_run_id`, so concurrent runs don't
 interfere.

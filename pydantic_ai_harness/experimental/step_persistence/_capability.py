@@ -39,12 +39,12 @@ class StepPersistence(AbstractCapability[AgentDepsT]):
     (run/model-request/tool-call start, completion, failure), records a
     `ToolEffectRecord` per tool call so the orchestrator can decide whether
     replay is safe, and saves a `ContinuableSnapshot` at every
-    provider-valid boundary — the end of each `CallToolsNode` — plus a
+    provider-valid boundary -- the end of each `CallToolsNode` -- plus a
     fallback save at `after_run` if the run reached no such boundary.
 
     A run that crashes between `before_tool_execute` and `after_tool_execute`
     leaves a visible event trail and a `started` tool-effect record, but no
-    new continuable snapshot — the latest snapshot reflects the last
+    new continuable snapshot -- the latest snapshot reflects the last
     provider-valid state.
 
     ```python
@@ -78,7 +78,7 @@ class StepPersistence(AbstractCapability[AgentDepsT]):
     """Identifier for this one `Agent.run` call.
 
     `run_id` is per-call, matching `pydantic_ai.RunContext.run_id`. For
-    multi-turn logical grouping use `conversation_id` on `Agent.run(...)` —
+    multi-turn logical grouping use `conversation_id` on `Agent.run(...)` --
     that is the pyai-native primitive for it.
 
     Resolution order (materialised in `for_run`):
@@ -86,7 +86,7 @@ class StepPersistence(AbstractCapability[AgentDepsT]):
     1. **Explicit value** → used as-is. Single-shot use cases:
        deterministic id for testing, replay, debugging. Reusing the
        capability across multiple `.run()` calls with the same explicit
-       `run_id` raises `ValueError` in `before_run` — the tool-effect
+       `run_id` raises `ValueError` in `before_run` -- the tool-effect
        ledger keys on `(run_id, tool_call_id)` and providers reuse
        deterministic tool-call ids, so a silent collision would erase
        the `unknown_after_crash` signal. Use `conversation_id=` on
@@ -100,7 +100,7 @@ class StepPersistence(AbstractCapability[AgentDepsT]):
     parent_run_id: str | None = None
     """Run that spawned this one.
 
-    Auto-inferred from the enclosing `StepPersistence` `wrap_run` scope —
+    Auto-inferred from the enclosing `StepPersistence` `wrap_run` scope --
     when an orchestrator's tool synchronously calls a delegate's
     `Agent.run(...)`, the delegate picks up the orchestrator's `run_id`
     here without manual threading. Set explicitly to override (e.g. for
@@ -116,7 +116,7 @@ class StepPersistence(AbstractCapability[AgentDepsT]):
 
         Supports `backend='memory'` (default), `backend='file'` (with
         `directory`), or `backend='sqlite'` (with `database`). Raises
-        `ValueError` for any other `backend` value — silently falling
+        `ValueError` for any other `backend` value -- silently falling
         back to in-memory storage would turn a typo into accidental
         non-durability.
         """
@@ -206,7 +206,7 @@ class StepPersistence(AbstractCapability[AgentDepsT]):
     async def before_run(self, ctx: RunContext[AgentDepsT]) -> None:
         """Register run lineage and emit `run_started`.
 
-        When the caller pinned an explicit `run_id`, reject reuse — the
+        When the caller pinned an explicit `run_id`, reject reuse -- the
         tool-effect ledger keys on `(run_id, tool_call_id)` and providers
         reuse deterministic tool-call ids, so a second `Agent.run` with
         the same explicit `run_id` would silently collide. The auto-derived
