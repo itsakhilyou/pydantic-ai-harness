@@ -23,7 +23,7 @@ import acp
 import anyio
 from acp import schema
 from acp.interfaces import Client
-from pydantic_ai import DeferredToolRequests, DeferredToolResults, ToolDenied
+from pydantic_ai import DeferredToolRequests, DeferredToolResults, ToolDenied, UsageLimitExceeded
 from pydantic_ai.agent import AbstractAgent
 from pydantic_ai.messages import (
     AgentStreamEvent,
@@ -83,6 +83,17 @@ def _finish_reason_to_stop_reason(finish_reason: FinishReason | None) -> schema.
     if finish_reason == 'content_filter':
         return 'refusal'
     return 'end_turn'
+
+
+def _usage_limit_stop_reason(exc: UsageLimitExceeded) -> schema.StopReason:
+    """Map a run's exceeded usage limit to the ACP stop reason ending the turn.
+
+    Token-based limits report `max_tokens`; the request/tool-call count limits report
+    `max_turn_requests`. The exception carries no structured detail, so this reads its message; an
+    unrecognized wording falls back to `max_turn_requests` (the limit pydantic-ai's default
+    configuration can hit).
+    """
+    return 'max_tokens' if 'tokens_limit' in str(exc) else 'max_turn_requests'
 
 
 def _to_acp_usage(usage: RunUsage) -> schema.Usage:
@@ -433,7 +444,7 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
                 # here instead of propagating into the turn: with a bare `await turn` the two are
                 # indistinguishable, and answering a request whose handler the connection already
                 # cancelled would deadlock its shutdown (the response future is never resolved).
-                usage, stop_reason = await asyncio.shield(turn)
+                usage, stop_reason, committed = await asyncio.shield(turn)
             except _TurnCancelled:
                 # Rolled back: omit `user_message_id`, which would signal the message was persisted.
                 return schema.PromptResponse(stop_reason='cancelled')
@@ -449,6 +460,11 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
             finally:
                 state.active_turn = None
                 state.cancel_requested = False
+        if not committed:
+            # The turn ended at a usage limit before committing anything: like a cancelled turn,
+            # the response must not claim the user message was persisted, and there is no
+            # committed usage to report.
+            return schema.PromptResponse(stop_reason=stop_reason)
         return schema.PromptResponse(stop_reason=stop_reason, user_message_id=message_id, usage=_to_acp_usage(usage))
 
     async def cancel(self, session_id: str, **kwargs: object) -> None:
@@ -493,11 +509,13 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
         state: SessionState[AgentDepsT],
         prompt: list[PromptContentBlock],
         user_content: list[UserContent],
-    ) -> tuple[RunUsage, schema.StopReason]:
+    ) -> tuple[RunUsage, schema.StopReason, bool]:
         """Drive the agent (resuming across tool-approval pauses) and stream updates.
 
-        Returns the turn's total token usage (summed across every run pass, one per approval pause)
-        and the ACP stop reason mapped from the final model response.
+        Returns the turn's total token usage (summed across every run pass, one per approval
+        pause), the ACP stop reason mapped from the final model response, and whether the turn
+        committed -- `False` only when a usage limit ended the turn, which rolls back like a
+        cancellation but still answers with its `max_tokens`/`max_turn_requests` stop reason.
         """
         conn = self._conn
         assert conn is not None
@@ -563,6 +581,17 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
             with anyio.CancelScope(shield=True):
                 await self._fail_outstanding_tool_calls(turn)
             raise
+        except UsageLimitExceeded as exc:
+            # ACP models a turn ending at a limit as a normal stop reason, not a request error.
+            # The raising run's partial messages are not retrievable, so nothing is committed --
+            # the turn rolls back to the prior state, like a cancellation.
+            await self._fail_outstanding_tool_calls(turn)
+            return usage, _usage_limit_stop_reason(exc), False
+        except Exception:
+            # The turn is failing with the error the client receives as the prompt's response;
+            # close out its announced tool calls so they are not left rendering as running.
+            await self._fail_outstanding_tool_calls(turn)
+            raise
 
         state.history = history
         # Commit and persist this turn's updates alongside the history; a cancelled turn never
@@ -579,7 +608,7 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
                 _logger.warning(
                     'persisting ACP session %s was cancelled; durable state is now behind', state.session_id
                 )
-        return usage, stop_reason
+        return usage, stop_reason, True
 
     async def _fail_outstanding_tool_calls(self, turn: _TurnState) -> None:
         """Drive every announced-but-unfinished tool call to a terminal `failed` status.

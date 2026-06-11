@@ -22,7 +22,7 @@ import pytest
 from acp import RequestError, schema
 from acp.interfaces import Client
 from pydantic import BaseModel
-from pydantic_ai import Agent, DeferredToolRequests, RunContext
+from pydantic_ai import Agent, DeferredToolRequests, RunContext, UsageLimitExceeded
 from pydantic_ai.messages import (
     AgentStreamEvent,
     FinishReason,
@@ -57,7 +57,7 @@ from pydantic_ai_harness.acp import (
     run_acp_stdio,
     run_acp_stdio_sync,
 )
-from pydantic_ai_harness.acp._adapter import _finish_reason_to_stop_reason, _TurnState
+from pydantic_ai_harness.acp._adapter import _finish_reason_to_stop_reason, _TurnState, _usage_limit_stop_reason
 from pydantic_ai_harness.acp._present import _HANDLERS, absolutize
 from pydantic_ai_harness.acp._serialize import MAX_RAW_FIELD_CHARS, MAX_TEXT_UPDATE_BYTES, _escaped_len, chunk_text
 from pydantic_ai_harness.acp._session import SessionState
@@ -606,6 +606,44 @@ class TestStopReason:
         self, finish_reason: FinishReason | None, expected: schema.StopReason
     ) -> None:
         assert _finish_reason_to_stop_reason(finish_reason) == expected
+
+    @pytest.mark.parametrize(
+        ('message', 'expected'),
+        [
+            # The real wordings from pydantic-ai's UsageLimits checks.
+            ('The next request would exceed the request_limit of 50', 'max_turn_requests'),
+            ('The next tool call(s) would exceed the tool_calls_limit of 3 (tool_calls=4).', 'max_turn_requests'),
+            ('Exceeded the output_tokens_limit of 5 (output_tokens=10)', 'max_tokens'),
+            ('The next request would exceed the total_tokens_limit of 9 (total_tokens=10)', 'max_tokens'),
+        ],
+    )
+    def test_usage_limit_maps_to_stop_reason(self, message: str, expected: schema.StopReason) -> None:
+        assert _usage_limit_stop_reason(UsageLimitExceeded(message)) == expected
+
+    async def test_request_limit_ends_the_turn_with_max_turn_requests(self) -> None:
+        # A model that calls a tool on every request never finishes the turn, so pydantic-ai's
+        # default request_limit (50) trips. ACP defines `max_turn_requests` for exactly this; it
+        # must end the turn with that stop reason, not surface as a JSON-RPC error.
+        async def stream(messages: list[ModelMessage], info: AgentInfo) -> AsyncIterator[dict[int, DeltaToolCall]]:
+            yield {0: DeltaToolCall(name='spin', json_args='{}')}
+
+        agent = Agent(FunctionModel(stream_function=stream))
+
+        @agent.tool_plain
+        def spin() -> str:
+            return 'again'
+
+        adapter: PydanticAIACPAgent[None, str] = PydanticAIACPAgent(agent)
+        client = FakeClient()
+        session_id = await _start(adapter, client)
+
+        response = await adapter.prompt(prompt=[acp.text_block('go')], session_id=session_id, message_id='m1')
+
+        assert response.stop_reason == 'max_turn_requests'
+        # The raising run's messages are not retrievable, so the turn rolls back like a
+        # cancellation: no persisted-message claim and no committed history.
+        assert response.user_message_id is None
+        assert adapter._sessions[session_id].history == []  # pyright: ignore[reportPrivateUsage]
 
 
 class TestChunkText:
@@ -1431,6 +1469,10 @@ class TestErrors:
             await adapter.prompt(prompt=[acp.text_block('go')], session_id=session_id)
         # The failed turn is cleared so the session is usable again.
         assert adapter._sessions[session_id].active_turn is None  # pyright: ignore[reportPrivateUsage]
+        # The announced tool call was closed out, so the client does not keep rendering it as
+        # running alongside the turn's error.
+        [(start_id, _title, _status)] = client.tool_starts()
+        assert (start_id, 'failed') in [(cid, status) for cid, status, _out in client.tool_completions()]
 
 
 class TestUnsupportedMethods:
