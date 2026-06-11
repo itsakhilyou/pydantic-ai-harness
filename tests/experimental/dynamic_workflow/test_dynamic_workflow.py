@@ -204,10 +204,12 @@ async def test_descriptions_override(make_agent: MakeAgent) -> None:
 async def test_tool_def_is_sequential_with_code_metadata(make_agent: MakeAgent) -> None:
     # `sequential=True` is what serializes two `run_workflow` calls in one model response;
     # dropping it would let them race the shared per-run budget counter.
-    ts = DynamicWorkflowToolset[None](agents=[make_agent()])
-    tool_def = (await ts.get_tools(_ctx()))['run_workflow'].tool_def
-    assert tool_def.sequential is True
-    assert tool_def.metadata == {'code_arg_name': 'code', 'code_arg_language': 'python'}
+    ts = DynamicWorkflowToolset[None](agents=[make_agent()], max_retries=5)
+    tool = (await ts.get_tools(_ctx()))['run_workflow']
+    assert tool.tool_def.sequential is True
+    assert tool.tool_def.metadata == {'code_arg_name': 'code', 'code_arg_language': 'python'}
+    # The configured retry budget must reach the served tool, not just sit on the toolset.
+    assert tool.max_retries == 5
 
 
 async def test_custom_tool_name(make_agent: MakeAgent) -> None:
@@ -413,6 +415,68 @@ async def test_forward_usage_false_isolates_usage(make_agent: MakeAgent) -> None
     assert ctx.usage.requests == 0
 
 
+async def test_deps_forwarded_to_sub_agents() -> None:
+    # The parent run's `deps` must reach the sub-agent run (a headline README claim).
+    seen: list[str] = []
+    sub = Agent(TestModel(custom_output_text='ok'), name='sub', deps_type=str)
+
+    @sub.instructions
+    def record_deps(ctx: RunContext[str]) -> str:
+        seen.append(ctx.deps)
+        return 'noop'
+
+    ts = DynamicWorkflowToolset[str](agents=[WorkflowAgent(agent=sub)])
+    ctx = RunContext[str](deps='parent-deps', model=TestModel(), usage=RunUsage(), prompt=None, messages=[], run_step=1)
+    tools = await ts.get_tools(ctx)
+    await ts.call_tool(ts.tool_name, {'code': "await sub(task='x')"}, ctx, tools[ts.tool_name])
+    assert seen == ['parent-deps']
+
+
+async def test_sub_agent_does_not_see_parent_messages(make_agent: MakeAgent) -> None:
+    # "Each sub-agent runs in isolation: its own message history, never the parent conversation."
+    seen_texts: list[str] = []
+
+    def spy(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        seen_texts.extend(
+            p.content
+            for m in messages
+            if isinstance(m, ModelRequest)
+            for p in m.parts
+            if isinstance(p, UserPromptPart) and isinstance(p.content, str)
+        )
+        return ModelResponse(parts=[TextPart('ok')])
+
+    sub: Agent[None, str] = Agent(FunctionModel(spy), name='sub')
+    ts = DynamicWorkflowToolset[None](agents=[WorkflowAgent(agent=sub)])
+    ctx = RunContext[None](
+        deps=None,
+        model=TestModel(),
+        usage=RunUsage(),
+        prompt='PARENT_PROMPT_MARKER',
+        messages=[ModelRequest(parts=[UserPromptPart('PARENT_PROMPT_MARKER')])],
+        run_step=1,
+    )
+    tools = await ts.get_tools(ctx)
+    await ts.call_tool(ts.tool_name, {'code': "await sub(task='the task only')"}, ctx, tools[ts.tool_name])
+    assert seen_texts == ['the task only']  # only the task; no parent conversation leaked
+
+
+async def test_sub_agent_usage_limits_checked_against_shared_counter() -> None:
+    # With `forward_usage=True`, `sub_agent_usage_limits` is checked against the *shared* counter:
+    # a parent run that already spent the request budget trips the sub-agent immediately, even
+    # though the sub-agent itself has made no requests.
+    sub: Agent[None, str] = Agent(TestModel(custom_output_text='ok'), name='sub')
+    ts = DynamicWorkflowToolset[None](
+        agents=[WorkflowAgent(agent=sub)],
+        forward_usage=True,
+        sub_agent_usage_limits=UsageLimits(request_limit=3),
+    )
+    ctx = _ctx()
+    ctx.usage.requests = 3  # parent has already consumed the whole shared budget
+    with pytest.raises(ModelRetry, match='UsageLimitExceeded'):
+        await _run_script(ts, "await sub(task='x')", ctx)
+
+
 async def test_sub_agent_usage_limits_enforced() -> None:
     sub: Agent[None, str] = Agent(TestModel(), name='limited')
 
@@ -594,6 +658,9 @@ async def test_runaway_loop_stopped_by_duration_cap(make_agent: MakeAgent) -> No
 
 
 def test_resolve_resource_limits_none_is_backstop() -> None:
+    # Pin the documented backstop values (256 MB, 50M allocations, no duration cap) so the docs
+    # can't silently drift from the constant.
+    assert _resolve_resource_limits(None) == {'max_memory': 256 * 1024 * 1024, 'max_allocations': 50_000_000}
     assert _resolve_resource_limits(None) == _default_resource_limits()
 
 
@@ -602,11 +669,10 @@ def test_resolve_resource_limits_unlimited_removes_all() -> None:
 
 
 def test_resolve_resource_limits_partial_merges_onto_backstop() -> None:
-    # A partial dict overrides only the cap it names; the others keep their backstop value
-    # (so it can't silently drop the duration backstop).
+    # A partial dict overrides only the cap it names; the others keep their backstop value.
     resolved = _resolve_resource_limits({'max_memory': 1})
-    # Equality with the full backstop (plus the override) proves the duration/allocation
-    # backstops survive a partial dict rather than being dropped.
+    # Equality with the full backstop (plus the override) proves the allocations backstop
+    # survives a partial dict rather than being dropped. (There is no duration backstop.)
     assert resolved == {**_default_resource_limits(), 'max_memory': 1}
 
 
@@ -725,7 +791,9 @@ async def test_runtime_reveal_announces_and_makes_callable(make_agent: MakeAgent
     agents.append(make_agent('extra-out', 'extra'))
     await ts.get_tools(ctx)
     assert set(ts._by_name) == {'base', 'extra'}  # pyright: ignore[reportPrivateUsage]
-    assert 'async def extra(*, task: str) -> Any:' in _enqueued_text(ctx)
+    announced = _enqueued_text(ctx)
+    assert 'async def extra(*, task: str) -> Any:' in announced
+    assert '`run_workflow`' in announced  # the announcement names the actual tool
 
     out = await _run_script(ts, "await extra(task='x')", ctx)
     assert out == 'extra-out'

@@ -294,7 +294,7 @@ class DynamicWorkflowToolset(AbstractToolset[AgentDepsT]):
     _baseline_catalog: dict[str, str | None] = field(init=False, repr=False)
 
     # `id()` of reveal entries already warned about (invalid or colliding name), so a persistent
-    # bad append warns once rather than every step. Reset per run via `for_run`'s `replace`.
+    # bad append warns once rather than every step. Rebuilt per run by `for_run`'s shallow clone.
     _reveal_warned: set[int] = field(default_factory=set[int], init=False, repr=False)
 
     def __post_init__(self) -> None:
