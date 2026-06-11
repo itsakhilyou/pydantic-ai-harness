@@ -146,7 +146,7 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
     [`run_acp_stdio`][pydantic_ai_harness.acp.run_acp_stdio] (or the lower-level `acp.run_agent`)
     to serve it over stdio.
 
-    A tool that [requires approval](https://ai.pydantic.dev/tools-toolsets/deferred-tools/)
+    A tool that [requires approval](https://pydantic.dev/docs/ai/tools-toolsets/deferred-tools/)
     pauses the run and asks the client via `session/request_permission`; "always allow"/"always
     reject" decisions are remembered for the rest of the session. Per-session workspace setup
     (the client's `cwd` and MCP servers) is surfaced through the optional `session_config` factory.
@@ -281,7 +281,8 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
         with that workspace. A request with MCP servers but no `session_config` is rejected (see
         `_build_config`).
         """
-        # `cwd` arrives absolute; the ACP router validates that shape. `additional_directories` is
+        # The spec requires `cwd` to be absolute, a MUST on the client; neither the SDK router
+        # nor this adapter re-validates it. `additional_directories` is
         # part of the `acp.Agent` interface but not consumed: the capability is not advertised, so
         # a conformant client never sends extra roots, and they are not surfaced to `session_config`.
         session_id = uuid4().hex
@@ -394,8 +395,8 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
                     }
                 )
             return AcpSessionConfig(deps=self._deps)
-        if self._conn is None:  # pragma: no cover - on_connect always runs before new_session
-            raise RuntimeError('new_session called before on_connect()')
+        if self._conn is None:  # pragma: no cover - on_connect always runs before session setup
+            raise RuntimeError('_build_config called before on_connect()')
         session = AcpSession(
             cwd=cwd,
             mcp_servers=mcp_servers or [],
@@ -803,9 +804,9 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
         return ToolDenied('Rejected by the client.')
 
     # --- Optional ACP methods not supported by this adapter ------------------------------
-    # The capabilities for these are advertised as off in `initialize`, and the ACP router
-    # rejects unsupported methods at runtime; they are implemented here only to satisfy the
-    # `acp.Agent` interface for type checking.
+    # The capabilities for these are advertised as off in `initialize`, but the SDK router still
+    # routes the methods here (`acp.Agent` is a Protocol whose inherited stub bodies would answer
+    # success-`null`), so these raises are what a client calling them anyway actually receives.
 
     async def authenticate(self, method_id: str, **kwargs: object) -> schema.AuthenticateResponse | None:
         """No authentication is required, so this is a no-op."""

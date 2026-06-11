@@ -140,7 +140,7 @@ By default the adapter recognizes the harness `FileSystem` and `Shell` tool call
 
 ## MCP servers
 
-An ACP client may offer MCP servers during session setup. This adapter does not connect them itself; a `session_config` is the place to turn `session.mcp_servers` into Pydantic AI toolsets. If a client sends MCP servers and no `session_config` is installed to consume them, the session request is rejected (rather than silently ignoring them) so the mismatch is visible.
+An ACP client may offer MCP servers during session setup. This adapter does not connect them itself; a `session_config` is the place to turn `session.mcp_servers` into Pydantic AI toolsets. If a client sends MCP servers and no `session_config` is installed to consume them, the session request is rejected (rather than silently ignoring them) so the mismatch is visible. The spec expects every agent to accept stdio MCP servers, so an agent meant for arbitrary editors should install a `session_config` that connects them (for example with `pydantic_ai.mcp.MCPServerStdio`).
 
 A spec-following client only sends HTTP/SSE MCP servers when the agent advertises support for those transports during `initialize` (stdio servers are not capability-gated). When your `session_config` connects them, say so:
 
@@ -227,5 +227,5 @@ PydanticAIACPAgent(agent, *, ...)  # the ACP agent object, to embed in a custom 
 
 - [Agent Client Protocol](https://agentclientprotocol.com) -- protocol specification
 - [Zed external agents](https://zed.dev/docs/ai/external-agents) -- editor-side configuration
-- [Human-in-the-loop tool approval](https://ai.pydantic.dev/deferred-tools/#human-in-the-loop-tool-approval) (Pydantic AI)
+- [Human-in-the-loop tool approval](https://pydantic.dev/docs/ai/tools-toolsets/deferred-tools/#human-in-the-loop-tool-approval) (Pydantic AI)
 - [Pydantic AI capabilities](https://ai.pydantic.dev/capabilities/)
