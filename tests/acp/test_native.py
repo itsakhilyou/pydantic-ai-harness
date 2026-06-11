@@ -158,6 +158,20 @@ async def test_run_command_kills_and_releases_the_terminal_on_cancel() -> None:
     assert client.released == ['term-1']  # and released so it is not left behind
 
 
+async def test_run_command_cancelled_during_create_still_kills_the_terminal() -> None:
+    client = RecordingClient(block_create=True)
+    ts = AcpTerminalToolset[None](client=client, session_id='sid', cwd='/ws')
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(ts.run_command, 'sleep 100')
+        await client.create_event.wait()  # the create request is in flight; no terminal id yet
+        tg.cancel_scope.cancel()
+        client.release_create.set()  # the client answers the create only after the cancellation
+    # The request was already on the wire, so the client started the command regardless; the
+    # late-learned terminal must still be killed and released, not leaked running in the editor.
+    assert client.killed == ['term-1']
+    assert client.released == ['term-1']
+
+
 async def test_run_command_cancel_survives_a_failing_kill() -> None:
     class _KillRaises(RecordingClient):
         async def kill_terminal(

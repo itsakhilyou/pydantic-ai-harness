@@ -26,6 +26,7 @@ class RecordingClient(Client):
         signal: str | None = None,
         no_exit_status: bool = False,
         block_exit: bool = False,
+        block_create: bool = False,
     ) -> None:
         self.updates: list[object] = []
         self.files: dict[str, str] = dict(files or {})
@@ -37,6 +38,8 @@ class RecordingClient(Client):
         self._signal = signal
         self._no_exit_status = no_exit_status
         self._block_exit = block_exit
+        self._block_create = block_create
+        self.release_create = asyncio.Event()
         self.created: list[tuple[str, str | None]] = []
         self.killed: list[str] = []
         self.released: list[str] = []
@@ -76,6 +79,8 @@ class RecordingClient(Client):
         self._terminals += 1
         self.created.append((command, cwd))
         self.create_event.set()
+        if self._block_create:
+            await self.release_create.wait()
         return schema.CreateTerminalResponse(terminal_id=f'term-{self._terminals}')
 
     async def wait_for_terminal_exit(
