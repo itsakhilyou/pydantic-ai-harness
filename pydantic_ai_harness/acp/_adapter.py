@@ -569,7 +569,16 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
         # reaches here, so only committed turns are persisted.
         if self._session_store is not None:
             state.transcript.extend(turn.updates)
-            await self._persist(state)
+            try:
+                await self._persist(state)
+            except asyncio.CancelledError:
+                # The turn is already committed: a cancel landing inside the store's save came
+                # too late to roll anything back, so it must not turn a completed turn into a
+                # `cancelled` response. The interrupted save is the same benign failure
+                # `_persist` swallows; the next successful save catches the store up.
+                _logger.warning(
+                    'persisting ACP session %s was cancelled; durable state is now behind', state.session_id
+                )
         return usage, stop_reason
 
     async def _fail_outstanding_tool_calls(self, turn: _TurnState) -> None:

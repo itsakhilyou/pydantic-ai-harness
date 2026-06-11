@@ -202,6 +202,47 @@ async def test_load_session_without_a_store_is_method_not_found() -> None:
         await adapter.load_session(cwd='/ws', session_id='whatever')
 
 
+class _BlockingSaveStore(InMemorySessionStore):
+    """A store whose next save suspends until released, modeling a durable backend mid-write."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.saving = asyncio.Event()
+        self.block_next_save = False
+
+    async def save(self, session_id: str, session: StoredSession) -> None:
+        if self.block_next_save:
+            self.block_next_save = False
+            self.saving.set()
+            await asyncio.Event().wait()  # suspend until cancelled
+        await super().save(session_id, session)
+
+
+async def test_cancel_landing_in_the_post_commit_save_does_not_report_rollback() -> None:
+    store = _BlockingSaveStore()
+    adapter: PydanticAIACPAgent[None, str] = PydanticAIACPAgent(
+        Agent(TestModel(custom_output_text='done')), session_store=store
+    )
+    adapter.on_connect(RecordingClient())
+    await adapter.initialize(protocol_version=1)
+    session = await adapter.new_session(cwd='/ws')
+    store.block_next_save = True
+
+    turn = asyncio.ensure_future(
+        adapter.prompt(prompt=[acp.text_block('hi')], session_id=session.session_id, message_id='m1')
+    )
+    await asyncio.wait_for(store.saving.wait(), timeout=5)
+    # The turn is fully committed in memory and is suspended inside the store's save: a cancel
+    # arriving now came too late to roll anything back, so the turn must still report success
+    # (only the durable copy is behind, which the next save catches up).
+    await adapter.cancel(session_id=session.session_id)
+    response = await asyncio.wait_for(turn, timeout=5)
+
+    assert response.stop_reason == 'end_turn'
+    assert response.user_message_id == 'm1'
+    assert len(adapter._sessions[session.session_id].history) >= 2  # pyright: ignore[reportPrivateUsage]
+
+
 class _FailingStore:
     """A SessionStore whose operations always raise, standing in for a broken durable backend."""
 
