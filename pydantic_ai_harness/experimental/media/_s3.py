@@ -22,7 +22,7 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 from urllib.parse import quote
 
-from pydantic_ai_harness.media._store import (
+from pydantic_ai_harness.experimental.media._store import (
     _EMPTY_CONTEXT,  # pyright: ignore[reportPrivateUsage]
     KeyStrategy,
     MediaContext,

@@ -1,5 +1,25 @@
 # StepPersistence
 
+> [!WARNING]
+> **Experimental.** `StepPersistence` and the `media` stores live under
+> `pydantic_ai_harness.experimental` and may change or be removed in any release, without a
+> deprecation period. Import them from the experimental path -- there is no top-level export:
+>
+> ```python
+> from pydantic_ai_harness.experimental.step_persistence import StepPersistence
+> from pydantic_ai_harness.experimental.media import S3MediaStore
+> ```
+>
+> Importing either package emits a `HarnessExperimentalWarning`. Silence **all** harness
+> experimental warnings with a single filter (no per-capability lines needed):
+>
+> ```python
+> import warnings
+> from pydantic_ai_harness.experimental import HarnessExperimentalWarning
+>
+> warnings.filterwarnings('ignore', category=HarnessExperimentalWarning)
+> ```
+
 `StepPersistence` records what an agent did at each boundary, separate from
 whether the run can be safely resumed. It is the persistence substrate for
 orchestrators that delegate to sub-agents (e.g. an AICA orchestrator spawning
@@ -32,7 +52,7 @@ snapshots, and graph-node resume are out of scope and tracked separately
 
 ```python
 from pydantic_ai import Agent
-from pydantic_ai_harness import StepPersistence, InMemoryStepStore
+from pydantic_ai_harness.experimental.step_persistence import StepPersistence, InMemoryStepStore
 
 store = InMemoryStepStore()
 librarian = Agent(
@@ -108,7 +128,7 @@ context". `StepPersistence` does not introduce a parallel mechanism — it
 exposes one helper that loads the most recent provider-valid snapshot:
 
 ```python
-from pydantic_ai_harness import continue_run
+from pydantic_ai_harness.experimental.step_persistence import continue_run
 
 # Earlier: tag the first turn with a conversation id so the follow-up can find it.
 await librarian.run(
@@ -242,7 +262,7 @@ write external state should annotate their in-flight `ToolEffectRecord`
 via `annotate_tool_effect`:
 
 ```python
-from pydantic_ai_harness import annotate_tool_effect
+from pydantic_ai_harness.experimental.step_persistence import annotate_tool_effect
 
 @orchestrator.tool
 async def set_label(ctx: RunContext[Deps], issue: int, label: str) -> str:
@@ -310,8 +330,8 @@ original bytes.
 Override the destination by passing your own `MediaStore`:
 
 ```python
-from pydantic_ai_harness import FileStepStore
-from pydantic_ai_harness.media import S3MediaStore
+from pydantic_ai_harness.experimental.step_persistence import FileStepStore
+from pydantic_ai_harness.experimental.media import S3MediaStore
 
 store = FileStepStore(
     'runs',
@@ -359,7 +379,7 @@ without re-encoding bytes into the request body.
 Static base URL (public R2 bucket, CDN):
 
 ```python
-from pydantic_ai_harness.media import S3MediaStore, make_static_public_url
+from pydantic_ai_harness.experimental.media import S3MediaStore, make_static_public_url
 
 store = S3MediaStore(
     bucket='my-bucket',
@@ -375,7 +395,7 @@ Presigned / rotating-signature URL — pass any async callable that takes
 `(uri, MediaContext)`:
 
 ```python
-from pydantic_ai_harness.media import MediaContext, S3MediaStore
+from pydantic_ai_harness.experimental.media import MediaContext, S3MediaStore
 
 async def presign(uri: str, ctx: MediaContext) -> str:
     key = 'media/' + uri.removeprefix('media+sha256://') + '.bin'
@@ -420,7 +440,7 @@ primary key is the digest, so a user-chosen key would either break
 dedup or be a no-op):
 
 ```python
-from pydantic_ai_harness.media import DiskMediaStore, MediaContext
+from pydantic_ai_harness.experimental.media import DiskMediaStore, MediaContext
 
 def by_media_type(uri: str, ctx: MediaContext) -> str:
     digest = uri.removeprefix('media+sha256://')

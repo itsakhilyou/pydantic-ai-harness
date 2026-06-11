@@ -5,7 +5,7 @@ from __future__ import annotations
 from contextvars import ContextVar
 
 current_run_id: ContextVar[str | None] = ContextVar(
-    'pydantic_ai_harness.step_persistence.current_run_id',
+    'pydantic_ai_harness.experimental.step_persistence.current_run_id',
     default=None,
 )
 """Async-context-local pointer to the active `StepPersistence` `run_id`.
@@ -20,7 +20,7 @@ import.
 """
 
 snapshot_saved: ContextVar[bool] = ContextVar(
-    'pydantic_ai_harness.step_persistence.snapshot_saved',
+    'pydantic_ai_harness.experimental.step_persistence.snapshot_saved',
     default=False,
 )
 """Async-context-local flag: did `after_node_run` already save a snapshot this run?

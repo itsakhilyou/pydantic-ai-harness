@@ -14,14 +14,14 @@ import anyio.to_thread
 from pydantic import TypeAdapter
 from pydantic_ai.messages import ModelMessage, ModelMessagesTypeAdapter
 
-from pydantic_ai_harness.media import (
+from pydantic_ai_harness.experimental.media import (
     DiskMediaStore,
     MediaStore,
     SqliteMediaStore,
     externalize_media,
     restore_media,
 )
-from pydantic_ai_harness.step_persistence._types import (
+from pydantic_ai_harness.experimental.step_persistence._types import (
     ContinuableSnapshot,
     EventKind,
     RunRecord,

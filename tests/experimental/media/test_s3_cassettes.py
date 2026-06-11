@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import pytest
 
-from pydantic_ai_harness.media import MediaContext, S3MediaStore, media_uri_for
+from pydantic_ai_harness.experimental.media import MediaContext, S3MediaStore, media_uri_for
 
 pytestmark = pytest.mark.anyio
 

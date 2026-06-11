@@ -25,7 +25,8 @@ from pydantic_ai.messages import (
 )
 from pydantic_ai.models.test import TestModel
 
-from pydantic_ai_harness import (
+from pydantic_ai_harness.experimental.media import DiskMediaStore, SqliteMediaStore
+from pydantic_ai_harness.experimental.step_persistence import (
     ContinuableSnapshot,
     FileStepStore,
     RunRecord,
@@ -34,7 +35,6 @@ from pydantic_ai_harness import (
     StepPersistence,
     ToolEffectRecord,
 )
-from pydantic_ai_harness.media import DiskMediaStore, SqliteMediaStore
 
 pytestmark = pytest.mark.anyio
 

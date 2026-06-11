@@ -16,7 +16,7 @@ from __future__ import annotations
 import base64
 from typing import TypeGuard
 
-from pydantic_ai_harness.media._store import MediaContext, MediaStore
+from pydantic_ai_harness.experimental.media._store import MediaContext, MediaStore
 
 _EXTERNAL_MARKER = '__harness_external_media__'
 

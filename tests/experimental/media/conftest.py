@@ -194,7 +194,7 @@ def s3_store(s3_credentials: dict[str, str]) -> Any:
     The key prefix is part of the URL path that lands in the cassette, so
     keep it stable across re-records.
     """
-    from pydantic_ai_harness.media import S3MediaStore
+    from pydantic_ai_harness.experimental.media import S3MediaStore
 
     return S3MediaStore(
         bucket=s3_credentials['bucket'],

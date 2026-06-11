@@ -1,4 +1,4 @@
-"""Tests for `pydantic_ai_harness.media`: stores + walker + SigV4 + S3 store."""
+"""Tests for `pydantic_ai_harness.experimental.media`: stores + walker + SigV4 + S3 store."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 from httpx import AsyncClient, MockTransport, Request, Response
 
-from pydantic_ai_harness.media import (
+from pydantic_ai_harness.experimental.media import (
     DiskMediaStore,
     MediaContext,
     MediaStore,
@@ -22,7 +22,7 @@ from pydantic_ai_harness.media import (
     parse_media_uri,
     restore_media,
 )
-from pydantic_ai_harness.media._s3 import sign_request
+from pydantic_ai_harness.experimental.media._s3 import sign_request
 
 pytestmark = pytest.mark.anyio
 
@@ -387,7 +387,7 @@ class TestS3MediaStoreWithMockTransport:
         Otherwise the signed canonical path and the path S3 receives diverge ->
         SignatureDoesNotMatch. The wire `raw_path` must equal `_canonical_uri(path)`.
         """
-        from pydantic_ai_harness.media._s3 import _canonical_uri  # pyright: ignore[reportPrivateUsage]
+        from pydantic_ai_harness.experimental.media._s3 import _canonical_uri  # pyright: ignore[reportPrivateUsage]
 
         captured: list[Request] = []
 

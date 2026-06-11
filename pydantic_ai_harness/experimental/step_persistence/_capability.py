@@ -15,10 +15,10 @@ from pydantic_ai.models import ModelRequestContext
 from pydantic_ai.run import AgentRunResult
 from pydantic_ai.tools import AgentDepsT, RunContext, ToolDefinition
 
-from pydantic_ai_harness.step_persistence._context import current_run_id, snapshot_saved
-from pydantic_ai_harness.step_persistence._helpers import is_provider_valid
-from pydantic_ai_harness.step_persistence._store import InMemoryStepStore, StepStore
-from pydantic_ai_harness.step_persistence._types import (
+from pydantic_ai_harness.experimental.step_persistence._context import current_run_id, snapshot_saved
+from pydantic_ai_harness.experimental.step_persistence._helpers import is_provider_valid
+from pydantic_ai_harness.experimental.step_persistence._store import InMemoryStepStore, StepStore
+from pydantic_ai_harness.experimental.step_persistence._types import (
     ContinuableSnapshot,
     EventKind,
     RunRecord,
@@ -49,7 +49,7 @@ class StepPersistence(AbstractCapability[AgentDepsT]):
 
     ```python
     from pydantic_ai import Agent
-    from pydantic_ai_harness import StepPersistence, InMemoryStepStore
+    from pydantic_ai_harness.experimental.step_persistence import StepPersistence, InMemoryStepStore
 
     store = InMemoryStepStore()
     librarian = Agent(
@@ -124,12 +124,12 @@ class StepPersistence(AbstractCapability[AgentDepsT]):
         if backend == 'memory':
             return cls(store=InMemoryStepStore(), **kwargs)
         if backend == 'file':
-            from pydantic_ai_harness.step_persistence._store import FileStepStore
+            from pydantic_ai_harness.experimental.step_persistence._store import FileStepStore
 
             directory = kwargs.pop('directory', '.step-persistence')
             return cls(store=FileStepStore(directory), **kwargs)
         if backend == 'sqlite':
-            from pydantic_ai_harness.step_persistence._store import SqliteStepStore
+            from pydantic_ai_harness.experimental.step_persistence._store import SqliteStepStore
 
             database = kwargs.pop('database', '.step-persistence.db')
             return cls(store=SqliteStepStore(database=database), **kwargs)

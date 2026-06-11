@@ -30,7 +30,7 @@ from pydantic_ai.run import AgentRunResult
 from pydantic_ai.tools import ToolDefinition
 from pydantic_ai.usage import RunUsage
 
-from pydantic_ai_harness import (
+from pydantic_ai_harness.experimental.step_persistence import (
     ContinuableSnapshot,
     FileStepStore,
     InMemoryStepStore,
@@ -44,7 +44,7 @@ from pydantic_ai_harness import (
     fork_run,
     is_provider_valid,
 )
-from pydantic_ai_harness.step_persistence._store import _validate_id  # pyright: ignore[reportPrivateUsage]
+from pydantic_ai_harness.experimental.step_persistence._store import _validate_id  # pyright: ignore[reportPrivateUsage]
 
 pytestmark = pytest.mark.anyio
 
@@ -1169,7 +1169,7 @@ class TestListRunsChronologicalOrdering:
 class TestToolEffectMetadataPreservation:
     async def test_completed_preserves_idempotency_key_and_effect_summary(self) -> None:
         """Metadata written during the tool call survives the terminal `completed` record."""
-        from pydantic_ai_harness import annotate_tool_effect
+        from pydantic_ai_harness.experimental.step_persistence import annotate_tool_effect
 
         store = InMemoryStepStore()
         agent: Agent[None, str] = Agent(TestModel(), capabilities=[StepPersistence(store=store, run_id='r1')])
@@ -1194,7 +1194,7 @@ class TestToolEffectMetadataPreservation:
 
     async def test_failed_preserves_idempotency_key(self) -> None:
         """Metadata written before a tool raises still appears on the `failed` record."""
-        from pydantic_ai_harness import annotate_tool_effect
+        from pydantic_ai_harness.experimental.step_persistence import annotate_tool_effect
 
         store = InMemoryStepStore()
         agent: Agent[None, str] = Agent(TestModel(), capabilities=[StepPersistence(store=store, run_id='r1')])
@@ -1216,7 +1216,7 @@ class TestToolEffectMetadataPreservation:
 
     async def test_annotate_tool_effect_outside_step_persistence_is_a_noop(self) -> None:
         """No `current_run_id` → `annotate_tool_effect` returns without writing."""
-        from pydantic_ai_harness import annotate_tool_effect
+        from pydantic_ai_harness.experimental.step_persistence import annotate_tool_effect
 
         store = InMemoryStepStore()
         ctx = build_run_context(deps=None, run_id='r1')
@@ -1226,8 +1226,8 @@ class TestToolEffectMetadataPreservation:
 
     async def test_annotate_tool_effect_noop_when_prior_record_missing(self) -> None:
         """`current_run_id` set + ctx tool fields set, but no prior record → no-op."""
-        from pydantic_ai_harness import annotate_tool_effect
-        from pydantic_ai_harness.step_persistence._context import current_run_id
+        from pydantic_ai_harness.experimental.step_persistence import annotate_tool_effect
+        from pydantic_ai_harness.experimental.step_persistence._context import current_run_id
 
         store = InMemoryStepStore()
         ctx = RunContext[Any](

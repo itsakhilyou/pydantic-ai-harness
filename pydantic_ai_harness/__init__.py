@@ -7,63 +7,13 @@ if TYPE_CHECKING:
     from .filesystem import FileSystem
     from .logfire import ManagedPrompt
     from .shell import Shell
-    from .step_persistence import (
-        ContinuableSnapshot,
-        EventKind,
-        FileStepStore,
-        InMemoryStepStore,
-        RunRecord,
-        SqliteStepStore,
-        StepEvent,
-        StepPersistence,
-        StepStore,
-        ToolEffectRecord,
-        ToolEffectStatus,
-        annotate_tool_effect,
-        continue_run,
-        fork_run,
-        is_provider_valid,
-    )
 
 __all__ = [
     'CodeMode',
-    'ContinuableSnapshot',
-    'EventKind',
-    'FileStepStore',
     'FileSystem',
-    'InMemoryStepStore',
     'ManagedPrompt',
-    'RunRecord',
     'Shell',
-    'SqliteStepStore',
-    'StepEvent',
-    'StepPersistence',
-    'StepStore',
-    'ToolEffectRecord',
-    'ToolEffectStatus',
-    'annotate_tool_effect',
-    'continue_run',
-    'fork_run',
-    'is_provider_valid',
 ]
-
-_STEP_PERSISTENCE_NAMES = {
-    'ContinuableSnapshot',
-    'EventKind',
-    'FileStepStore',
-    'InMemoryStepStore',
-    'RunRecord',
-    'SqliteStepStore',
-    'StepEvent',
-    'StepPersistence',
-    'StepStore',
-    'ToolEffectRecord',
-    'ToolEffectStatus',
-    'annotate_tool_effect',
-    'continue_run',
-    'fork_run',
-    'is_provider_valid',
-}
 
 
 def __getattr__(name: str) -> object:
@@ -83,8 +33,4 @@ def __getattr__(name: str) -> object:
         from .shell import Shell
 
         return Shell
-    if name in _STEP_PERSISTENCE_NAMES:
-        from . import step_persistence
-
-        return getattr(step_persistence, name)
     raise AttributeError(f'module {__name__!r} has no attribute {name!r}')
