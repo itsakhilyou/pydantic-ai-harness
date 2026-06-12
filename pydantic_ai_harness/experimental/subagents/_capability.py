@@ -88,9 +88,21 @@ class SubAgents(AbstractCapability[AgentDepsT]):
     with no per-delegate controls (the `SubAgents` defaults). See `SubAgentLimits`
     for `usage_limits`, `timeout_seconds`, `max_calls`, and `on_failure`."""
 
-    _call_counts: dict[str, dict[str, int]] = field(default_factory=dict[str, 'dict[str, int]'], init=False, repr=False)
+    _call_counts: dict[str, dict[str, int]] = field(
+        default_factory=dict[str, 'dict[str, int]'], init=False, repr=False, compare=False
+    )
     """Run-scoped delegation counts (run_id -> name -> count), shared with the
     toolset and cleared per run in `wrap_run`. Backs `SubAgentLimits.max_calls`."""
+
+    def __post_init__(self) -> None:
+        # A limits entry for an unknown name would silently run unbudgeted, defeating
+        # the point of configuring a budget; fail fast on the likely typo instead.
+        unknown = set(self.limits) - set(self.agents)
+        if unknown:
+            raise ValueError(
+                f'`limits` names sub-agents not in `agents`: {", ".join(sorted(unknown))}. '
+                f'Available sub-agents: {", ".join(sorted(self.agents)) or "(none)"}.'
+            )
 
     async def wrap_run(self, ctx: RunContext[AgentDepsT], *, handler: WrapRunHandler) -> AgentRunResult[Any]:
         """Run the parent agent, then drop this run's delegation counts so they don't accumulate."""

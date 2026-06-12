@@ -536,3 +536,52 @@ class TestRunControls:
         )
         result = await parent.run('go')
         assert _delegate_returns(result) == ['W']
+
+    async def test_max_calls_counts_parallel_delegations_in_one_step(self) -> None:
+        runs = {'n': 0}
+
+        def worker_fn(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            runs['n'] += 1
+            return ModelResponse(parts=[TextPart('W')])
+
+        worker = Agent(FunctionModel(worker_fn), name='worker')
+
+        # Two delegations issued in a single parent model step run concurrently; the
+        # synchronous increment in _budget_exhausted must still cap them at max_calls=1.
+        step = {'n': 0}
+
+        def parent_fn(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            step['n'] += 1
+            if step['n'] == 1:
+                return ModelResponse(
+                    parts=[
+                        ToolCallPart('delegate_task', {'agent_name': 'worker', 'task': 't'}, tool_call_id='a'),
+                        ToolCallPart('delegate_task', {'agent_name': 'worker', 'task': 't'}, tool_call_id='b'),
+                    ]
+                )
+            return ModelResponse(parts=[TextPart('all done')])
+
+        parent: Agent[None, str] = Agent(
+            FunctionModel(parent_fn),
+            capabilities=[SubAgents(agents={'worker': worker}, limits={'worker': SubAgentLimits(max_calls=1)})],
+        )
+        result = await parent.run('go')
+        assert result.output == 'all done'
+        returns = _delegate_returns(result)
+        # Exactly one delegation ran the child; the other was over budget.
+        assert runs['n'] == 1
+        assert len(returns) == 2
+        assert 'W' in returns
+        assert any("Delegate budget for 'worker' is exhausted" in r for r in returns)
+
+
+class TestLimitsValidation:
+    def test_limits_key_not_in_agents_raises(self) -> None:
+        worker = Agent(TestModel(), name='worker')
+        with pytest.raises(ValueError, match='names sub-agents not in `agents`: ghost'):
+            SubAgents(agents={'worker': worker}, limits={'ghost': SubAgentLimits(max_calls=1)})
+
+    def test_limits_subset_of_agents_is_accepted(self) -> None:
+        worker = Agent(TestModel(), name='worker')
+        capability = SubAgents(agents={'worker': worker}, limits={'worker': SubAgentLimits(max_calls=1)})
+        assert 'worker' in capability.limits

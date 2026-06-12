@@ -71,6 +71,7 @@ print(result.output)
 from pydantic_ai.usage import UsageLimits
 from pydantic_ai_harness.experimental.subagents import SubAgentLimits, SubAgents
 
+# reproducer and librarian are Agent instances, as in the example above.
 orchestrator = Agent(
     'anthropic:claude-opus-4-7',
     capabilities=[
@@ -88,15 +89,15 @@ orchestrator = Agent(
 | Field | Effect |
 |---|---|
 | `usage_limits` | A request/token budget for one delegation. The child runs with its own usage accounting, so the budget counts only that child's requests and tokens (not the parent's or siblings'), even when `forward_usage=True`. The tradeoff: that child's tokens no longer aggregate into the parent's `usage`. Reaching the budget is a soft outcome (see below), not a run-stopping `UsageLimitExceeded`. |
-| `timeout_seconds` | A wall-clock budget for one delegation. When the child exceeds it, its run is cancelled and the parent gets a soft steering message instead of hanging on the child. |
-| `max_calls` | The maximum number of delegations to this sub-agent per parent run. Once reached, further delegations return a soft budget-exhausted message without running the child. Counts are scoped to one `Agent.run` and cleared when it ends. |
+| `timeout_seconds` | A wall-clock budget for one delegation. When the child exceeds it, its run is cancelled and the parent gets a soft steering message instead of hanging on the child. The cancelled child's `event_stream_handler` (if any) stops receiving events without a terminal event. |
+| `max_calls` | The maximum number of delegations to this sub-agent per parent run. Once reached, further delegations return a soft budget-exhausted message without running the child. Counts are scoped to one `Agent.run` (a `run_id`) and cleared when it ends, so each parent run and each level of a nested tree budgets independently. |
 | `on_failure` | A steering message returned to the parent for any soft degradation of this delegate, in place of the built-in default. Setting it also makes child failures soft (see below). |
 
 ## Failure handling
 
 A *soft outcome* returns a steering message to the parent as a normal tool result, so its model reads the message and decides what to do next (rather than immediately re-delegating, which a `ModelRetry` invites). A timeout, a reached `usage_limits` budget, and an exhausted `max_calls` budget are always soft. When `on_failure` is set, the message it carries replaces the built-in default for these outcomes.
 
-A sub-agent run that fails with a *soft model error* (`ModelRetry`, `UnexpectedModelBehavior`, e.g. it exhausted its own retries) is, by default, converted into a `ModelRetry` for the parent -- so the parent's model sees `Sub-agent '<name>' failed: …` and can react. Set `on_failure` for that delegate to make its failures soft instead: the child error returns the `on_failure` message as a normal tool result.
+A sub-agent run that fails with a *soft model error* (`ModelRetry`, `UnexpectedModelBehavior`, e.g. it exhausted its own retries) is, by default, converted into a `ModelRetry` for the parent -- so the parent's model sees `Sub-agent '<name>' failed: ...` and can react. Set `on_failure` for that delegate to make its failures soft instead: the child error returns the `on_failure` message as a normal tool result.
 
 Hard errors propagate to stop the whole run. A `UsageLimitExceeded` from a child that has *no* per-delegate `usage_limits` (so it shares the parent's accounting) means the whole tree is out of budget and propagates; a child reaching its *own* `usage_limits` is soft, as above.
 
