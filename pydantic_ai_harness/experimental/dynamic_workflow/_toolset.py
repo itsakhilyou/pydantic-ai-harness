@@ -30,10 +30,11 @@ try:
     from pydantic_monty import MontyRepl, MontyRuntimeError, MontySyntaxError, ResourceLimits
 except ImportError as _import_error:  # pragma: no cover
     raise ImportError(
-        'pydantic-monty is required for DynamicWorkflow. Install it with: pip install "pydantic-ai-harness[code-mode]"'
+        'pydantic-monty is required for DynamicWorkflow. '
+        'Install it with: pip install "pydantic-ai-harness[dynamic-workflow]"'
     ) from _import_error
 
-from pydantic_ai_harness._monty_exec import MontyExecutor, PrintCapture
+from pydantic_ai_harness._monty_exec import MontyExecutor, PrintCapture, is_sandbox_panic
 
 # Set while a workflow script is executing, so a sub-agent that itself tries to run a workflow can
 # be refused -- workflows do not nest. asyncio copies the context into each task `asyncio.gather`
@@ -508,12 +509,11 @@ class DynamicWorkflowToolset(AbstractToolset[AgentDepsT]):
                 }
             raise ModelRetry(f'Runtime error in workflow:\n{capture.prepend_to(e.display())}') from e
         except BaseException as e:
-            # pyo3 surfaces a Rust-side sandbox panic as `pyo3_runtime.PanicException` -- a
-            # BaseException (not Exception) subclass that is not importable, so match it by name. A
-            # panic is an internal VM abort the model can provoke (e.g. awaiting the same sub-agent
-            # call twice in one `asyncio.gather`); convert it to a retry instead of letting it tear
-            # down the whole agent run. Anything else (CancelledError, ...) re-raises unchanged.
-            if type(e).__name__ != 'PanicException':
+            # A panic is an internal VM abort the model can provoke (e.g. awaiting the same
+            # sub-agent call twice in one `asyncio.gather`); convert it to a retry instead of
+            # letting it tear down the whole agent run. Anything else (CancelledError, ...)
+            # re-raises unchanged.
+            if not is_sandbox_panic(e):
                 raise
             raise ModelRetry(
                 'The workflow script aborted inside the sandbox. This can happen when the same '

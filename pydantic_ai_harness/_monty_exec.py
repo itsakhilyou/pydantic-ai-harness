@@ -32,8 +32,8 @@ try:
     )
 except ImportError as _import_error:  # pragma: no cover
     raise ImportError(
-        'pydantic-monty is required for code-execution capabilities. '
-        'Install it with: pip install "pydantic-ai-harness[code-mode]"'
+        'pydantic-monty is required for code-execution capabilities. Install it with: '
+        'pip install "pydantic-ai-harness[code-mode]" or "pydantic-ai-harness[dynamic-workflow]"'
     ) from _import_error
 
 # Dispatch callback: given a (resolved) function name and keyword arguments,
@@ -44,6 +44,18 @@ MontyState = FunctionSnapshot | FutureSnapshot | NameLookupSnapshot | MontyCompl
 
 # A coroutine not yet scheduled on the event loop, or its running Task.
 PendingCall = asyncio.Task[Any] | Coroutine[Any, Any, Any]
+
+
+def is_sandbox_panic(exc: BaseException) -> bool:
+    """Whether `exc` is a Rust-side sandbox panic surfacing through pyo3.
+
+    pyo3 raises `pyo3_runtime.PanicException`, a `BaseException` (not `Exception`) subclass
+    from a module that cannot be imported, so it is matched by name. The model can provoke a
+    panic from inside the sandbox (e.g. awaiting the same external call twice in one
+    `asyncio.gather`), so callers should convert it to a retry rather than let it tear down
+    the whole agent run.
+    """
+    return type(exc).__name__ == 'PanicException'
 
 
 class PrintCapture:

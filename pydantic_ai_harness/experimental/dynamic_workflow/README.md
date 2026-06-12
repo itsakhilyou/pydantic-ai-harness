@@ -58,7 +58,7 @@ Copy-paste and run it (needs an Anthropic key and the `anthropic` package):
 
 ```bash
 export ANTHROPIC_API_KEY=sk-...
-uv run --with 'pydantic-ai-harness[code-mode]' --with anthropic --with logfire python wf.py
+uv run --with 'pydantic-ai-harness[dynamic-workflow]' --with anthropic --with logfire python wf.py
 ```
 
 ```python
@@ -153,7 +153,7 @@ tree's spend is tallied in one place. For a hard cap on sub-agent runs use `max_
 `DynamicWorkflow` runs scripts in the [Monty](https://github.com/pydantic/monty) sandbox:
 
 ```bash
-pip install "pydantic-ai-harness[code-mode]"
+pip install "pydantic-ai-harness[dynamic-workflow]"
 ```
 
 ## Sub-agent catalog

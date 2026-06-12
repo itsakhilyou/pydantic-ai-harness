@@ -50,6 +50,9 @@ logfire = [
     'logfire>=4.31.0',
     "pydantic-ai-slim[spec]>=1.105.0",
 ]
+dynamic-workflow = [
+    "pydantic-monty>=0.0.16",
+]
 
 [project.urls]
 Homepage = 'https://github.com/pydantic/pydantic-ai-harness'
