@@ -37,8 +37,10 @@ LLM_API_KEY_ENV_PATTERNS: tuple[str, ...] = (
 """Glob patterns for common LLM provider credentials, for `denied_env_patterns`.
 
 Pass these when an agent runs untrusted commands that must not read the host's
-LLM API keys. Not a default: stripping env silently would break agents that rely
-on inherited credentials, so opt in explicitly.
+LLM API keys. Covers provider prefixes only -- not other host secrets, and the
+prefixes are coarse (`GOOGLE_*` also strips `GOOGLE_APPLICATION_CREDENTIALS`),
+so treat it as a starting point. Not a default: stripping env silently would
+break agents that rely on inherited credentials, so opt in explicitly.
 """
 
 
@@ -90,8 +92,10 @@ class Shell(AbstractCapability[AgentDepsT]):
     denied_env_patterns: Sequence[str] = field(default_factory=list[str])
     """Glob patterns for environment variable names to strip before spawning.
 
-    Mirrors `denied_commands`: names matching any pattern (`fnmatch`, e.g.
-    `OPENAI_*`) are removed from the base environment. Applied on top of `env`
+    Follows the `denied_*` naming convention but matches by glob (`fnmatch`,
+    e.g. `OPENAI_*`), since env secrets cluster by prefix -- unlike
+    `denied_commands`, which matches executable names exactly. Names matching
+    any pattern are removed from the base environment; applied on top of `env`
     when both are set, so patterns filter an explicit `env` too. See
     `LLM_API_KEY_ENV_PATTERNS` for a ready-made provider-credential denylist.
     """

@@ -95,11 +95,22 @@ Shell(cwd='./repo', env={'PATH': os.environ['PATH'], 'HOME': os.environ['HOME']}
 
 `LLM_API_KEY_ENV_PATTERNS` covers common provider prefixes (`ANTHROPIC_*`,
 `OPENAI_*`, `OPENROUTER_*`, `GOOGLE_*`, `GEMINI_*`, `GATEWAY_*`) plus
-`PYDANTIC_AI_GATEWAY_API_KEY`. It is not the default: stripping environment
-variables silently would break agents that rely on inherited credentials, so it
-is opt-in. Unlike the best-effort command denylist, `env` is a real boundary --
-the subprocess is started with the environment you specify, not filtered after
-the fact.
+`PYDANTIC_AI_GATEWAY_API_KEY`. It targets LLM credentials only -- it does not
+cover other host secrets (a `LOGFIRE_TOKEN`, a GitHub token, cloud
+credentials), and its prefixes are coarse, so `GOOGLE_*` also strips
+non-credential vars like `GOOGLE_APPLICATION_CREDENTIALS`. Treat it as a
+starting point and add your own patterns. It is not the default: stripping
+environment variables silently would break agents that rely on inherited
+credentials, so it is opt-in.
+
+`env` is enforced at spawn, not applied as a post-hoc filter on a running
+process: the subprocess starts with exactly the resolved environment (your
+`env`, minus anything `denied_env_patterns` removes from it). That makes it a
+real boundary, unlike the best-effort command denylist. The flip side is that a
+pattern broad enough to strip `PATH` or `HOME`, or an `env` that omits them, can
+break command resolution. External commands may still run via the shell's
+built-in default `PATH` on some systems, but don't rely on it -- set `PATH`
+explicitly when you replace the environment.
 
 ## Background processes
 

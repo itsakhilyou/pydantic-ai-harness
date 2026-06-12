@@ -1532,6 +1532,19 @@ class TestEnvControlExecution:
         result = await ts.run_command(_read_env_var('HARNESS_INHERITED'))
         assert 'yes' in result
 
+    async def test_env_and_patterns_compose_at_spawn(self, shell_dir: Path) -> None:
+        # Both set: a pattern strips a key from the explicit env, the rest survives.
+        ts = _env_toolset(
+            shell_dir,
+            env={'SECRET_KEY': 'leak-me', 'KEEP_VAR': 'kept', 'PATH': os.environ['PATH']},
+            denied_env_patterns=['SECRET_*'],
+        )
+        stripped = await ts.run_command(_read_env_var('SECRET_KEY'))
+        assert 'ABSENT' in stripped
+        assert 'leak-me' not in stripped
+        survived = await ts.run_command(_read_env_var('KEEP_VAR'))
+        assert 'kept' in survived
+
     async def test_background_command_honors_env(self, shell_dir: Path) -> None:
         ts = _env_toolset(shell_dir, env={'BG_TOKEN': 'bg-present', 'PATH': os.environ['PATH']})
         start_result = await ts.start_command(_read_env_var('BG_TOKEN'))
