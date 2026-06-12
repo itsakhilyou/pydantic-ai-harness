@@ -24,7 +24,7 @@ from pydantic_ai.tools import AgentDepsT
 from pydantic_ai.toolsets.abstract import SchemaValidatorProt, ToolsetTool
 from pydantic_ai.usage import UsageLimits
 from pydantic_core import to_jsonable_python
-from typing_extensions import TypedDict
+from typing_extensions import Self, TypedDict
 
 try:
     from pydantic_monty import MontyRepl, MontyRuntimeError, MontySyntaxError, ResourceLimits
@@ -317,7 +317,7 @@ class DynamicWorkflowToolset(AbstractToolset[AgentDepsT]):
     def id(self) -> str | None:
         return self.toolset_id or self.tool_name
 
-    async def for_run(self, ctx: RunContext[AgentDepsT]) -> AbstractToolset[AgentDepsT]:
+    async def for_run(self, ctx: RunContext[AgentDepsT]) -> Self:
         """Fresh instance per run so the sub-agent-call budget is per-run.
 
         `dataclasses.replace` would re-run `__post_init__`, whose strict validation raises on an
@@ -473,10 +473,8 @@ class DynamicWorkflowToolset(AbstractToolset[AgentDepsT]):
                 }
             raise ModelRetry(f'Runtime error in workflow:\n{capture.prepend_to(e.display())}') from e
         except BaseException as e:
-            # A panic is an internal VM abort the model can provoke (e.g. awaiting the same
-            # sub-agent call twice in one `asyncio.gather`); convert it to a retry instead of
-            # letting it tear down the whole agent run. Anything else (CancelledError, ...)
-            # re-raises unchanged.
+            # Convert a model-provokable sandbox panic to a retry (see `is_sandbox_panic`);
+            # anything else (CancelledError, ...) re-raises unchanged.
             if not is_sandbox_panic(e):
                 raise
             raise ModelRetry(

@@ -120,7 +120,7 @@ class DynamicWorkflow(AbstractCapability[AgentDepsT]):
         # Not spec-serializable: `agents` holds live Agent objects, not YAML-expressible config.
         return None
 
-    def get_toolset(self) -> DynamicWorkflowToolset[AgentDepsT] | None:
+    def get_toolset(self) -> DynamicWorkflowToolset[AgentDepsT]:
         """Provide the orchestration toolset to the agent."""
         return DynamicWorkflowToolset(
             agents=self.agents,

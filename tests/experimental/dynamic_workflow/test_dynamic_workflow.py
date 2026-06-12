@@ -114,7 +114,6 @@ def test_capability_provides_toolset_with_propagated_config() -> None:
         id='wf',
     )
     toolset = cap.get_toolset()
-    assert isinstance(toolset, DynamicWorkflowToolset)
     assert toolset.agents == [reviewer]
     assert toolset.tool_name == 'orchestrate'
     assert toolset.max_agent_calls == 7
@@ -442,8 +441,7 @@ async def test_sub_agent_does_not_see_parent_messages() -> None:
         messages=[ModelRequest(parts=[UserPromptPart('PARENT_PROMPT_MARKER')])],
         run_step=1,
     )
-    tools = await ts.get_tools(ctx)
-    await ts.call_tool(ts.tool_name, {'code': "await sub(task='the task only')"}, ctx, tools[ts.tool_name])
+    await _run_script(ts, "await sub(task='the task only')", ctx)
     assert seen_texts == ['the task only']  # only the task; no parent conversation leaked
 
 
@@ -687,7 +685,6 @@ async def test_for_run_resets_budget() -> None:
     await _run_script(ts, "await sub(task='x')")
     assert ts._call_count == 1  # pyright: ignore[reportPrivateUsage]
     fresh = await ts.for_run(_ctx())
-    assert isinstance(fresh, DynamicWorkflowToolset)
     assert fresh._call_count == 0  # pyright: ignore[reportPrivateUsage]
 
 
@@ -704,7 +701,6 @@ async def test_for_run_tolerates_bad_append_from_earlier_run() -> None:
 
     with pytest.warns(UserWarning, match='has no `name`'):
         fresh = await ts.for_run(_ctx())
-    assert isinstance(fresh, DynamicWorkflowToolset)
     assert set(fresh._by_name) == {'base'}  # pyright: ignore[reportPrivateUsage]
     assert fresh._call_count == 0  # pyright: ignore[reportPrivateUsage]
     # The skipped entry was pre-seeded as warned, so resolving tools in the new run does not
@@ -719,7 +715,6 @@ async def test_for_run_tolerates_duplicate_append_from_earlier_run() -> None:
     agents.append(_wf_agent('shadow', 'base'))
     with pytest.warns(UserWarning, match='must be unique'):
         fresh = await ts.for_run(_ctx())
-    assert isinstance(fresh, DynamicWorkflowToolset)
     assert await _run_script(fresh, "await base(task='x')", _ctx_with_queue()) == 'b'
 
 

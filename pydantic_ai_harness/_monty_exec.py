@@ -16,7 +16,7 @@ restricted event loops such as Temporal's workflow sandbox.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable, Container, Coroutine, Mapping
+from collections.abc import Callable, Container, Coroutine
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -36,7 +36,7 @@ except ImportError as _import_error:  # pragma: no cover
         'pip install "pydantic-ai-harness[code-mode]" or "pydantic-ai-harness[dynamic-workflow]"'
     ) from _import_error
 
-# Dispatch callback: given a (resolved) function name and keyword arguments,
+# Dispatch callback: given the sandbox function name and keyword arguments,
 # perform the host-side work (tool call or sub-agent run) and return the result.
 DispatchFn = Callable[[str, dict[str, Any]], Coroutine[Any, Any, Any]]
 
@@ -98,7 +98,6 @@ class MontyExecutor:
 
     dispatch: DispatchFn
     valid_names: Container[str]
-    sanitized_to_original: Mapping[str, str] = field(default_factory=dict[str, str])
     sequential_names: set[str] = field(default_factory=set[str])
     global_sequential: bool = False
 
@@ -144,8 +143,6 @@ class MontyExecutor:
                 {'exception': TypeError(f'{name}() does not accept positional arguments; use keyword arguments')}
             )
 
-        original_name = self.sanitized_to_original.get(name, name)
-
         if name in self.sequential_names:
             # Rendered as `def` (sync), so the sandbox code doesn't `await` the result --
             # resolve inline. Await pending parallel tasks first (barrier) for ordering.
@@ -156,10 +153,10 @@ class MontyExecutor:
                 self._pre_resolved[cid] = await _await_external(self._pending.pop(cid))
             # The wrapped outcome (`{'return_value': ...}` / `{'exception': ...}`) is already
             # exactly the payload `resume` expects.
-            return snapshot.resume(await _await_external(self.dispatch(original_name, snapshot.kwargs)))
+            return snapshot.resume(await _await_external(self.dispatch(name, snapshot.kwargs)))
 
         # Deferred execution -- resolved later at FutureSnapshot.
-        call = self.dispatch(original_name, snapshot.kwargs)
+        call = self.dispatch(name, snapshot.kwargs)
         if self.global_sequential:
             # Keep the bare coroutine unscheduled; it's awaited one-at-a-time to avoid interleaving.
             self._pending[snapshot.call_id] = call
@@ -171,9 +168,6 @@ class MontyExecutor:
     async def _resolve_futures(self, snapshot: FutureSnapshot) -> MontyState:
         """Resolve the deferred calls a `FutureSnapshot` is waiting on."""
         pending_ids = snapshot.pending_call_ids
-        if not pending_ids:  # pragma: no cover
-            return snapshot.resume(results={})
-
         results: dict[int, ExternalResult] = {}
         for cid in pending_ids:
             if cid in self._pre_resolved:

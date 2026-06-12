@@ -27,11 +27,11 @@ from pydantic_core import SchemaValidator, core_schema
 from typing_extensions import TypedDict
 
 from pydantic_ai_harness import CodeMode
+from pydantic_ai_harness._monty_exec import PrintCapture
 from pydantic_ai_harness.code_mode import CodeModeToolset
 from pydantic_ai_harness.code_mode._toolset import (  # pyright: ignore[reportPrivateUsage]
     _SEARCH_TOOLS_MODIFIER,
     _TOOL_SEARCH_ADDENDUM,
-    _PrintCapture,
     _sanitize_tool_name,
 )
 
@@ -1726,13 +1726,13 @@ class TestCodeMode:
     # ---------------------------------------------------------------------------
 
     def test_print_capture_concatenates_chunks_in_order(self) -> None:
-        """`_PrintCapture` accumulates print-callback chunks and joins them on read.
+        """`PrintCapture` accumulates print-callback chunks and joins them on read.
 
         Lives in the production module rather than as a closure inside `call_tool` so
         coverage.py sees it execute even when Monty's Rust-side worker thread bypasses
         the per-thread tracer hooks. This unit test exercises it directly.
         """
-        capture = _PrintCapture()
+        capture = PrintCapture()
         assert capture.joined == ''
         capture('stdout', 'hello')
         capture('stdout', ' ')

@@ -36,9 +36,7 @@ except ImportError as _import_error:  # pragma: no cover
     ) from _import_error
 from typing_extensions import NotRequired, TypedDict
 
-from pydantic_ai_harness._monty_exec import MontyExecutor as _MontyExecutor
-from pydantic_ai_harness._monty_exec import PrintCapture as _PrintCapture
-from pydantic_ai_harness._monty_exec import is_sandbox_panic as _is_sandbox_panic
+from pydantic_ai_harness._monty_exec import MontyExecutor, PrintCapture, is_sandbox_panic
 
 
 class _RunCodeArguments(TypedDict):
@@ -316,7 +314,7 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
         nested_returns: dict[str, ToolReturnPart] = {}
         call_counter = 0
 
-        async def dispatch_tool_call(original_name: str, kwargs: dict[str, Any]) -> Any:
+        async def dispatch_tool_call(name: str, kwargs: dict[str, Any]) -> Any:
             """Dispatch a single tool call from inside the sandbox.
 
             Returns the serialized tool result on success. On failure, the
@@ -325,6 +323,7 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
             `await` site.
             """
             nonlocal call_counter
+            original_name = sanitized_to_original.get(name, name)
             call_counter += 1
             parent_id = ctx.tool_call_id or 'pyd_ai_code_mode'
             tool_call_id = f'{parent_id}__{call_counter}'
@@ -388,14 +387,13 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
             self._repl = MontyRepl()
         assert self._repl is not None
 
-        capture = _PrintCapture()
+        capture = PrintCapture()
 
         try:
             monty_state = self._repl.feed_start(code, print_callback=capture)
-            completed = await _MontyExecutor(
+            completed = await MontyExecutor(
                 dispatch=dispatch_tool_call,
                 valid_names=callable_defs,
-                sanitized_to_original=sanitized_to_original,
                 sequential_names=sequential_tools,
                 global_sequential=global_sequential,
             ).run(monty_state)
@@ -415,11 +413,9 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
             # semantics are the same -- the model gets another chance.
             raise ModelRetry(f'Runtime error:\n{capture.prepend_to(e.display())}') from e
         except BaseException as e:
-            # A panic is an internal VM abort the model can provoke (e.g. awaiting the same
-            # tool call twice in one `asyncio.gather`); convert it to a retry instead of
-            # letting it tear down the whole agent run. Anything else (CancelledError, ...)
-            # re-raises unchanged.
-            if not _is_sandbox_panic(e):
+            # Convert a model-provokable sandbox panic to a retry (see `is_sandbox_panic`);
+            # anything else (CancelledError, ...) re-raises unchanged.
+            if not is_sandbox_panic(e):
                 raise
             # The panic aborts the VM mid-execution, so the REPL's accumulated state cannot
             # be trusted; drop it so the retry starts from a fresh, type-checked session.
