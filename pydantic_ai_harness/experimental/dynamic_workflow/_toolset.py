@@ -451,9 +451,10 @@ class DynamicWorkflowToolset(AbstractToolset[AgentDepsT]):
         try:
             repl = MontyRepl(limits=limits)
             monty_state = repl.feed_start(code, print_callback=capture)
-            # `_by_name` is not mutated during a run (reveals land in `get_tools`), so it is a
-            # stable name registry for the whole script. Sub-agents always run concurrently (the
-            # executor's defaults); durable ordering (global_sequential) lands with durability.
+            # `_by_name` is not mutated while a script executes (reveals land in `get_tools`,
+            # which does not interleave with `call_tool`), so it is a stable name registry for
+            # the whole script. Sub-agents always run concurrently (the executor's defaults);
+            # durable ordering (global_sequential) lands with durability.
             completed = await MontyExecutor(dispatch=dispatch, valid_names=self._by_name).run(monty_state)
         except MontySyntaxError as e:
             raise ModelRetry(f'Syntax error in workflow:\n{capture.prepend_to(e.display())}') from e

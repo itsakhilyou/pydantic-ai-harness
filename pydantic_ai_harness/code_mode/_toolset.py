@@ -314,7 +314,7 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
         nested_returns: dict[str, ToolReturnPart] = {}
         call_counter = 0
 
-        async def dispatch_tool_call(name: str, kwargs: dict[str, Any]) -> Any:
+        async def dispatch_tool_call(sandbox_name: str, kwargs: dict[str, Any]) -> Any:
             """Dispatch a single tool call from inside the sandbox.
 
             Returns the serialized tool result on success. On failure, the
@@ -323,7 +323,7 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
             `await` site.
             """
             nonlocal call_counter
-            original_name = sanitized_to_original.get(name, name)
+            original_name = sanitized_to_original.get(sandbox_name, sandbox_name)
             call_counter += 1
             parent_id = ctx.tool_call_id or 'pyd_ai_code_mode'
             tool_call_id = f'{parent_id}__{call_counter}'
