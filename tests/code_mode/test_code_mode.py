@@ -1815,10 +1815,6 @@ class TestToolSearchIntegration:
         base = FunctionToolset[None](tools=[Tool(add), Tool(later, defer_loading=True)])
         code_mode = CodeModeToolset(wrapped=ToolSearchToolset(wrapped=base), tool_selector='all')
 
-        # The discovery lives in history as a `ToolSearchReturnPart`. The agent run loop derives
-        # `RunContext.discovered_tool_names` from that history (via `parse_discovered_tools`) before
-        # toolsets run, and `ToolSearchToolset.get_tools` reads the field — so the context must be
-        # built the same way here, not with the field left empty.
         messages: list[ModelMessage] = [
             ModelRequest(
                 parts=[
@@ -1835,6 +1831,8 @@ class TestToolSearchIntegration:
             usage=RunUsage(),
             prompt=None,
             messages=messages,
+            # The agent graph reconstructs `discovered_tool_names` from history each step;
+            # mirror that here since the test drives `get_tools` without a real run.
             discovered_tool_names=parse_discovered_tools(messages),
             run_step=1,
         )
