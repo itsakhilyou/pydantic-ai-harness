@@ -41,7 +41,7 @@ class SessionStore(Protocol):
     Failure handling: a `save` that raises is logged and swallowed, never failing the turn or
     session operation that triggered it -- that work already streamed and committed in memory, so a
     durable-write error must not surface as a failure for what the user saw succeed; the next
-    successful save catches the store up. A `load` that raises (a read error or a corrupt, unparseable
+    successful save catches the store up. A `load` that raises (a read error or a corrupt, unparsable
     payload) fails `session/load` with an `internal_error`, since a session that cannot be read cannot
     be reopened. Implementations therefore do not need to translate their own errors into ACP errors.
     """
