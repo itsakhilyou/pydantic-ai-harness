@@ -28,6 +28,7 @@ classifiers = [
     'Typing :: Typed',
 ]
 dependencies = [
+    "httpx>=0.28.1",
     'pydantic-ai-slim>=1.95.1',
 ]
 
@@ -74,6 +75,7 @@ dev = [
     'inline-snapshot>=0.32.5',
     'pydantic-ai-slim[spec]>=1.95.1',
     "pytest-examples>=0.0.18",
+    "pytest-recording>=0.13.4",
 ]
 lint = [
     'ruff>=0.14',
@@ -134,6 +136,8 @@ filterwarnings = [
     'error',
     # DBOS's run_sync triggers this on Python 3.12+ — not our code.
     'ignore:There is no current event loop:DeprecationWarning',
+    # Experimental capabilities warn on import by design; assert it explicitly where it matters.
+    'ignore::pydantic_ai_harness.experimental.HarnessExperimentalWarning',
 ]
 anyio_mode = 'auto'
 
