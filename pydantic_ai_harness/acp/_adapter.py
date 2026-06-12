@@ -49,7 +49,7 @@ from pydantic_ai.usage import RunUsage
 
 from ._content import PromptContentBlock, prompt_blocks_to_user_content
 from ._permission import PermissionPolicy, ToolCallPermission, default_permission_scope
-from ._present import ToolCallContent, ToolCallPresenter, absolutize, default_coding_presenter
+from ._present import ToolCallContent, ToolCallPresentation, ToolCallPresenter, absolutize, default_coding_presenter
 from ._serialize import bounded_jsonable, chunk_text, jsonable
 from ._session import AcpSession, AcpSessionConfig, McpServers, SessionConfigFunc, SessionState, SessionUpdate
 from ._store import SessionStore, StoredSession
@@ -440,14 +440,14 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
                     {'session_id': session_id, 'reason': 'session was closed while the prompt was queued'}
                 )
             state.cancel_requested = False
-            turn = asyncio.ensure_future(self._run_turn(state, prompt, user_content))
+            turn = asyncio.ensure_future(self._run_turn(state, prompt, user_content, message_id))
             state.active_turn = turn
             try:
                 # Shielded so this coroutine's *own* cancellation (connection teardown) surfaces
                 # here instead of propagating into the turn: with a bare `await turn` the two are
                 # indistinguishable, and answering a request whose handler the connection already
                 # cancelled would deadlock its shutdown (the response future is never resolved).
-                usage, stop_reason, committed = await asyncio.shield(turn)
+                return await asyncio.shield(turn)
             except _TurnCancelled:
                 # Rolled back: omit `user_message_id`, which would signal the message was persisted.
                 return schema.PromptResponse(stop_reason='cancelled')
@@ -467,12 +467,6 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
             finally:
                 state.active_turn = None
                 state.cancel_requested = False
-        if not committed:
-            # The turn ended at a usage limit before committing anything: like a cancelled turn,
-            # the response must not claim the user message was persisted, and there is no
-            # committed usage to report.
-            return schema.PromptResponse(stop_reason=stop_reason)
-        return schema.PromptResponse(stop_reason=stop_reason, user_message_id=message_id, usage=_to_acp_usage(usage))
 
     async def cancel(self, session_id: str, **kwargs: object) -> None:
         """Cancel the in-flight turn for a session, if any."""
@@ -519,13 +513,15 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
         state: SessionState[AgentDepsT],
         prompt: list[PromptContentBlock],
         user_content: list[UserContent],
-    ) -> tuple[RunUsage, schema.StopReason, bool]:
-        """Drive the agent (resuming across tool-approval pauses) and stream updates.
+        message_id: str | None,
+    ) -> schema.PromptResponse:
+        """Drive the agent (resuming across tool-approval pauses), stream updates, and build the response.
 
-        Returns the turn's total token usage (summed across every run pass, one per approval
-        pause), the ACP stop reason mapped from the final model response, and whether the turn
-        committed -- `False` only when a usage limit ended the turn, which rolls back like a
-        cancellation but still answers with its `max_tokens`/`max_turn_requests` stop reason.
+        The response carries the ACP stop reason mapped from the final model response, plus the
+        committed signals: `user_message_id` echoing `message_id`, and the turn's total token
+        usage (summed across every run pass, one per approval pause). A turn ended by a usage
+        limit rolls back like a cancellation, so its response omits both while still answering
+        with the limit's `max_tokens`/`max_turn_requests` stop reason.
         """
         conn = self._conn
         assert conn is not None
@@ -539,12 +535,11 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
         turn = _TurnState(
             conn=conn, session_id=state.session_id, cwd=state.cwd, approval_names=self._approval_tool_names(config)
         )
-        if self._session_store is not None:
-            # Recorded for replay only, never sent live: the client renders its own prompt during
-            # the turn, but `session/load` must rebuild the user side of the conversation too.
-            # Going through `turn.updates` keeps the cancel semantics: a rolled-back turn does not
-            # persist its user message either (matching the omitted `user_message_id`).
-            turn.updates.extend(acp.update_user_message(block) for block in prompt)
+        # Recorded for replay only, never sent live: the client renders its own prompt during
+        # the turn, but `session/load` must rebuild the user side of the conversation too.
+        # Going through `turn.updates` keeps the cancel semantics: a rolled-back turn does not
+        # persist its user message either (matching the omitted `user_message_id`).
+        turn.updates.extend(acp.update_user_message(block) for block in prompt)
 
         try:
             while True:
@@ -594,9 +589,10 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
         except UsageLimitExceeded as exc:
             # ACP models a turn ending at a limit as a normal stop reason, not a request error.
             # The raising run's partial messages are not retrievable, so nothing is committed --
-            # the turn rolls back to the prior state, like a cancellation.
+            # the turn rolls back to the prior state, like a cancellation, and the response must
+            # not claim the user message was persisted nor report uncommitted usage.
             await self._fail_outstanding_tool_calls(turn)
-            return usage, _usage_limit_stop_reason(exc), False
+            return schema.PromptResponse(stop_reason=_usage_limit_stop_reason(exc))
         except Exception:
             # The turn is failing with the error the client receives as the prompt's response;
             # close out its announced tool calls so they are not left rendering as running.
@@ -620,7 +616,7 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
                     'persisting ACP session %s was cancelled; durable state is now behind', state.session_id
                 )
                 stop_reason = 'cancelled'
-        return usage, stop_reason, True
+        return schema.PromptResponse(stop_reason=stop_reason, user_message_id=message_id, usage=_to_acp_usage(usage))
 
     async def _fail_outstanding_tool_calls(self, turn: _TurnState) -> None:
         """Drive every announced-but-unfinished tool call to a terminal `failed` status.
@@ -637,9 +633,8 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
                 )
 
     async def _send_update(self, turn: _TurnState, update: SessionUpdate) -> None:
-        """Send one `session/update` to the client, recording it for the transcript when persisting."""
-        if self._session_store is not None:
-            turn.updates.append(update)
+        """Send one `session/update` to the client, recording it for the transcript."""
+        turn.updates.append(update)
         await turn.conn.session_update(session_id=turn.session_id, update=update)
 
     async def _emit_text(self, turn: _TurnState, text: str, *, thought: bool) -> None:
@@ -657,12 +652,12 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
         offers no `kind`.
         """
         presentation = self._tool_presenter(call)
-        presentation = absolutize(presentation, cwd) if presentation is not None else None
+        presentation = absolutize(presentation, cwd) if presentation is not None else ToolCallPresentation()
         return _ToolCallFields(
-            title=presentation.title if presentation and presentation.title else call.tool_name,
-            kind=presentation.kind if presentation and presentation.kind else default_kind,
-            content=list(presentation.content) if presentation and presentation.content else None,
-            locations=list(presentation.locations) if presentation and presentation.locations else None,
+            title=presentation.title or call.tool_name,
+            kind=presentation.kind or default_kind,
+            content=list(presentation.content) or None,
+            locations=list(presentation.locations) or None,
         )
 
     async def _emit_event(self, turn: _TurnState, event: AgentStreamEvent) -> None:

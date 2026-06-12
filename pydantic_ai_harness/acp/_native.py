@@ -129,9 +129,7 @@ def acp_filesystem(session: AcpSession) -> AcpFileSystemToolset[None] | None:
     fs = capabilities.fs if capabilities is not None else None
     if fs is None or not fs.read_text_file:
         return None
-    if fs.write_text_file:
-        return AcpFileSystemToolset[None](client=session.client, session_id=session.session_id, cwd=session.cwd)
-    local_writer = FileSystem(root_dir=session.cwd).get_toolset()
+    local_writer = None if fs.write_text_file else FileSystem(root_dir=session.cwd).get_toolset()
     return AcpFileSystemToolset[None](
         client=session.client, session_id=session.session_id, cwd=session.cwd, local_writer=local_writer
     )

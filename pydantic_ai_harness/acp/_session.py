@@ -11,7 +11,6 @@ from acp import Client, schema
 from pydantic_ai.messages import ModelMessage
 from pydantic_ai.tools import AgentDepsT
 from pydantic_ai.toolsets import AbstractToolset
-from pydantic_ai.usage import RunUsage
 
 # A single MCP server configuration, in any of the transports ACP carries.
 McpServer: TypeAlias = schema.HttpMcpServer | schema.SseMcpServer | schema.McpServerStdio
@@ -103,7 +102,7 @@ class SessionState(Generic[AgentDepsT]):
     # agent's own model. Applied as a per-run override so the shared agent is never mutated.
     model: str | None = None
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
-    active_turn: asyncio.Task[tuple[RunUsage, schema.StopReason, bool]] | None = None
+    active_turn: asyncio.Task[schema.PromptResponse] | None = None
     cancel_requested: bool = False
     always_allow: set[Hashable] = field(default_factory=set[Hashable])
     always_reject: set[Hashable] = field(default_factory=set[Hashable])
