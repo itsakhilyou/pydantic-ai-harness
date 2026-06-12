@@ -38,6 +38,7 @@ from typing_extensions import NotRequired, TypedDict
 
 from pydantic_ai_harness._monty_exec import MontyExecutor as _MontyExecutor
 from pydantic_ai_harness._monty_exec import PrintCapture as _PrintCapture
+from pydantic_ai_harness._monty_exec import is_sandbox_panic as _is_sandbox_panic
 
 
 class _RunCodeArguments(TypedDict):
@@ -413,6 +414,21 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
             # (ModelRetry → MontyRuntimeError → ModelRetry), but the retry
             # semantics are the same -- the model gets another chance.
             raise ModelRetry(f'Runtime error:\n{capture.prepend_to(e.display())}') from e
+        except BaseException as e:
+            # A panic is an internal VM abort the model can provoke (e.g. awaiting the same
+            # tool call twice in one `asyncio.gather`); convert it to a retry instead of
+            # letting it tear down the whole agent run. Anything else (CancelledError, ...)
+            # re-raises unchanged.
+            if not _is_sandbox_panic(e):
+                raise
+            # The panic aborts the VM mid-execution, so the REPL's accumulated state cannot
+            # be trusted; drop it so the retry starts from a fresh, type-checked session.
+            self._repl = None
+            raise ModelRetry(
+                'The code aborted inside the sandbox and the session was reset. This can happen '
+                'when the same tool call is awaited more than once in one asyncio.gather -- give '
+                'each gathered call its own invocation. Revise the code and try again.'
+            ) from e
 
         result = completed.output
         printed = capture.joined

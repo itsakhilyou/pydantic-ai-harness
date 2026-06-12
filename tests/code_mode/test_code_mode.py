@@ -1452,6 +1452,34 @@ class TestCodeMode:
         assert 'debug info' in msg
         assert '[stdout before error]' in msg
 
+    async def test_duplicate_future_in_gather_is_retryable(self) -> None:
+        # Awaiting the same tool call twice in one gather makes the Monty VM panic; that panic
+        # must surface as a retry (with the corrupt REPL dropped), not tear down the agent run.
+        wrapper = CodeMode[None]().get_wrapper_toolset(_build_function_toolset(add))
+        assert isinstance(wrapper, CodeModeToolset)
+        ctx = await build_ctx(None, wrapper)
+        tools = await wrapper.get_tools(ctx)
+        code = 'import asyncio\nf = add(a=1, b=2)\nawait asyncio.gather(f, f)'
+        with pytest.raises(ModelRetry, match='aborted inside the sandbox'):
+            await wrapper.call_tool('run_code', {'code': code}, ctx, tools['run_code'])
+        assert wrapper._repl is None  # pyright: ignore[reportPrivateUsage]
+
+    async def test_non_panic_base_exception_propagates(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # The panic guard catches BaseException but must re-raise anything that is not a VM panic.
+        class _Boom(BaseException):
+            pass
+
+        async def _boom(self: Any, state: Any) -> Any:
+            raise _Boom('boom')
+
+        monkeypatch.setattr('pydantic_ai_harness._monty_exec.MontyExecutor.run', _boom)
+        wrapper = CodeMode[None]().get_wrapper_toolset(_build_function_toolset(add))
+        assert isinstance(wrapper, CodeModeToolset)
+        ctx = await build_ctx(None, wrapper)
+        tools = await wrapper.get_tools(ctx)
+        with pytest.raises(_Boom):
+            await wrapper.call_tool('run_code', {'code': 'await add(a=1, b=2)'}, ctx, tools['run_code'])
+
     # ---------------------------------------------------------------------------
     # Sequential tool resolution
     # ---------------------------------------------------------------------------
