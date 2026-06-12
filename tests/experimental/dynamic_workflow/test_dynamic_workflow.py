@@ -158,7 +158,7 @@ def test_invalid_identifier_name_raises() -> None:
 
 
 def test_keyword_name_raises() -> None:
-    # `'class'.isidentifier()` is True, but a Python keyword can't be a sandbox function name —
+    # `'class'.isidentifier()` is True, but a Python keyword can't be a sandbox function name --
     # the model could never call it (`await class(...)` is a syntax error). Reject it up front.
     with pytest.raises(UserError, match='cannot be exposed as a sandbox function'):
         DynamicWorkflowToolset[None](agents=[WorkflowAgent(agent=_sub_agent(), name='class')])
@@ -350,8 +350,8 @@ async def test_nested_workflow_is_refused(make_agent: MakeAgent) -> None:
 
 async def test_nested_workflow_refused_end_to_end() -> None:
     # The real claim behind the contextvar: a sub-agent that itself carries a DynamicWorkflow
-    # capability — dispatched through the executor's `ensure_future` (the same context-copy
-    # path `asyncio.gather` uses) — is refused when it tries to run its own workflow.
+    # capability -- dispatched through the executor's `ensure_future` (the same context-copy
+    # path `asyncio.gather` uses) -- is refused when it tries to run its own workflow.
     leaf = _sub_agent('leaf-done', 'leaf')
     inner_retries: list[str] = []
 
@@ -388,7 +388,7 @@ async def test_missing_task_kwarg(make_agent: MakeAgent) -> None:
 
 
 async def test_extra_kwargs_rejected(make_agent: MakeAgent) -> None:
-    # An extra kwarg must not be silently dropped — the model needs to know it was ignored.
+    # An extra kwarg must not be silently dropped -- the model needs to know it was ignored.
     ts = DynamicWorkflowToolset[None](agents=[make_agent()])
     with pytest.raises(ModelRetry, match='unexpected keyword argument'):
         await _run_script(ts, "await sub(task='x', foo='y')")
@@ -485,7 +485,7 @@ async def test_sub_agent_usage_limits_enforced() -> None:
         return 'used'
 
     # A tool-using TestModel agent needs two model requests (call the tool, then answer), so a
-    # request_limit of 1 must trip the second — proving the limit reaches the sub-agent run.
+    # request_limit of 1 must trip the second -- proving the limit reaches the sub-agent run.
     ts = DynamicWorkflowToolset[None](
         agents=[WorkflowAgent(agent=sub)],
         forward_usage=False,
@@ -610,7 +610,7 @@ async def test_host_errors_cannot_be_caught_in_sandbox() -> None:
 
 async def test_cancellation_awaits_inflight_sub_agents() -> None:
     # Cancelling the workflow tool call must not return until in-flight sub-agent runs have
-    # fully unwound — `task.cancel()` only schedules the CancelledError; the executor awaits
+    # fully unwound -- `task.cancel()` only schedules the CancelledError; the executor awaits
     # the cancelled tasks before propagating.
     started = asyncio.Event()
     unwound = asyncio.Event()
@@ -684,7 +684,7 @@ async def test_unlimited_runs_without_a_backstop(make_agent: MakeAgent) -> None:
 
 
 def test_resolve_resource_limits_rejects_unknown_keys() -> None:
-    # A typo'd key (e.g. plural `max_durations_secs`) must not be silently dropped — that would
+    # A typo'd key (e.g. plural `max_durations_secs`) must not be silently dropped -- that would
     # quietly disable the duration cap it was meant to set.
     with pytest.raises(UserError, match='Unknown `resource_limits` key'):
         _resolve_resource_limits({'max_durations_secs': 5})  # pyright: ignore[reportArgumentType]
@@ -752,7 +752,7 @@ async def test_for_run_tolerates_duplicate_append_from_earlier_run(make_agent: M
 
 async def test_cancellation_closes_unscheduled_coroutines() -> None:
     # In global-sequential mode (durable backends) deferred calls are kept as bare, unscheduled
-    # coroutines. On cancellation those must be `close()`d, not cancelled — covers the
+    # coroutines. On cancellation those must be `close()`d, not cancelled -- covers the
     # coroutine branch of the executor's cleanup, unreachable through DynamicWorkflowToolset.
     from pydantic_monty import MontyRepl
 
@@ -838,7 +838,7 @@ async def test_reveal_skips_invalid_and_duplicate_names(make_agent: MakeAgent) -
     assert set(ts._by_name) == {'base'}  # pyright: ignore[reportPrivateUsage]
     assert _enqueued_text(ctx) == ''
 
-    # The original baseline agent still runs — it was not shadowed. Re-resolving tools does not
+    # The original baseline agent still runs -- it was not shadowed. Re-resolving tools does not
     # re-warn for the same bad entries (warn-once), so this call emits no warning.
     assert await _run_script(ts, "await base(task='x')", ctx) == 'b'
 

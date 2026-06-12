@@ -2,21 +2,21 @@
 
 This is the end-to-end `DynamicWorkflow` example: one orchestrator turn fans work out across many
 sub-agents, lets them change code under confinement, retries what fails, and synthesizes a typed
-report — all as ordinary Python inside one `run_workflow` call. The orchestrator is handed a package
+report -- all as ordinary Python inside one `run_workflow` call. The orchestrator is handed a package
 that still uses `os.path` and writes a script that:
 
-1. migrates every file in parallel — one `migrator` sub-agent per file reads its file, rewrites it
+1. migrates every file in parallel -- one `migrator` sub-agent per file reads its file, rewrites it
    to `pathlib`, and writes it back (real edits, but only inside a throwaway temp dir);
-2. reviews every file in parallel — one read-only `reviewer` sub-agent per file approves the result
+2. reviews every file in parallel -- one read-only `reviewer` sub-agent per file approves the result
    only if no `os.path` remains and behaviour is preserved;
 3. loops: any file the reviewer rejects goes back to the migrator with the reviewer's issues, for up
    to two extra rounds, then reports each file's final status; and
-4. synthesizes — a `synthesizer` sub-agent turns the per-file outcomes into one typed report.
+4. synthesizes -- a `synthesizer` sub-agent turns the per-file outcomes into one typed report.
 
 The retry loop is the part you cannot express as one sub-agent per turn: re-dispatching only the
 files that failed review, round after round, is ordinary Python control flow (`asyncio.gather`, a
 `while` loop, a list of pending files) in one model turn. The orchestrator's context never gains the
-file contents or the intermediate drafts — only the final typed report. Each sub-agent is a Pydantic
+file contents or the intermediate drafts -- only the final typed report. Each sub-agent is a Pydantic
 AI `Agent` with a typed `output_type` and exactly the filesystem access it needs: the migrator may
 write, the reviewer is read-only, and the synthesizer has no filesystem at all.
 
@@ -140,7 +140,7 @@ def build_orchestrator(pkg_dir: Path) -> Agent[None, MigrationSummary]:
             'You migrate ONE Python file from os.path to pathlib. The task gives a file path '
             'relative to the package root, and may also list reviewer issues from a previous '
             'attempt. Read that file, rewrite it to use pathlib.Path while preserving behaviour '
-            "exactly — including each function's return type, so a function that returns a str "
+            "exactly -- including each function's return type, so a function that returns a str "
             'path must keep returning a str (e.g. str(Path(...))). Fix any listed reviewer issues. '
             'Write the result back to the same path and return the path and a one-line summary.'
         ),
@@ -153,7 +153,7 @@ def build_orchestrator(pkg_dir: Path) -> Agent[None, MigrationSummary]:
         instructions=(
             'You review ONE migrated file. The task gives its path. Read it and approve only if it '
             'no longer imports `os`/`os.path` or calls any `os.path.*` function, and behaviour is '
-            "preserved exactly — including each function's return type (a function that returned a "
+            "preserved exactly -- including each function's return type (a function that returned a "
             'str path must still return a str, not a Path). If anything is wrong, set '
             'approved=False and list concrete issues.'
         ),
@@ -251,7 +251,7 @@ async def main() -> None:
             print(textwrap.indent((pkg_dir / name).read_text().rstrip(), '    '))
             print()
 
-        # `result.output` is a typed MigrationSummary, not a free-form string — the synthesizer's
+        # `result.output` is a typed MigrationSummary, not a free-form string -- the synthesizer's
         # structured report survives the round-trip back through the orchestrator.
         report = result.output
         print(f'The orchestrator returned a typed {type(report).__name__} in {result.usage.requests} request(s):\n')

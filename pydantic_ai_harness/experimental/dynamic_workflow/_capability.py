@@ -22,7 +22,7 @@ class DynamicWorkflow(AbstractCapability[AgentDepsT]):
 
     Instead of delegating to one sub-agent per tool call, the model writes a single
     Python script (run in a Monty sandbox) that calls each sub-agent as an async
-    function and composes the results — fan out in parallel with `asyncio.gather`,
+    function and composes the results -- fan out in parallel with `asyncio.gather`,
     chain one agent's output into the next, vote across several, or loop until done.
 
     ```python
@@ -45,12 +45,12 @@ class DynamicWorkflow(AbstractCapability[AgentDepsT]):
     Sub-agents run as isolated runs (their own message history). The parent's `deps`
     are forwarded, and by default the parent's `usage` accumulator is shared so the whole
     tree's token and request spend is tallied in one place. For a hard cap on sub-agent
-    runs, use the exact, host-enforced `max_agent_calls` ceiling — a shared `usage_limits`
-    is best-effort (see `forward_usage`). Workflows do not nest — a sub-agent invoked from
+    runs, use the exact, host-enforced `max_agent_calls` ceiling -- a shared `usage_limits`
+    is best-effort (see `forward_usage`). Workflows do not nest -- a sub-agent invoked from
     a workflow cannot start its own.
 
     Set `defer_loading=True` (with a stable `id`) to keep the orchestration tool and
-    its sub-agent catalog out of the prompt until the model loads the capability —
+    its sub-agent catalog out of the prompt until the model loads the capability --
     paying near-zero tokens on turns that don't need it.
     """
 
@@ -63,10 +63,10 @@ class DynamicWorkflow(AbstractCapability[AgentDepsT]):
     A `list` (not a read-only `Sequence`) because the host can keep a reference to it and append
     a `WorkflowAgent` mid-run to reveal it: it becomes callable on the next step, announced to the
     model via an enqueued message, while the `run_workflow` description stays frozen at the agents
-    present when the run started — so the prompt-cache prefix never changes. Requires a
+    present when the run started -- so the prompt-cache prefix never changes. Requires a
     `PendingMessageDrainCapability` in the run (auto-injected by Pydantic AI) so the announcement
     drains into the conversation. Reveal is **append-only**: a revealed sub-agent cannot be removed
-    or hidden again for the rest of the run — plan the catalog as monotonically growing.
+    or hidden again for the rest of the run -- plan the catalog as monotonically growing.
     """
 
     tool_name: str = 'run_workflow'
@@ -96,7 +96,7 @@ class DynamicWorkflow(AbstractCapability[AgentDepsT]):
 
     Each sub-agent run is sequential, so its own limits are enforced exactly. With
     `forward_usage=False`, a per-sub-agent `total_tokens_limit` of `T` together with
-    `max_agent_calls` of `N` bound the whole agent tree to at most `N * T` tokens — a hard
+    `max_agent_calls` of `N` bound the whole agent tree to at most `N * T` tokens -- a hard
     ceiling. With `forward_usage=True` the limit is checked against the shared counter instead,
     a tree-wide cap that is best-effort under concurrent fan-out. `None` keeps the default
     (`request_limit=50`, no token limit).
@@ -110,7 +110,7 @@ class DynamicWorkflow(AbstractCapability[AgentDepsT]):
     dict overrides only the caps it names and leaves the others at their backstop value.
 
     There is intentionally no default `max_duration_secs`: the sandbox's duration timer counts total
-    wall-clock — including time awaiting sub-agents fanned out with `asyncio.gather` — so a default
+    wall-clock -- including time awaiting sub-agents fanned out with `asyncio.gather` -- so a default
     cap would abort ordinary parallel workflows, not just a runaway. Set one explicitly to bound a
     whole orchestration's runtime (also the only guard against a pure-CPU `while True`).
     """

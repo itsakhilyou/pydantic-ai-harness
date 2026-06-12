@@ -2,12 +2,12 @@
 
 `DynamicWorkflow` gives the orchestrating model one tool, `run_workflow`. Instead of delegating to
 one sub-agent per model turn, the model writes a single Python script that calls the sub-agents as
-async functions — fan out with `asyncio.gather`, chain one into the next, loop until something
-converges — in one tool call. Only the script's final value returns to the model; the intermediate
+async functions -- fan out with `asyncio.gather`, chain one into the next, loop until something
+converges -- in one tool call. Only the script's final value returns to the model; the intermediate
 results stay in the sandbox.
 
-[`dynamic_workflow.py`](./dynamic_workflow.py) is a deliberately small package — three short files,
-so the run is fast and cheap — shaped to exercise every coordination pattern end to end in a single
+[`dynamic_workflow.py`](./dynamic_workflow.py) is a deliberately small package -- three short files,
+so the run is fast and cheap -- shaped to exercise every coordination pattern end to end in a single
 `run_workflow` call: parallel fan-out, read/write confinement, an adversarial check, a feedback
 loop, typed fan-in synthesis, and a Logfire trace over the entire tree. Each sub-agent is a full
 Pydantic AI `Agent`, not a stand-in.
@@ -18,13 +18,13 @@ The example plants a small package that still uses `os.path` into a fresh temp d
 never touched), then hands it to the orchestrator. In one `run_workflow` call the model writes a
 script that:
 
-1. migrates every file in parallel — one `migrator` sub-agent per file reads it, rewrites it to
+1. migrates every file in parallel -- one `migrator` sub-agent per file reads it, rewrites it to
    `pathlib`, and writes it back (the files differ, so the parallel edits never collide);
-2. reviews every file in parallel — a read-only `reviewer` sub-agent approves the result only if no
+2. reviews every file in parallel -- a read-only `reviewer` sub-agent approves the result only if no
    `os.path` survives and behaviour (including each function's return type) is preserved;
-3. loops — any rejected file goes back to the migrator with the reviewer's issues appended to its
+3. loops -- any rejected file goes back to the migrator with the reviewer's issues appended to its
    task, for up to two extra rounds, then reports each file's final status; and
-4. synthesizes — a `synthesizer` sub-agent turns the per-file outcomes into one typed report.
+4. synthesizes -- a `synthesizer` sub-agent turns the per-file outcomes into one typed report.
 
 Each sub-agent is a Pydantic AI `Agent` with a typed `output_type` and exactly the filesystem access
 it needs: the migrator may write, the reviewer is read-only, and the synthesizer has none.
@@ -32,7 +32,7 @@ it needs: the migrator may write, the reviewer is read-only, and the synthesizer
 ## Why this needs `run_workflow`, not turn-by-turn delegation
 
 The retry loop is the part you cannot express as one sub-agent per turn. Re-dispatching only the
-files that failed review, round after round, is ordinary Python — `asyncio.gather`, a `while` loop,
+files that failed review, round after round, is ordinary Python -- `asyncio.gather`, a `while` loop,
 a list of pending files:
 
 ```python
@@ -68,7 +68,7 @@ report
 
 Sub-agent outputs arrive in the script as plain dicts (`report["path"]`, `review["approved"]`), so
 the loop is ordinary Python end to end. Delegated one sub-agent per tool call, the same task would
-be a model round-trip per migrate, per review, and per retry — every file's draft flowing back
+be a model round-trip per migrate, per review, and per retry -- every file's draft flowing back
 through the orchestrator's context and bloating it as it goes. As one script it is a single
 `run_workflow` call: the migrations and reviews run concurrently inside it, the loop re-dispatches
 only what failed (with the reviewer's issues attached), and the orchestrator's context only ever
@@ -125,8 +125,8 @@ key the example still plants the sources and prints the task, so you can see the
 ## In one line
 
 `DynamicWorkflow` moves sub-agent coordination from turn-by-turn delegation into one script the
-model writes and runs on Monty — typed handoffs, a cache-stable prompt, and a hard worst-case token
-ceiling across the whole tree. (Snapshot-based fork and durable resume are planned — see the
+model writes and runs on Monty -- typed handoffs, a cache-stable prompt, and a hard worst-case token
+ceiling across the whole tree. (Snapshot-based fork and durable resume are planned -- see the
 [`DynamicWorkflow` README](../pydantic_ai_harness/experimental/dynamic_workflow/README.md).)
 
 ## Further reading

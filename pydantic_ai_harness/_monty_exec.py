@@ -135,7 +135,7 @@ class MontyExecutor:
         original_name = self.sanitized_to_original.get(name, name)
 
         if name in self.sequential_names:
-            # Rendered as `def` (sync), so the sandbox code doesn't `await` the result —
+            # Rendered as `def` (sync), so the sandbox code doesn't `await` the result --
             # resolve inline. Await pending parallel tasks first (barrier) for ordering.
             # The dispatch coroutine is created only after the barrier: it is not in
             # `_pending`, so if it existed while the barrier awaits and we were cancelled
@@ -146,7 +146,7 @@ class MontyExecutor:
             # exactly the payload `resume` expects.
             return snapshot.resume(await _await_external(self.dispatch(original_name, snapshot.kwargs)))
 
-        # Deferred execution — resolved later at FutureSnapshot.
+        # Deferred execution -- resolved later at FutureSnapshot.
         call = self.dispatch(original_name, snapshot.kwargs)
         if self.global_sequential:
             # Keep the bare coroutine unscheduled; it's awaited one-at-a-time to avoid interleaving.

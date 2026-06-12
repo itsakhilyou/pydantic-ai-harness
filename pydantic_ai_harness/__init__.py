@@ -1,4 +1,4 @@
-"""Pydantic AI capability library."""
+"""The batteries for your Pydantic AI agent -- the official capability library."""
 
 from typing import TYPE_CHECKING
 

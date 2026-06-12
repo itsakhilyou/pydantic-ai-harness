@@ -2,7 +2,7 @@
 
 Exposes a single `run_workflow` tool: the model writes a Python orchestration
 script (run in a Monty sandbox) that calls named sub-agents as async functions
-and composes their results — fan-out, chaining, voting, loops — in one step.
+and composes their results -- fan-out, chaining, voting, loops -- in one step.
 """
 
 from __future__ import annotations
@@ -36,7 +36,7 @@ except ImportError as _import_error:  # pragma: no cover
 from pydantic_ai_harness._monty_exec import MontyExecutor, PrintCapture
 
 # Set while a workflow script is executing, so a sub-agent that itself tries to run a workflow can
-# be refused — workflows do not nest. asyncio copies the context into each task `asyncio.gather`
+# be refused -- workflows do not nest. asyncio copies the context into each task `asyncio.gather`
 # schedules, so concurrently-dispatched sub-agents inherit this flag (the capability is asyncio-only).
 _in_workflow: contextvars.ContextVar[bool] = contextvars.ContextVar('pydantic_ai_harness_in_workflow', default=False)
 
@@ -50,7 +50,7 @@ class WorkflowResourceLimits(TypedDict, total=False):
     """
 
     max_duration_secs: float
-    """Maximum total wall-clock seconds for the script — **including** time spent awaiting
+    """Maximum total wall-clock seconds for the script -- **including** time spent awaiting
     sub-agents dispatched concurrently with `asyncio.gather` (the sandbox's duration timer accrues
     across that suspension; it only excludes the wait for sub-agents awaited one at a time). There
     is no default cap, because one would also kill ordinary parallel fan-out, not just a runaway.
@@ -80,7 +80,7 @@ def _default_resource_limits() -> ResourceLimits:
 
 # The keys `WorkflowResourceLimits` accepts. A `total=False` TypedDict does not validate keys at
 # runtime, so a typo (e.g. `max_durations_secs`) would otherwise merge through and be silently
-# dropped — quietly disabling the only guard against a pure-CPU `while True`. We reject unknowns.
+# dropped -- quietly disabling the only guard against a pure-CPU `while True`. We reject unknowns.
 _RESOURCE_LIMIT_KEYS = frozenset({'max_duration_secs', 'max_memory', 'max_allocations'})
 
 
@@ -118,19 +118,19 @@ _WORKFLOW_ARGS_VALIDATOR: SchemaValidatorProt = _WORKFLOW_ARGS_ADAPTER.validator
 _WORKFLOW_BASE_DESCRIPTION = """\
 Write and run a Python orchestration script in a sandbox to coordinate multiple sub-agents.
 
-Use this to break a task across specialized sub-agents and combine their results in a single step —
+Use this to break a task across specialized sub-agents and combine their results in a single step --
 fan work out in parallel, chain one agent's output into the next, vote across several, or loop until
-done — instead of delegating to one sub-agent at a time.
+done -- instead of delegating to one sub-agent at a time.
 
 The sandbox uses Monty, a subset of Python. Key restrictions:
 - **No classes** and **no third-party libraries**.
 - **Useful standard-library modules**: `asyncio`, `math`, `json`, `re`, `typing`. Import what you use
-  at the top of the script. Other modules are unavailable or stubbed — don't rely on them.
+  at the top of the script. Other modules are unavailable or stubbed -- don't rely on them.
 - **No wall-clock or timing primitives** (`asyncio.sleep`, `datetime.now()`, the `time` module).
 
-Each sub-agent below is an async function. Call it with the `task` keyword argument — write
+Each sub-agent below is an async function. Call it with the `task` keyword argument -- write
 `reviewer(task="...")`, not `reviewer("...")`; all parameters are keyword-only. A sub-agent returns
-that agent's output: a string by default, or — if it has a structured `output_type` — a dict, whose
+that agent's output: a string by default, or -- if it has a structured `output_type` -- a dict, whose
 fields you read by subscript (`r["field"]`), not attribute (`r.field`). Run several at once with
 `asyncio.gather` rather than awaiting each sequentially:
 
@@ -143,7 +143,7 @@ reviews = await asyncio.gather(reviewer(task="check auth"), reviewer(task="check
 caught inside the script: one failure aborts the whole script and you retry it. Design the script so
 sub-agents don't depend on catching each other's errors.
 
-The last expression's value is captured as the result — you do **not** need to `print()` it, and
+The last expression's value is captured as the result -- you do **not** need to `print()` it, and
 printing produces a string representation, not structured data. Use `print()` only for debug logging.
 If `print()` was also called, the result is returned as `{"output": "<printed text>", "result": <last
 expression>}`.\
@@ -153,18 +153,18 @@ expression>}`.\
 def _is_valid_sandbox_name(name: str) -> bool:
     """Whether `name` can be exposed as a sandbox function: a non-keyword Python identifier.
 
-    `str.isidentifier()` alone is not enough — Python keywords (`for`, `class`, `async`, ...) are
+    `str.isidentifier()` alone is not enough -- Python keywords (`for`, `class`, `async`, ...) are
     valid identifiers but cannot be used as function names, so the model could never call them.
     Callers guard the empty/`None` case before this is reached.
     """
     return name.isidentifier() and not keyword.iskeyword(name)
 
 
-# Every sub-agent is exposed with the same fixed signature — `(*, task: str) -> Any` — so build it once
+# Every sub-agent is exposed with the same fixed signature -- `(*, task: str) -> Any` -- so build it once
 # and render each catalog entry through core's `FunctionSignature` (the renderer code_mode and
 # Pydantic AI already use). This keeps the catalog format consistent across capabilities, forces
 # keyword-only `task` to match `dispatch` (which reads `kwargs['task']`), and renders docstrings
-# safely — a hand-rolled f-string breaks on a newline or a quote inside a description.
+# safely -- a hand-rolled f-string breaks on a newline or a quote inside a description.
 _SUB_AGENT_PARAMS_SCHEMA: dict[str, Any] = {
     'type': 'object',
     'properties': {'task': {'type': 'string'}},
@@ -209,7 +209,7 @@ class WorkflowAgent(Generic[AgentDepsT]):
     """One sub-agent exposed to the orchestration script as an async function.
 
     Bundles the agent with its sandbox function name and catalog description so the
-    three travel together — there is no second collection to keep in sync.
+    three travel together -- there is no second collection to keep in sync.
     """
 
     agent: AbstractAgent[AgentDepsT, Any]
@@ -221,7 +221,7 @@ class WorkflowAgent(Generic[AgentDepsT]):
 
     description: str | None = None
     """Description shown to the model in the sub-agent catalog, rendered as the sandbox
-    function's docstring. When omitted, the model sees only the bare signature — set this
+    function's docstring. When omitted, the model sees only the bare signature -- set this
     to tell the model what the sub-agent does and what to pass as `task`."""
 
     @property
@@ -240,7 +240,7 @@ class DynamicWorkflowToolset(AbstractToolset[AgentDepsT]):
     A `list` (not a read-only `Sequence`) because the host can append a `WorkflowAgent` mid-run
     to reveal it: it becomes callable on the next step, announced to the model via an enqueued
     message, while the tool description stays frozen at the agents present when the run started
-    (so the prompt-cache prefix never changes). Reveal is append-only — a revealed sub-agent
+    (so the prompt-cache prefix never changes). Reveal is append-only -- a revealed sub-agent
     cannot be removed or hidden again within the run.
     """
 
@@ -264,7 +264,7 @@ class DynamicWorkflowToolset(AbstractToolset[AgentDepsT]):
 
     Each sub-agent run is sequential, so its own limits are enforced exactly. With
     `forward_usage=False`, a per-sub-agent `total_tokens_limit` of `T` together with
-    `max_agent_calls` of `N` bound the whole tree to at most `N * T` tokens — a hard ceiling. With
+    `max_agent_calls` of `N` bound the whole tree to at most `N * T` tokens -- a hard ceiling. With
     `forward_usage=True` the limit is checked against the shared counter instead, giving a tree-wide
     cap that is best-effort under concurrent fan-out (sub-agents can pass the check before any of
     them increments it). `None` keeps the default (`request_limit=50`, no token limit)."""
@@ -289,8 +289,8 @@ class DynamicWorkflowToolset(AbstractToolset[AgentDepsT]):
     _by_name: dict[str, WorkflowAgent[AgentDepsT]] = field(init=False, repr=False)
 
     # Catalog rendered into the (cached) tool description, frozen at run start. Built from the
-    # agents present when the run began and never widened by reveals, so the description — and
-    # thus the prompt-cache prefix — never changes mid-run.
+    # agents present when the run began and never widened by reveals, so the description -- and
+    # thus the prompt-cache prefix -- never changes mid-run.
     _baseline_catalog: dict[str, str | None] = field(init=False, repr=False)
 
     # `id()` of reveal entries already warned about (invalid or colliding name), so a persistent
@@ -347,7 +347,7 @@ class DynamicWorkflowToolset(AbstractToolset[AgentDepsT]):
         """Fresh instance per run so the sub-agent-call budget is per-run.
 
         `dataclasses.replace` would re-run `__post_init__`, whose strict validation raises on an
-        unusable entry that a mid-run append left in `agents` — turning one bad reveal into a hard
+        unusable entry that a mid-run append left in `agents` -- turning one bad reveal into a hard
         failure of every later run. Clone shallowly instead (keeping `agents` shared, so appends
         stay visible to this run) and rebuild the per-run state leniently.
         """
@@ -367,14 +367,14 @@ class DynamicWorkflowToolset(AbstractToolset[AgentDepsT]):
         """Reveal sub-agents appended to `agents` since the run started.
 
         Diffs the live `agents` list against the names already known (`_by_name`, which holds the
-        baseline plus anything revealed so far) and folds each newcomer in — so `dispatch` resolves
-        it — enqueuing an announcement for the model. The description renders from the frozen
+        baseline plus anything revealed so far) and folds each newcomer in -- so `dispatch` resolves
+        it -- enqueuing an announcement for the model. The description renders from the frozen
         `_baseline_catalog`, never `_by_name`, so the cached prompt prefix is unaffected. A newcomer
         whose name is invalid or already taken is skipped; the announcement makes a successful
         reveal visible, so a silently-dropped one shows up as "the agent never appeared".
 
         Synchronous and await-free between snapshotting `agents` and mutating `_by_name`, so a
-        concurrently-running `dispatch` never observes a half-revealed agent — the same
+        concurrently-running `dispatch` never observes a half-revealed agent -- the same
         await-free-critical-section reasoning that keeps `max_agent_calls` exact under fan-out.
 
         A newcomer whose name is invalid, or already taken by a *different* sub-agent, cannot be
@@ -457,10 +457,10 @@ class DynamicWorkflowToolset(AbstractToolset[AgentDepsT]):
             #
             # This exists precisely because `usage_limits` cannot give an exact ceiling here:
             # core's own limit check is split from its increment by the model-request `await`
-            # (a TOCTOU race — N gathered sub-agents all pass the check before any increments;
+            # (a TOCTOU race -- N gathered sub-agents all pass the check before any increments;
             # measured ~20x overshoot), and `RunContext` exposes `usage` but not `usage_limits`,
             # so the parent's configured limit can't be forwarded to sub-agents at all.
-            # TODO: file upstream on pydantic-ai — (a) expose `usage_limits` on `RunContext`,
+            # TODO: file upstream on pydantic-ai -- (a) expose `usage_limits` on `RunContext`,
             # (b) atomic reserve-then-request in the run loop. Until then, tree-wide token caps
             # stay best-effort (see `forward_usage` / `sub_agent_usage_limits` docstrings).
             if self._call_count >= self.max_agent_calls:
@@ -495,9 +495,9 @@ class DynamicWorkflowToolset(AbstractToolset[AgentDepsT]):
         except MontyRuntimeError as e:
             # Host-raised exceptions cannot be caught inside the sandbox (even a matching
             # `except RuntimeError` aborts), so when this flag is set the budget error is
-            # the one that surfaced — it cannot be masking a later, unrelated failure.
+            # the one that surfaced -- it cannot be masking a later, unrelated failure.
             if budget_exhausted:
-                # Retrying can't help — the per-run budget is spent. Return a terminal result
+                # Retrying can't help -- the per-run budget is spent. Return a terminal result
                 # so the model concludes instead of burning retries into a hard failure.
                 return {
                     'error': (
@@ -508,7 +508,7 @@ class DynamicWorkflowToolset(AbstractToolset[AgentDepsT]):
                 }
             raise ModelRetry(f'Runtime error in workflow:\n{capture.prepend_to(e.display())}') from e
         except BaseException as e:
-            # pyo3 surfaces a Rust-side sandbox panic as `pyo3_runtime.PanicException` — a
+            # pyo3 surfaces a Rust-side sandbox panic as `pyo3_runtime.PanicException` -- a
             # BaseException (not Exception) subclass that is not importable, so match it by name. A
             # panic is an internal VM abort the model can provoke (e.g. awaiting the same sub-agent
             # call twice in one `asyncio.gather`); convert it to a retry instead of letting it tear
@@ -517,7 +517,7 @@ class DynamicWorkflowToolset(AbstractToolset[AgentDepsT]):
                 raise
             raise ModelRetry(
                 'The workflow script aborted inside the sandbox. This can happen when the same '
-                'sub-agent call is awaited more than once in one asyncio.gather — give each gathered '
+                'sub-agent call is awaited more than once in one asyncio.gather -- give each gathered '
                 'call its own invocation. Revise the script and try again.'
             ) from e
         finally:
