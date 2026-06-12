@@ -66,13 +66,7 @@ class WorkflowResourceLimits(TypedDict, total=False):
 
 
 def _default_resource_limits() -> ResourceLimits:
-    """Backstop limits for the sandbox itself.
-
-    Caps memory and allocations to stop an accidental runaway that builds unbounded data.
-    Deliberately omits `max_duration_secs`: in the sandbox that limit counts total wall-clock,
-    including time suspended awaiting concurrently-gathered sub-agents, so a default cap would
-    abort ordinary parallel fan-out. Set `resource_limits` explicitly to add a wall-clock ceiling.
-    """
+    """Backstop sandbox limits; no duration cap -- see `WorkflowResourceLimits.max_duration_secs`."""
     return {
         'max_memory': 256 * 1024 * 1024,
         'max_allocations': 50_000_000,
@@ -82,23 +76,18 @@ def _default_resource_limits() -> ResourceLimits:
 # The keys `WorkflowResourceLimits` accepts. A `total=False` TypedDict does not validate keys at
 # runtime, so a typo (e.g. `max_durations_secs`) would otherwise merge through and be silently
 # dropped -- quietly disabling the only guard against a pure-CPU `while True`. We reject unknowns.
-_RESOURCE_LIMIT_KEYS = frozenset({'max_duration_secs', 'max_memory', 'max_allocations'})
+_RESOURCE_LIMIT_KEYS = frozenset(WorkflowResourceLimits.__annotations__)
 
 
 def _resolve_resource_limits(limits: WorkflowResourceLimits | Literal['unlimited'] | None) -> ResourceLimits:
     """Resolve the public `resource_limits` value to the limits handed to the sandbox.
 
-    - `None` → the safe backstop (`_default_resource_limits`).
-    - `'unlimited'` → no limits at all (an empty mapping).
-    - a `WorkflowResourceLimits` mapping → merged *onto* the backstop, so a partial dict overrides
-      only the caps it names and the others keep their backstop value (a `{'max_memory': ...}`
-      never silently drops the allocations backstop).
-
-    A mapping with an unrecognized key raises `UserError` rather than silently ignoring it.
+    A partial mapping merges *onto* the backstop rather than replacing it, so `{'max_memory': ...}`
+    never silently drops the allocations backstop. Full semantics: `DynamicWorkflow.resource_limits`.
     """
     if limits is None:
         return _default_resource_limits()
-    if isinstance(limits, str):  # 'unlimited'
+    if limits == 'unlimited':
         return {}
     unknown = set(limits) - _RESOURCE_LIMIT_KEYS
     if unknown:
@@ -238,12 +227,8 @@ class DynamicWorkflowToolset(AbstractToolset[AgentDepsT]):
     agents: list[WorkflowAgent[AgentDepsT]]
     """Sub-agents callable from the orchestration script, each as an async function.
 
-    A `list` (not a read-only `Sequence`) because the host can append a `WorkflowAgent` mid-run
-    to reveal it: it becomes callable on the next step, announced to the model via an enqueued
-    message, while the tool description stays frozen at the agents present when the run started
-    (so the prompt-cache prefix never changes). Reveal is append-only -- a revealed sub-agent
-    cannot be removed or hidden again within the run.
-    """
+    A `list` (not a read-only `Sequence`) so the host can append a `WorkflowAgent` mid-run to
+    reveal it; see `DynamicWorkflow.agents` for the reveal contract."""
 
     tool_name: str = 'run_workflow'
     """Name of the tool exposed to the model."""
@@ -255,44 +240,31 @@ class DynamicWorkflowToolset(AbstractToolset[AgentDepsT]):
     """Maximum retries for the `run_workflow` tool (syntax/runtime errors count as retries)."""
 
     forward_usage: bool = True
-    """Share the parent run's `usage` accumulator with sub-agents, so the whole tree's token and
-    request spend is tallied in one place. Note: the parent's configured `usage_limits` value is
-    not forwarded into sub-agent runs (`RunContext` does not expose it); set `sub_agent_usage_limits`
-    to bound sub-agents, and use `max_agent_calls` for an exact ceiling on sub-agent runs."""
+    """Share the parent run's `usage` accumulator with sub-agents. See
+    `DynamicWorkflow.forward_usage` for what is and is not forwarded."""
 
     sub_agent_usage_limits: UsageLimits | None = None
     """`UsageLimits` applied to every sub-agent run, replacing pydantic-ai's default.
-
-    Each sub-agent run is sequential, so its own limits are enforced exactly. With
-    `forward_usage=False`, a per-sub-agent `total_tokens_limit` of `T` together with
-    `max_agent_calls` of `N` bound the whole tree to at most `N * T` tokens -- a hard ceiling. With
-    `forward_usage=True` the limit is checked against the shared counter instead, giving a tree-wide
-    cap that is best-effort under concurrent fan-out (sub-agents can pass the check before any of
-    them increments it). `None` keeps the default (`request_limit=50`, no token limit)."""
+    See `DynamicWorkflow.sub_agent_usage_limits` for the budgeting semantics."""
 
     resource_limits: WorkflowResourceLimits | Literal['unlimited'] | None = None
     """Sandbox limits guarding the orchestration script's own memory/allocations (not sub-agents).
-
-    `None` applies a safe backstop (256 MB, 50M allocations) with no wall-clock cap; `'unlimited'`
-    removes all limits; a `WorkflowResourceLimits` mapping is merged onto the backstop, so a partial
-    dict overrides only the caps it names and the others keep their backstop value. See
-    `WorkflowResourceLimits.max_duration_secs` for why there is no default duration cap.
-    """
+    See `DynamicWorkflow.resource_limits` for the `None`/`'unlimited'`/partial-dict semantics."""
 
     toolset_id: str | None = None
     """Stable toolset id; defaults to the tool name."""
 
-    # Per-run count of sub-agent calls. Reset on `for_run`, preserved across `for_run_step`.
+    # Per-run count of sub-agent calls; reset on `for_run`.
     _call_count: int = field(default=0, init=False, repr=False)
 
     # Sub-agents indexed by resolved sandbox name; seeded from `agents` in `__post_init__` and
     # extended in place as runtime appends to `agents` are revealed (`_reveal_pending`).
     _by_name: dict[str, WorkflowAgent[AgentDepsT]] = field(init=False, repr=False)
 
-    # Catalog rendered into the (cached) tool description, frozen at run start. Built from the
-    # agents present when the run began and never widened by reveals, so the description -- and
-    # thus the prompt-cache prefix -- never changes mid-run.
-    _baseline_catalog: dict[str, str | None] = field(init=False, repr=False)
+    # Tool description, frozen at run start. Rendered from the agents present when the run began
+    # and never re-rendered after a reveal, so the description -- and thus the prompt-cache
+    # prefix -- never changes mid-run.
+    _description: str = field(init=False, repr=False)
 
     # `id()` of reveal entries already warned about (invalid or colliding name), so a persistent
     # bad append warns once rather than every step. Rebuilt per run by `for_run`'s shallow clone.
@@ -304,11 +276,10 @@ class DynamicWorkflowToolset(AbstractToolset[AgentDepsT]):
         if self.max_agent_calls < 1:
             raise UserError('DynamicWorkflow `max_agent_calls` must be at least 1.')
         _resolve_resource_limits(self.resource_limits)  # validate keys now, not at the first tool call
-        self._by_name, _ = self._index_agents(strict=True)
-        self._baseline_catalog = {name: entry.description for name, entry in self._by_name.items()}
+        self._rebuild(strict=True)
 
-    def _index_agents(self, *, strict: bool) -> tuple[dict[str, WorkflowAgent[AgentDepsT]], set[int]]:
-        """Index `agents` by resolved sandbox name.
+    def _rebuild(self, *, strict: bool) -> set[int]:
+        """Rebuild the name index and the frozen tool description from the current `agents`.
 
         With `strict=True` an unusable entry (no name, invalid name, duplicate) raises `UserError`;
         with `strict=False` it is skipped with a warning and its `id()` is returned so the caller
@@ -338,7 +309,9 @@ class DynamicWorkflowToolset(AbstractToolset[AgentDepsT]):
                 raise UserError(problem)
             skipped.add(id(entry))
             warnings.warn(f'{problem} It is not callable in this run.', stacklevel=3)
-        return by_name, skipped
+        self._by_name = by_name
+        self._description = _render_catalog({name: entry.description for name, entry in by_name.items()})
+        return skipped
 
     @property
     def id(self) -> str | None:
@@ -354,35 +327,27 @@ class DynamicWorkflowToolset(AbstractToolset[AgentDepsT]):
         """
         clone = copy.copy(self)
         clone._call_count = 0
-        clone._by_name, skipped = self._index_agents(strict=False)
-        clone._baseline_catalog = {name: entry.description for name, entry in clone._by_name.items()}
-        # Seed with the entries already warned about so `_reveal_pending` doesn't warn again.
-        clone._reveal_warned = skipped
+        # Seed the warned set with the entries skipped here so `_reveal_pending` doesn't warn again.
+        clone._reveal_warned = clone._rebuild(strict=False)
         return clone
-
-    async def for_run_step(self, ctx: RunContext[AgentDepsT]) -> AbstractToolset[AgentDepsT]:
-        """Preserve the per-run budget across steps."""
-        return self
 
     def _reveal_pending(self, ctx: RunContext[AgentDepsT]) -> None:
         """Reveal sub-agents appended to `agents` since the run started.
 
         Diffs the live `agents` list against the names already known (`_by_name`, which holds the
         baseline plus anything revealed so far) and folds each newcomer in -- so `dispatch` resolves
-        it -- enqueuing an announcement for the model. The description renders from the frozen
-        `_baseline_catalog`, never `_by_name`, so the cached prompt prefix is unaffected. A newcomer
-        whose name is invalid or already taken is skipped; the announcement makes a successful
-        reveal visible, so a silently-dropped one shows up as "the agent never appeared".
+        it -- enqueuing an announcement for the model. The frozen `_description` is untouched, so
+        the cached prompt prefix is unaffected. Re-seeing an already-known entry (a baseline agent,
+        or one revealed on an earlier step) is a no-op, identified by object identity so it is never
+        mistaken for a name collision.
+
+        A newcomer whose name is invalid, or already taken by a *different* sub-agent, cannot be
+        revealed: the original stays in place (reveal never silently swaps an agent out) and a
+        warning is emitted once so the dropped reveal is not silent.
 
         Synchronous and await-free between snapshotting `agents` and mutating `_by_name`, so a
         concurrently-running `dispatch` never observes a half-revealed agent -- the same
         await-free-critical-section reasoning that keeps `max_agent_calls` exact under fan-out.
-
-        A newcomer whose name is invalid, or already taken by a *different* sub-agent, cannot be
-        revealed; the original stays in place (reveal never silently swaps an agent out) and a
-        warning is emitted once so the dropped reveal is not silent. Re-seeing an already-known
-        entry (a baseline agent, or one revealed on an earlier step) is a no-op, identified by
-        object identity so it is never mistaken for a name collision.
         """
         for entry in tuple(self.agents):
             name = entry.resolved_name
@@ -408,13 +373,12 @@ class DynamicWorkflowToolset(AbstractToolset[AgentDepsT]):
 
     async def get_tools(self, ctx: RunContext[AgentDepsT]) -> dict[str, ToolsetTool[AgentDepsT]]:
         self._reveal_pending(ctx)
-        description = _render_catalog(self._baseline_catalog)
         return {
             self.tool_name: ToolsetTool(
                 toolset=self,
                 tool_def=ToolDefinition(
                     name=self.tool_name,
-                    description=description,
+                    description=self._description,
                     parameters_json_schema=_WORKFLOW_ARGS_JSON_SCHEMA,
                     metadata={'code_arg_name': 'code', 'code_arg_language': 'python'},
                     sequential=True,
