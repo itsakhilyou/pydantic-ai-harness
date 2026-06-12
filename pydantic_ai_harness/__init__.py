@@ -4,15 +4,19 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from .code_mode import CodeMode
+    from .docling import Docling
     from .filesystem import FileSystem
     from .logfire import ManagedPrompt
+    from .markdownify import Markdownify
     from .shell import LLM_API_KEY_ENV_PATTERNS, Shell
 
 __all__ = [
     'CodeMode',
+    'Docling',
     'FileSystem',
     'LLM_API_KEY_ENV_PATTERNS',
     'ManagedPrompt',
+    'Markdownify',
     'Shell',
 ]
 
@@ -22,6 +26,10 @@ def __getattr__(name: str) -> object:
         from .code_mode import CodeMode
 
         return CodeMode
+    if name == 'Docling':
+        from .docling import Docling
+
+        return Docling
     if name == 'FileSystem':
         from .filesystem import FileSystem
 
@@ -30,6 +38,10 @@ def __getattr__(name: str) -> object:
         from .logfire import ManagedPrompt
 
         return ManagedPrompt
+    if name == 'Markdownify':
+        from .markdownify import Markdownify
+
+        return Markdownify
     if name == 'Shell':
         from .shell import Shell
 
