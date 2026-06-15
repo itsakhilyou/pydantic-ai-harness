@@ -80,13 +80,26 @@ def measure(text: str, *, over_tokens: bool, tokenizer: Callable[[str], int] | N
     return estimate_token_count([message], tokenizer)
 
 
-def json_sketch(value: object) -> str:
-    """Build a one-line shape hint for a structured value, or '' for anything else."""
-    if isinstance(value, Mapping):
-        return _sketch_mapping(value)  # pyright: ignore[reportUnknownArgumentType]
-    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
-        return _sketch_sequence(value)  # pyright: ignore[reportUnknownArgumentType]
+def json_sketch(value: Any) -> str:
+    """Build a one-line shape hint for a structured value, or '' for anything else.
+
+    `value` is a `ToolReturn.return_value` (dynamically typed). The `_is_*` guards return
+    `bool` rather than narrowing, so `value` stays `Any` and is assignable to the
+    `Mapping`/`Sequence` helper parameters without leaking an `Unknown` element type.
+    """
+    if _is_mapping(value):
+        return _sketch_mapping(value)
+    if _is_text_sequence(value):
+        return _sketch_sequence(value)
     return ''
+
+
+def _is_mapping(value: object) -> bool:
+    return isinstance(value, Mapping)
+
+
+def _is_text_sequence(value: object) -> bool:
+    return isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray))
 
 
 def _sketch_mapping(mapping: Mapping[Any, Any]) -> str:

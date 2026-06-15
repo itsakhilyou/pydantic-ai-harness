@@ -2,15 +2,15 @@
 
 from __future__ import annotations
 
-import re
-from collections.abc import Awaitable, Mapping, Sequence
+import warnings
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
 from pydantic_ai import FunctionToolset
 from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.exceptions import ModelRetry
-from pydantic_ai.messages import ToolCallPart, ToolReturn
+from pydantic_ai.messages import ToolCallPart, ToolReturn, ToolReturnContent, UserContent
 from pydantic_ai.tools import AgentDepsT, RunContext, ToolDefinition, ToolSelector, matches_tool_selector
 from pydantic_ai.toolsets import AgentToolset
 
@@ -56,17 +56,17 @@ def _default_bands() -> list[Band]:
 
 
 @dataclass
-class _Payload:
-    """Everything the reduction pipeline needs about one tool return."""
+class _Unit:
+    """One reducible piece of a tool return: its `return_value` or its `content`.
 
-    value: object
+    `suffix` distinguishes the two so they spill to distinct handles for the same call.
+    """
+
     binary: bool
     text: str | None
     data: bytes
-    original: Any
-    was_tool_return: bool
-    content: Any
-    metadata: Any
+    value: ToolReturnContent
+    suffix: str
 
 
 @dataclass
@@ -131,7 +131,7 @@ class OverflowingToolOutput(AbstractCapability[AgentDepsT]):
     over_tokens: bool = False
     """Measure band thresholds in estimated tokens instead of characters."""
 
-    tokenizer: Any = None
+    tokenizer: Callable[[str], int] | None = None
     """Optional `(str) -> int` tokenizer for `over_tokens`. Defaults to a ~4-char heuristic."""
 
     store: OverflowStore | None = None
@@ -179,10 +179,10 @@ class OverflowingToolOutput(AbstractCapability[AgentDepsT]):
             Args:
                 ctx: The run context (supplied by the agent).
                 handle: The handle from the overflowed tool return.
-                offset: Number of matching lines to skip from the start (or end).
-                limit: Maximum number of lines to return.
+                offset: Number of matching lines to skip from the start (or end). Must be >= 0.
+                limit: Maximum number of lines to return (>= 1; clamped to a built-in cap).
                 from_end: Count `offset`/`limit` from the end of the result.
-                pattern: Optional regular expression; only matching lines are returned.
+                pattern: Optional literal substring; only lines containing it are returned.
             """
             return await _read_slice(store, handle, offset, limit, from_end, pattern)
 
@@ -199,134 +199,200 @@ class OverflowingToolOutput(AbstractCapability[AgentDepsT]):
         args: dict[str, Any],
         result: Any,
     ) -> Any:
-        """Reduce the tool result when it overflows the matching band's threshold."""
+        """Reduce the tool result -- both `return_value` and model-visible `content`."""
+        original: Any = result
         if call.tool_name == READ_TOOL_NAME:
-            return result
+            return original
         if not await matches_tool_selector(self.tool_filter, ctx, tool_def):
-            return result
+            return original
 
-        payload = self._build_payload(result)
-        if payload is None:
-            return result
+        if isinstance(result, ToolReturn):
+            return_value: ToolReturnContent = result.return_value
+            content = result.content
+            metadata = result.metadata
+            wrapped = True
+        else:
+            return_value = result
+            content = None
+            metadata = None
+            wrapped = False
+
+        if isinstance(return_value, BaseException):
+            return original
 
         bands = self._per_tool.get(call.tool_name, self._bands)
+        value_unit = self._make_unit(return_value, suffix='')
+        value_text, value_handle = await self._reduce(ctx, call, bands, value_unit)
+        content_text, content_handle = await self._reduce_content(ctx, call, bands, content)
+
+        if value_text is None and content_text is None:
+            return original
+
+        return self._assemble(
+            wrapped=wrapped,
+            return_value=return_value,
+            content=content,
+            metadata=metadata,
+            value_unit=value_unit,
+            value_text=value_text,
+            value_handle=value_handle,
+            content_text=content_text,
+            content_handle=content_handle,
+        )
+
+    def _assemble(
+        self,
+        *,
+        wrapped: bool,
+        return_value: ToolReturnContent,
+        content: str | Sequence[UserContent] | None,
+        metadata: Any,
+        value_unit: _Unit,
+        value_text: str | None,
+        value_handle: str | None,
+        content_text: str | None,
+        content_handle: str | None,
+    ) -> Any:
+        """Rebuild the tool result from the reduced parts, preserving the envelope."""
+        if wrapped:
+            new_metadata = metadata
+            if value_handle is not None or content_handle is not None:
+                new_metadata = _with_handles(metadata, value_handle, len(value_unit.data), content_handle)
+            wrapped_out: ToolReturn[Any] = ToolReturn(
+                return_value=value_text if value_text is not None else return_value,
+                content=content_text if content_text is not None else content,
+                metadata=new_metadata,
+            )
+            return wrapped_out
+
+        # A plain (non-`ToolReturn`) result has no separate content part.
+        if value_handle is not None:
+            spilled_out: ToolReturn[Any] = ToolReturn(
+                return_value=value_text, metadata=_with_handles(None, value_handle, len(value_unit.data))
+            )
+            return spilled_out
+        return value_text
+
+    def _make_unit(self, value: ToolReturnContent, *, suffix: str) -> _Unit:
+        """Pre-render a value into the text / bytes the reduction pipeline needs."""
+        if is_binary(value):
+            return _Unit(binary=True, text=None, data=to_bytes(value), value=value, suffix=suffix)
+        text = to_text(value)
+        if self.strip_ansi:
+            text = strip_ansi(text)
+        return _Unit(binary=False, text=text, data=text.encode('utf-8'), value=value, suffix=suffix)
+
+    async def _reduce(
+        self,
+        ctx: RunContext[AgentDepsT],
+        call: ToolCallPart,
+        bands: Sequence[Band],
+        unit: _Unit,
+    ) -> tuple[str | None, str | None]:
+        """Select a band for `unit` and apply it. Returns `(replacement, handle)`.
+
+        `replacement` is None when the unit passes through unchanged; `handle` is set only
+        when the unit was spilled.
+        """
         size = (
-            len(payload.data)
-            if payload.binary
-            else measure(payload.text or '', over_tokens=self.over_tokens, tokenizer=self.tokenizer)
+            len(unit.data)
+            if unit.binary
+            else measure(unit.text or '', over_tokens=self.over_tokens, tokenizer=self.tokenizer)
         )
         action = _select_action(bands, size)
         if action is None:
-            return payload.original
+            return None, None
+        return await self._apply(ctx, call, action, unit)
 
-        return await self._apply(ctx, call, action, payload)
+    async def _reduce_content(
+        self,
+        ctx: RunContext[AgentDepsT],
+        call: ToolCallPart,
+        bands: Sequence[Band],
+        content: str | Sequence[UserContent] | None,
+    ) -> tuple[str | None, str | None]:
+        """Reduce model-visible `content`. Text content is reduced; other content warns."""
+        if content is None:
+            return None, None
+        if isinstance(content, str):
+            return await self._reduce(ctx, call, bands, self._make_unit(content, suffix='.content'))
 
-    def _build_payload(self, result: Any) -> _Payload | None:
-        """Unwrap a `ToolReturn`, skip error payloads, and pre-render text/bytes.
-
-        Returns None when the result must not be reduced (an exception payload).
-        """
-        if isinstance(result, ToolReturn):
-            value: object = result.return_value
-            content = result.content
-            metadata = result.metadata
-            was_tool_return = True
-        else:
-            value = result
-            content = None
-            metadata = None
-            was_tool_return = False
-
-        if isinstance(value, BaseException):
-            return None
-
-        binary = is_binary(value)
-        text: str | None = None
-        if not binary:
-            text = to_text(value)
-            if self.strip_ansi:
-                text = strip_ansi(text)
-            data = text.encode('utf-8')
-        else:
-            data = to_bytes(value)
-
-        return _Payload(
-            value=value,
-            binary=binary,
-            text=text,
-            data=data,
-            original=result,
-            was_tool_return=was_tool_return,
-            content=content,
-            metadata=metadata,
-        )
+        text = ''.join(part for part in content if isinstance(part, str))
+        size = measure(text, over_tokens=self.over_tokens, tokenizer=self.tokenizer)
+        action = _select_action(bands, size)
+        if action is not None and not isinstance(action, Passthrough):
+            warnings.warn(
+                f'OverflowingToolOutput: tool {call.tool_name!r} returned large non-text '
+                f'content ({len(content)} parts); leaving it unreduced.',
+                stacklevel=2,
+            )
+        return None, None
 
     async def _apply(
         self,
         ctx: RunContext[AgentDepsT],
         call: ToolCallPart,
         action: Action,
-        payload: _Payload,
-    ) -> Any:
-        """Apply one action, falling back to its `then` when the action cannot run."""
+        unit: _Unit,
+    ) -> tuple[str | None, str | None]:
+        """Apply one action to a unit, falling back to its `then` when it cannot run."""
         if isinstance(action, Passthrough):
-            return payload.original
+            return None, None
 
         if isinstance(action, Truncate):
-            if payload.binary:
-                return await self._fallback(ctx, call, action.then, payload)
-            assert payload.text is not None
-            return self._rebuild(payload, truncate_text(payload.text, action.max_chars, action.strategy))
+            if unit.binary:
+                return await self._fallback(ctx, call, action.then, unit)
+            assert unit.text is not None
+            return truncate_text(unit.text, action.max_chars, action.strategy), None
 
         if isinstance(action, Spill):
-            return await self._spill(ctx, call, action, payload)
+            return await self._spill(ctx, call, action, unit)
 
-        return await self._summarize_action(ctx, call, action, payload)
+        return await self._summarize_action(ctx, call, action, unit)
 
     async def _fallback(
         self,
         ctx: RunContext[AgentDepsT],
         call: ToolCallPart,
         then: Action | None,
-        payload: _Payload,
-    ) -> Any:
-        """Run the fallback action, or return the original return when there is none."""
+        unit: _Unit,
+    ) -> tuple[str | None, str | None]:
+        """Run the fallback action, or keep the unit unchanged when there is none."""
         if then is None:
-            return payload.original
-        return await self._apply(ctx, call, then, payload)
+            return None, None
+        return await self._apply(ctx, call, then, unit)
 
     async def _spill(
         self,
         ctx: RunContext[AgentDepsT],
         call: ToolCallPart,
         action: Spill,
-        payload: _Payload,
-    ) -> Any:
-        key = _handle_key(ctx, call)
+        unit: _Unit,
+    ) -> tuple[str | None, str | None]:
+        key = _handle_key(ctx, call, unit.suffix)
         try:
-            handle = await self._store.write(key, payload.data)
+            handle = await self._store.write(key, unit.data)
         except Exception:
-            return await self._fallback(ctx, call, action.then, payload)
+            return await self._fallback(ctx, call, action.then, unit)
 
-        preview = _build_spill_preview(handle, payload, action.preview_chars, over_tokens=self.over_tokens)
-        metadata = _merge_handle_metadata(payload.metadata, handle, len(payload.data))
-        return ToolReturn(return_value=preview, content=payload.content, metadata=metadata)
+        preview = _build_spill_preview(handle, unit, action.preview_chars, over_tokens=self.over_tokens)
+        return preview, handle
 
     async def _summarize_action(
         self,
         ctx: RunContext[AgentDepsT],
         call: ToolCallPart,
         action: Summarize,
-        payload: _Payload,
-    ) -> Any:
-        if payload.binary:
-            return await self._fallback(ctx, call, action.then, payload)
-        assert payload.text is not None
+        unit: _Unit,
+    ) -> tuple[str | None, str | None]:
+        if unit.binary:
+            return await self._fallback(ctx, call, action.then, unit)
+        assert unit.text is not None
         try:
-            summary = await self._summarize(ctx, call, action, payload.text)
+            summary = await self._summarize(ctx, call, action, unit.text)
         except Exception:
-            return await self._fallback(ctx, call, action.then, payload)
-        return self._rebuild(payload, summary)
+            return await self._fallback(ctx, call, action.then, unit)
+        return summary, None
 
     async def _summarize(
         self,
@@ -350,13 +416,6 @@ class OverflowingToolOutput(AbstractCapability[AgentDepsT]):
         run = await agent.run(prompt, usage=ctx.usage)
         return run.output.strip()
 
-    @staticmethod
-    def _rebuild(payload: _Payload, new_text: str) -> Any:
-        """Return the reduced text, preserving the `ToolReturn` envelope when there was one."""
-        if payload.was_tool_return:
-            return ToolReturn(return_value=new_text, content=payload.content, metadata=payload.metadata)
-        return new_text
-
 
 def _select_action(bands: Sequence[Band], size: int) -> Action | None:
     """Return the first (largest-threshold) band action whose threshold `size` meets."""
@@ -366,20 +425,36 @@ def _select_action(bands: Sequence[Band], size: int) -> Action | None:
     return None
 
 
-def _handle_key(ctx: RunContext[AgentDepsT], call: ToolCallPart) -> str:
-    """Build a per-run, per-call, per-retry key so concurrent and retried calls never clash."""
+def _handle_key(ctx: RunContext[AgentDepsT], call: ToolCallPart, suffix: str = '') -> str:
+    """Build a per-run, per-call, per-retry key so concurrent and retried calls never clash.
+
+    `suffix` keeps a return's `return_value` and `content` spills on distinct handles.
+    """
     run_id = ctx.run_id or 'run'
     call_id = call.tool_call_id or 'call'
-    return f'{run_id}/{call_id}.{ctx.retry}'
+    return f'{run_id}/{call_id}.{ctx.retry}{suffix}'
 
 
-def _merge_handle_metadata(existing: Any, handle: str, byte_size: int) -> dict[str, Any]:
-    """Stash the handle in `ToolReturn.metadata` (app-only, costs no model tokens)."""
+def _is_mapping(value: object) -> bool:
+    """Plain `bool` guard so a narrowed `Any` does not leak an `Unknown` element type."""
+    return isinstance(value, Mapping)
+
+
+def _with_handles(
+    existing: Any,
+    value_handle: str | None,
+    value_bytes: int,
+    content_handle: str | None = None,
+) -> dict[str, Any]:
+    """Stash spill handle(s) in `ToolReturn.metadata` (app-only, costs no model tokens)."""
     base: dict[str, Any] = {}
-    if isinstance(existing, Mapping):
-        base.update(_copy_mapping(existing))  # pyright: ignore[reportUnknownArgumentType]
-    base['overflow_handle'] = handle
-    base['overflow_bytes'] = byte_size
+    if _is_mapping(existing):
+        base.update(_copy_mapping(existing))
+    if value_handle is not None:
+        base['overflow_handle'] = value_handle
+        base['overflow_bytes'] = value_bytes
+    if content_handle is not None:
+        base['overflow_content_handle'] = content_handle
     return base
 
 
@@ -388,19 +463,19 @@ def _copy_mapping(source: Mapping[Any, Any]) -> dict[str, Any]:
     return {str(key): source[key] for key in source}
 
 
-def _build_spill_preview(handle: str, payload: _Payload, preview_chars: int, *, over_tokens: bool) -> str:
+def _build_spill_preview(handle: str, unit: _Unit, preview_chars: int, *, over_tokens: bool) -> str:
     """Compose the model-visible spill stand-in: marker, sketch, and a head/tail preview."""
-    if payload.binary:
-        size_desc = f'{len(payload.data):,} bytes (binary)'
-        body = f'<{len(payload.data):,} bytes of binary data>'
+    if unit.binary:
+        size_desc = f'{len(unit.data):,} bytes (binary)'
+        body = f'<{len(unit.data):,} bytes of binary data>'
         sketch = ''
     else:
-        text = payload.text or ''
-        unit = 'tokens' if over_tokens else 'chars'
+        text = unit.text or ''
+        size_unit = 'tokens' if over_tokens else 'chars'
         amount = measure(text, over_tokens=over_tokens, tokenizer=None) if over_tokens else len(text)
-        size_desc = f'{amount:,} {unit}'
+        size_desc = f'{amount:,} {size_unit}'
         body = _head_tail_preview(text, preview_chars)
-        sketch = json_sketch(payload.value)
+        sketch = json_sketch(unit.value)
 
     header = (
         f'[Tool output too large ({size_desc}); stored to handle {handle!r}. '
@@ -424,6 +499,13 @@ def _head_tail_preview(text: str, preview_chars: int) -> str:
     return f'{text[:head_chars]}\n...[{omitted:,} chars omitted]...\n{text[-tail_chars:]}'
 
 
+_MAX_READ_LINES = 1_000
+"""Hard cap on lines returned by one `read_tool_result` call."""
+
+_MAX_READ_CHARS = 50_000
+"""Hard cap on characters returned by one `read_tool_result` call."""
+
+
 async def _read_slice(
     store: OverflowStore,
     handle: str,
@@ -432,7 +514,18 @@ async def _read_slice(
     from_end: bool,
     pattern: str | None,
 ) -> str:
-    """Read, optionally grep, and slice a spilled payload for `read_tool_result`."""
+    """Filter and slice a spilled payload for `read_tool_result`, bounded in both axes.
+
+    `pattern` is a literal substring (not a regex), so a model-supplied value cannot hang
+    the host with catastrophic backtracking. `limit` is clamped and the joined output is
+    capped, so one call can never return an unbounded amount of text.
+    """
+    if offset < 0:
+        raise ModelRetry('`offset` must be >= 0.')
+    if limit < 1:
+        raise ModelRetry('`limit` must be >= 1.')
+    limit = min(limit, _MAX_READ_LINES)
+
     try:
         data = await store.read(handle)
     except OSError as exc:
@@ -440,11 +533,7 @@ async def _read_slice(
 
     lines = data.decode('utf-8', errors='replace').splitlines()
     if pattern is not None:
-        try:
-            matcher = re.compile(pattern)
-        except re.error as exc:
-            raise ModelRetry(f'Invalid pattern {pattern!r}: {exc}.') from exc
-        lines = [line for line in lines if matcher.search(line)]
+        lines = [line for line in lines if pattern in line]
 
     total = len(lines)
     if from_end:
@@ -453,5 +542,10 @@ async def _read_slice(
     else:
         window = lines[offset : offset + limit]
 
-    header = f'[handle {handle!r}: {total:,} line(s) available; showing {len(window)}]'
-    return '\n'.join([header, *window])
+    body = '\n'.join(window)
+    capped = ''
+    if len(body) > _MAX_READ_CHARS:
+        body = body[:_MAX_READ_CHARS]
+        capped = ', output capped'
+    header = f'[handle {handle!r}: {total:,} matching line(s); showing {len(window)}{capped}]'
+    return f'{header}\n{body}' if body else header
