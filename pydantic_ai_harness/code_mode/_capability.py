@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
-from typing import TYPE_CHECKING, Any, TypedDict
+from typing import TYPE_CHECKING, Any
 
 from pydantic import TypeAdapter, ValidationError
 from pydantic_ai import AbstractToolset
@@ -12,6 +12,7 @@ from pydantic_ai.capabilities import AbstractCapability, CapabilityOrdering
 from pydantic_ai.capabilities._tool_search import ToolSearch as _ToolSearch
 from pydantic_ai.messages import ModelResponse, NativeToolSearchReturnPart, SystemPromptPart
 from pydantic_ai.tools import AgentDepsT, RunContext, ToolDefinition, ToolSelector
+from typing_extensions import TypedDict
 
 from pydantic_ai_harness.code_mode._toolset import CodeModeToolset
 
