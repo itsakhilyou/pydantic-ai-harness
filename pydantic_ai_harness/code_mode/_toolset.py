@@ -53,7 +53,7 @@ _DispatchFn = Callable[[str, dict[str, Any]], Coroutine[Any, Any, Any]]
 
 # A raw OS callback. Return `pydantic_monty.NOT_HANDLED` to defer the call to the
 # sandbox's default, which leaves it unavailable.
-CodeModeOSCallback = Callable[[OsFunction, tuple[Any, ...], dict[str, Any]], Any]
+CodeModeOSCallback = Callable[[OsFunction, tuple[object, ...], dict[str, object]], object]
 # Accepted by `CodeMode.os_access`: a ready-made OS implementation or a raw callback.
 CodeModeOS = AbstractOS | CodeModeOSCallback
 # Accepted by `CodeMode.mount`: one or more host-directory mounts.
@@ -93,8 +93,11 @@ The sandbox uses Monty, a subset of Python. Key restrictions:
 # a `mount` only exposes filesystem paths, while environment and clock calls
 # require an `os` handler.
 _NO_OS_RESTRICTION = (
-    '- **No wall-clock or timing primitives**: `asyncio.sleep`, `datetime.datetime.now()`, '
-    '`datetime.date.today()`, and the `time` module are unavailable.'
+    '- **No filesystem, environment, or timing primitives**: `pathlib.Path` I/O, '
+    '`os.getenv`/`os.environ`, `datetime.datetime.now()`, `datetime.date.today()`, `asyncio.sleep`, '
+    'and the `time` module are unavailable here (no filesystem mount or OS handler is configured). '
+    '`os` and `pathlib` import successfully, but their I/O operations are not supported in this '
+    'configuration.'
 )
 _MOUNT_ONLY_NOTE = (
     '- **Mounted filesystem access**: `pathlib.Path` operations under the configured mount '

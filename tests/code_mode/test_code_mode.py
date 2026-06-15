@@ -1864,13 +1864,15 @@ def _unused_os_callback(fn: OsFunction, args: tuple[Any, ...], kwargs: dict[str,
 class TestCodeModeOSAccess:
     """`CodeMode(os_access=...)` / `mount=...` give sandboxed code host-backed OS access."""
 
-    async def test_description_default_keeps_no_wallclock_restriction(self) -> None:
-        """Without `os`/`mount`, the description keeps the no-wall-clock restriction."""
+    async def test_description_default_notes_no_fs_env_or_clock(self) -> None:
+        """Without `os`/`mount`, the description states filesystem, env, and clock calls are
+        unavailable, so the model does not waste retries calling `pathlib`/`os` I/O."""
         wrapper = CodeMode[None]().get_wrapper_toolset(_build_function_toolset(add))
         assert isinstance(wrapper, CodeModeToolset)
         description = (await wrapper.get_tools(build_run_context(None)))['run_code'].tool_def.description
         assert description is not None
-        assert 'No wall-clock or timing primitives' in description
+        assert 'No filesystem, environment, or timing primitives' in description
+        assert 'their I/O operations are not supported in this configuration' in description
 
     async def test_description_with_os_callback_notes_host_access(self) -> None:
         """An `os` callback swaps the restriction line for the host-access note."""
