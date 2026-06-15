@@ -5,7 +5,7 @@ from __future__ import annotations
 import warnings
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, TypeGuard
 
 from pydantic_ai import FunctionToolset
 from pydantic_ai.capabilities import AbstractCapability
@@ -200,12 +200,13 @@ class OverflowingToolOutput(AbstractCapability[AgentDepsT]):
         result: Any,
     ) -> Any:
         """Reduce the tool result -- both `return_value` and model-visible `content`."""
-        original: Any = result
+        original: object = result
         if call.tool_name == READ_TOOL_NAME:
             return original
         if not await matches_tool_selector(self.tool_filter, ctx, tool_def):
             return original
 
+        metadata: object
         if isinstance(result, ToolReturn):
             return_value: ToolReturnContent = result.return_value
             content = result.content
@@ -246,19 +247,19 @@ class OverflowingToolOutput(AbstractCapability[AgentDepsT]):
         wrapped: bool,
         return_value: ToolReturnContent,
         content: str | Sequence[UserContent] | None,
-        metadata: Any,
+        metadata: object,
         value_unit: _Unit,
         value_text: str | None,
         value_handle: str | None,
         content_text: str | None,
         content_handle: str | None,
-    ) -> Any:
+    ) -> object:
         """Rebuild the tool result from the reduced parts, preserving the envelope."""
         if wrapped:
             new_metadata = metadata
             if value_handle is not None or content_handle is not None:
                 new_metadata = _with_handles(metadata, value_handle, len(value_unit.data), content_handle)
-            wrapped_out: ToolReturn[Any] = ToolReturn(
+            wrapped_out: ToolReturn[object] = ToolReturn(
                 return_value=value_text if value_text is not None else return_value,
                 content=content_text if content_text is not None else content,
                 metadata=new_metadata,
@@ -267,7 +268,7 @@ class OverflowingToolOutput(AbstractCapability[AgentDepsT]):
 
         # A plain (non-`ToolReturn`) result has no separate content part.
         if value_handle is not None:
-            spilled_out: ToolReturn[Any] = ToolReturn(
+            spilled_out: ToolReturn[object] = ToolReturn(
                 return_value=value_text, metadata=_with_handles(None, value_handle, len(value_unit.data))
             )
             return spilled_out
@@ -435,19 +436,19 @@ def _handle_key(ctx: RunContext[AgentDepsT], call: ToolCallPart, suffix: str = '
     return f'{run_id}/{call_id}.{ctx.retry}{suffix}'
 
 
-def _is_mapping(value: object) -> bool:
-    """Plain `bool` guard so a narrowed `Any` does not leak an `Unknown` element type."""
+def _is_mapping(value: object) -> TypeGuard[Mapping[object, object]]:
+    """`TypeGuard` so a mapping narrows to a known element type, not `Unknown`."""
     return isinstance(value, Mapping)
 
 
 def _with_handles(
-    existing: Any,
+    existing: object,
     value_handle: str | None,
     value_bytes: int,
     content_handle: str | None = None,
-) -> dict[str, Any]:
+) -> dict[str, object]:
     """Stash spill handle(s) in `ToolReturn.metadata` (app-only, costs no model tokens)."""
-    base: dict[str, Any] = {}
+    base: dict[str, object] = {}
     if _is_mapping(existing):
         base.update(_copy_mapping(existing))
     if value_handle is not None:
@@ -458,7 +459,7 @@ def _with_handles(
     return base
 
 
-def _copy_mapping(source: Mapping[Any, Any]) -> dict[str, Any]:
+def _copy_mapping(source: Mapping[object, object]) -> dict[str, object]:
     """Copy an arbitrary mapping with stringified keys (tool metadata is app-defined)."""
     return {str(key): source[key] for key in source}
 

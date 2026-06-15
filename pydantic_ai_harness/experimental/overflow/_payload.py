@@ -10,7 +10,7 @@ from __future__ import annotations
 import re
 from collections.abc import Callable, Mapping, Sequence
 from enum import Enum
-from typing import Any
+from typing import TypeGuard
 
 from pydantic_ai.messages import ModelMessage, ModelRequest, SystemPromptPart
 from pydantic_core import to_json
@@ -80,12 +80,11 @@ def measure(text: str, *, over_tokens: bool, tokenizer: Callable[[str], int] | N
     return estimate_token_count([message], tokenizer)
 
 
-def json_sketch(value: Any) -> str:
+def json_sketch(value: object) -> str:
     """Build a one-line shape hint for a structured value, or '' for anything else.
 
-    `value` is a `ToolReturn.return_value` (dynamically typed). The `_is_*` guards return
-    `bool` rather than narrowing, so `value` stays `Any` and is assignable to the
-    `Mapping`/`Sequence` helper parameters without leaking an `Unknown` element type.
+    The `_is_*` guards are `TypeGuard`s, so a `Mapping`/`Sequence` value narrows to a known
+    element type (`object`) the strict type checker accepts -- no `Any` and no `Unknown`.
     """
     if _is_mapping(value):
         return _sketch_mapping(value)
@@ -94,22 +93,22 @@ def json_sketch(value: Any) -> str:
     return ''
 
 
-def _is_mapping(value: object) -> bool:
+def _is_mapping(value: object) -> TypeGuard[Mapping[object, object]]:
     return isinstance(value, Mapping)
 
 
-def _is_text_sequence(value: object) -> bool:
+def _is_text_sequence(value: object) -> TypeGuard[Sequence[object]]:
     return isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray))
 
 
-def _sketch_mapping(mapping: Mapping[Any, Any]) -> str:
+def _sketch_mapping(mapping: Mapping[object, object]) -> str:
     keys = list(mapping)
     shown = ', '.join(f'{key!r}: {type(mapping[key]).__name__}' for key in keys[:10])
     more = '' if len(keys) <= 10 else f', ... ({len(keys)} keys)'
     return f'{{{shown}{more}}}'
 
 
-def _sketch_sequence(items: Sequence[Any]) -> str:
+def _sketch_sequence(items: Sequence[object]) -> str:
     elem = type(items[0]).__name__ if items else 'empty'
     return f'[{len(items)} items of {elem}]'
 
