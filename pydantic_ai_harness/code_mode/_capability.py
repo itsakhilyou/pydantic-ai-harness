@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from dataclasses import dataclass, field, replace
+from dataclasses import KW_ONLY, dataclass, field, replace
 from typing import TYPE_CHECKING, Any
 
 from pydantic import TypeAdapter, ValidationError
@@ -14,7 +14,7 @@ from pydantic_ai.messages import ModelResponse, NativeToolSearchReturnPart, Syst
 from pydantic_ai.tools import AgentDepsT, RunContext, ToolDefinition, ToolSelector
 from typing_extensions import TypedDict
 
-from pydantic_ai_harness.code_mode._toolset import CodeModeToolset
+from pydantic_ai_harness.code_mode._toolset import CodeModeMount, CodeModeOS, CodeModeToolset
 
 if TYPE_CHECKING:
     from pydantic_ai.capabilities.abstract import ValidatedToolArgs
@@ -50,6 +50,23 @@ class CodeMode(AbstractCapability[AgentDepsT]):
     # Sandbox only specific tools
     agent = Agent('openai:gpt-5', capabilities=[CodeMode(tools=['search', 'fetch'])])
     ```
+
+    By default, sandboxed code cannot touch the host -- no filesystem, environment
+    variables, or clock. Two parameters open it up:
+
+    - `mount` shares specific host directories: reach for it when the agent reads or
+      writes real files.
+    - `os_access` routes the sandbox's OS calls to a handler you provide: reach for it
+      when the agent needs environment variables, the clock, or filesystem behavior you
+      control.
+
+    Both expose the real host to model-written code, so grant only what the task needs.
+
+    ```python
+    from pydantic_monty import MountDir
+
+    agent = Agent('openai:gpt-5', capabilities=[CodeMode(mount=MountDir('/work', '/tmp/agent-work'))])
+    ```
     """
 
     tools: ToolSelector[AgentDepsT] = field(default='all')
@@ -63,6 +80,14 @@ class CodeMode(AbstractCapability[AgentDepsT]):
 
     max_retries: int = 3
     """Maximum number of retries for the `run_code` tool (syntax errors count as retries)."""
+
+    _: KW_ONLY
+
+    os_access: CodeModeOS | None = None
+    """Give sandboxed code environment variables, the clock, and file I/O through a handler you provide; unset, they are unavailable."""
+
+    mount: CodeModeMount | None = None
+    """Host directories to expose to sandboxed `pathlib` code; each mount's `mode` controls whether writes reach the host."""
 
     dynamic_catalog: bool = False
     """Keep the `run_code` tool definition cache-stable as the sandboxed toolset grows.
@@ -113,6 +138,8 @@ class CodeMode(AbstractCapability[AgentDepsT]):
             tool_selector=self.tools,
             max_retries=self.max_retries,
             dynamic_catalog=self.dynamic_catalog,
+            os_access=self.os_access,
+            mount=self.mount,
         )
 
     async def after_tool_execute(

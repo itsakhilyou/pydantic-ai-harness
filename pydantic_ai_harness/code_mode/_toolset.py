@@ -33,6 +33,7 @@ except ImportError:  # pragma: no cover
 
 try:
     from pydantic_monty import (
+        AbstractOS,
         ExternalException,
         ExternalResult,
         ExternalReturnValue,
@@ -44,7 +45,9 @@ try:
         MontyRuntimeError,
         MontySyntaxError,
         MontyTypingError,
+        MountDir,
         NameLookupSnapshot,
+        OsFunction,
     )
 except ImportError as _import_error:  # pragma: no cover
     raise ImportError(
@@ -54,6 +57,14 @@ from typing_extensions import NotRequired, TypedDict
 
 # Type alias for the dispatch callback passed to _execution_loop.
 _DispatchFn = Callable[[str, dict[str, Any]], Coroutine[Any, Any, Any]]
+
+# A raw OS callback. Return `pydantic_monty.NOT_HANDLED` to defer the call to the
+# sandbox's default, which leaves it unavailable.
+CodeModeOSCallback = Callable[[OsFunction, tuple[object, ...], dict[str, object]], object]
+# Accepted by `CodeMode.os_access`: a ready-made OS implementation or a raw callback.
+CodeModeOS = AbstractOS | CodeModeOSCallback
+# Accepted by `CodeMode.mount`: one or more host-directory mounts.
+CodeModeMount = MountDir | list[MountDir]
 
 
 class _RunCodeArguments(TypedDict):
@@ -76,14 +87,38 @@ _RUN_CODE_ARGS_VALIDATOR: SchemaValidatorProt = _RUN_CODE_ADAPTER.validator  # p
 # and to reconstruct multimodal types (e.g. BinaryContent) from Monty results (validate_python).
 _TOOL_RETURN_CONTENT_TA: TypeAdapter[Any] = TypeAdapter(ToolReturnContent)
 
-_RUN_CODE_BASE_DESCRIPTION = """\
+_RUN_CODE_DESCRIPTION_HEAD = """\
 Write and run Python code in a sandboxed environment.
 
 The sandbox uses Monty, a subset of Python. Key restrictions:
 - **No classes**: class definitions are not supported
 - **No third-party libraries**: only the standard library modules listed below can be used
-- **Importable standard library modules**: `sys`, `typing`, `asyncio`, `math`, `json`, `re`, `datetime`, `os`, `pathlib`. These must be imported at the top of your snippet before use, just like in regular Python. For example: `import asyncio` then `results = await asyncio.gather(tool_one(...), tool_two(...))`.
-- **No wall-clock or timing primitives**: `asyncio.sleep`, `datetime.datetime.now()`, `datetime.date.today()`, and the `time` module are unavailable.
+- **Importable standard library modules**: `sys`, `typing`, `asyncio`, `math`, `json`, `re`, `datetime`, `os`, `pathlib`. These must be imported before use, just like in regular Python. For example: `import asyncio` then `results = await asyncio.gather(tool_one(...), tool_two(...))`."""
+
+# Timing/OS restriction line, swapped depending on what host access the agent
+# configured. Three states, because `mount` and `os` enable different things:
+# a `mount` only exposes filesystem paths, while environment and clock calls
+# require an `os` handler.
+_NO_OS_RESTRICTION = (
+    '- **No filesystem, environment, or timing primitives**: `pathlib.Path` I/O, '
+    '`os.getenv`/`os.environ`, `datetime.datetime.now()`, `datetime.date.today()`, `asyncio.sleep`, '
+    'and the `time` module are unavailable here (no filesystem mount or OS handler is configured). '
+    '`os` and `pathlib` import successfully, but their I/O operations are not supported in this '
+    'configuration.'
+)
+_MOUNT_ONLY_NOTE = (
+    '- **Mounted filesystem access**: `pathlib.Path` operations under the configured mount '
+    'point(s) are routed to the host. `os.getenv`/`os.environ`, `datetime.datetime.now()`, '
+    '`datetime.date.today()`, `asyncio.sleep`, and the `time` module remain unavailable.'
+)
+_OS_ENABLED_NOTE = (
+    '- **Host-backed OS access**: `pathlib.Path` operations, `os.getenv`/`os.environ`, '
+    '`datetime.datetime.now()`, and `datetime.date.today()` are routed to the OS handler '
+    'configured for this agent (availability depends on that configuration). `asyncio.sleep` and '
+    'the `time` module remain unavailable.'
+)
+
+_RUN_CODE_DESCRIPTION_TAIL = """\
 - **No `import *`**: wildcard imports are not supported
 
 State is preserved between calls (REPL-style). Set `restart: true` to reset state.
@@ -95,6 +130,22 @@ structured data. Use `print()` only for supplementary logging or debug output.
 Returns the last expression's value directly. If `print()` was also called, returns \
 `{"output": "<printed text>", "result": <last expression>}`.\
 """
+
+
+def _base_description(*, has_os: bool, has_mount: bool) -> str:
+    """Assemble the `run_code` base description with the right OS-access restriction line.
+
+    `os` routes environment, clock, and filesystem calls; a `mount` alone only
+    exposes filesystem paths, so a mount-only sandbox must not advertise env or
+    clock access (the model would generate calls that fail and burn retries).
+    """
+    if has_os:
+        restriction = _OS_ENABLED_NOTE
+    elif has_mount:
+        restriction = _MOUNT_ONLY_NOTE
+    else:
+        restriction = _NO_OS_RESTRICTION
+    return f'{_RUN_CODE_DESCRIPTION_HEAD}\n{restriction}\n{_RUN_CODE_DESCRIPTION_TAIL}'
 
 
 def _functions_header(*, has_sync: bool, has_async: bool) -> str:
@@ -191,6 +242,12 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
     max_retries: int = 3
     """Maximum number of retries for the `run_code` tool (syntax errors count as retries)."""
 
+    os_access: CodeModeOS | None = None
+    """Give sandboxed code environment variables, the clock, and file I/O through a handler you provide; unset, they are unavailable."""
+
+    mount: CodeModeMount | None = None
+    """Host directories to expose to sandboxed `pathlib` code; each mount's `mode` controls whether writes reach the host."""
+
     dynamic_catalog: bool = False
     """Move the sandboxed-tool catalog out of `run_code.description` and into instructions.
 
@@ -283,11 +340,15 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
         # `dynamic_catalog` keeps the catalog out of `run_code.description` (cache-stable
         # tool-defs block) and surfaces it via `get_instructions` instead. Stash it for the
         # `get_instructions` call later this step; empty string means "nothing to surface".
+        # The base prose stays host-aware in both modes -- its OS/mount restriction line is
+        # static (it doesn't change per discovery), so it belongs in the cached description.
+        has_os = self.os_access is not None
+        has_mount = self.mount is not None
         if self.dynamic_catalog:
-            description = _RUN_CODE_BASE_DESCRIPTION
+            description = _base_description(has_os=has_os, has_mount=has_mount)
             self._last_catalog = self._render_catalog(callable_defs)
         else:
-            description = self._build_description(callable_defs)
+            description = self._build_description(callable_defs, has_os=has_os, has_mount=has_mount)
             self._last_catalog = ''
 
         if _RUN_CODE_TOOL_NAME in native_tools:
@@ -451,7 +512,7 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
         capture = _PrintCapture()
 
         try:
-            monty_state = self._repl.feed_start(code, print_callback=capture)
+            monty_state = self._repl.feed_start(code, print_callback=capture, os=self.os_access, mount=self.mount)
             completed = await _execution_loop(
                 monty_state,
                 dispatch=dispatch_tool_call,
@@ -459,6 +520,8 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
                 sanitized_to_original=sanitized_to_original,
                 sequential_tools=sequential_tools,
                 global_sequential=global_sequential,
+                os_access=self.os_access,
+                mount=self.mount,
             )
         except MontySyntaxError as e:
             raise ModelRetry(f'Syntax error in code:\n{_prepend_prints(e.display(), capture)}') from e
@@ -556,12 +619,13 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
         return callable_defs, sanitized_to_original
 
     @staticmethod
-    def _build_description(callable_defs: dict[str, ToolDefinition]) -> str:
+    def _build_description(callable_defs: dict[str, ToolDefinition], *, has_os: bool, has_mount: bool) -> str:
         """Render the `run_code` description: base prose + TypedDicts + function signatures."""
+        base = _base_description(has_os=has_os, has_mount=has_mount)
         catalog = CodeModeToolset._render_catalog(callable_defs)
         if not catalog:
-            return _RUN_CODE_BASE_DESCRIPTION
-        return _RUN_CODE_BASE_DESCRIPTION + '\n\n' + catalog
+            return base
+        return base + '\n\n' + catalog
 
     @staticmethod
     def _render_catalog(callable_defs: dict[str, ToolDefinition]) -> str:
@@ -643,6 +707,8 @@ async def _execution_loop(
     sanitized_to_original: dict[str, str],
     sequential_tools: set[str],
     global_sequential: bool,
+    os_access: CodeModeOS | None,
+    mount: CodeModeMount | None,
 ) -> MontyComplete:
     """Drive the Monty REPL via the synchronous snapshot API until completion.
 
@@ -661,6 +727,9 @@ async def _execution_loop(
     - **Global sequential mode** (DBOS/Temporal): all tools are deferred via
       `resume({'future': ...})` but stored as bare coroutines and awaited
       one-at-a-time at `FutureSnapshot` to prevent interleaving.
+
+    `os`/`mount` must be passed to every `resume` call (not just `feed_start`):
+    Monty's auto-dispatch of OS calls stops the moment a resume omits them.
     """
     pending: dict[int, asyncio.Task[Any] | Coroutine[Any, Any, Any]] = {}
     # Results from parallel tasks that were awaited early (at a sequential-tool
@@ -669,7 +738,7 @@ async def _execution_loop(
     try:
         while not isinstance(monty_state, MontyComplete):
             if isinstance(monty_state, NameLookupSnapshot):
-                monty_state = monty_state.resume()
+                monty_state = monty_state.resume(os=os_access, mount=mount)
             elif isinstance(monty_state, FunctionSnapshot):
                 monty_state = await _handle_function_snapshot(
                     monty_state,
@@ -680,6 +749,8 @@ async def _execution_loop(
                     global_sequential=global_sequential,
                     pending=pending,
                     pre_resolved=pre_resolved,
+                    os_access=os_access,
+                    mount=mount,
                 )
             else:
                 monty_state = await _resolve_future_snapshot(
@@ -687,6 +758,8 @@ async def _execution_loop(
                     pending=pending,
                     pre_resolved=pre_resolved,
                     global_sequential=global_sequential,
+                    os_access=os_access,
+                    mount=mount,
                 )
     finally:
         for item in pending.values():  # pragma: no cover
@@ -708,16 +781,20 @@ async def _handle_function_snapshot(
     global_sequential: bool,
     pending: dict[int, asyncio.Task[Any] | Coroutine[Any, Any, Any]],
     pre_resolved: dict[int, ExternalResult],
+    os_access: CodeModeOS | None,
+    mount: CodeModeMount | None,
 ) -> FunctionSnapshot | FutureSnapshot | NameLookupSnapshot | MontyComplete:
     """Handle a single FunctionSnapshot from the Monty execution loop."""
     fn_name = snapshot.function_name
 
     if fn_name not in callable_defs:
-        return snapshot.resume({'exception': NameError(f'Unknown function: {fn_name}')})
+        return snapshot.resume({'exception': NameError(f'Unknown function: {fn_name}')}, os=os_access, mount=mount)
 
     if snapshot.args:
         return snapshot.resume(
-            {'exception': TypeError(f'{fn_name}() does not accept positional arguments; use keyword arguments')}
+            {'exception': TypeError(f'{fn_name}() does not accept positional arguments; use keyword arguments')},
+            os=os_access,
+            mount=mount,
         )
 
     original_name = sanitized_to_original.get(fn_name, fn_name)
@@ -730,8 +807,8 @@ async def _handle_function_snapshot(
             pre_resolved[cid] = await _resolve_coro(pending.pop(cid))
         outcome = await _resolve_coro(dispatch(original_name, snapshot.kwargs))
         if 'return_value' in outcome:
-            return snapshot.resume({'return_value': outcome['return_value']})
-        return snapshot.resume({'exception': outcome['exception']})
+            return snapshot.resume({'return_value': outcome['return_value']}, os=os_access, mount=mount)
+        return snapshot.resume({'exception': outcome['exception']}, os=os_access, mount=mount)
 
     # Deferred execution -- store for later resolution at FutureSnapshot.
     if global_sequential:
@@ -740,7 +817,7 @@ async def _handle_function_snapshot(
     else:
         # Eagerly schedule as a Task for concurrent execution.
         pending[snapshot.call_id] = asyncio.ensure_future(dispatch(original_name, snapshot.kwargs))
-    return snapshot.resume({'future': ...})
+    return snapshot.resume({'future': ...}, os=os_access, mount=mount)
 
 
 async def _resolve_future_snapshot(
@@ -749,11 +826,13 @@ async def _resolve_future_snapshot(
     pending: dict[int, asyncio.Task[Any] | Coroutine[Any, Any, Any]],
     pre_resolved: dict[int, ExternalResult],
     global_sequential: bool,
+    os_access: CodeModeOS | None,
+    mount: CodeModeMount | None,
 ) -> FunctionSnapshot | FutureSnapshot | NameLookupSnapshot | MontyComplete:
     """Resolve pending tool calls at a FutureSnapshot."""
     pending_ids = snapshot.pending_call_ids
     if not pending_ids:  # pragma: no cover
-        return snapshot.resume(results={})
+        return snapshot.resume(results={}, os=os_access, mount=mount)
 
     results: dict[int, ExternalResult] = {}
     for cid in pending_ids:
@@ -772,7 +851,7 @@ async def _resolve_future_snapshot(
         for cid, outcome in zip(gather_ids, settled):
             results[cid] = _settle_outcome(outcome)
 
-    return snapshot.resume(results=results)
+    return snapshot.resume(results=results, os=os_access, mount=mount)
 
 
 async def _resolve_coro(
