@@ -4,8 +4,9 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, TypedDict
 
+from pydantic import TypeAdapter, ValidationError
 from pydantic_ai import AbstractToolset
 from pydantic_ai.capabilities import AbstractCapability, CapabilityOrdering
 from pydantic_ai.capabilities._tool_search import ToolSearch as _ToolSearch
@@ -163,24 +164,38 @@ class CodeMode(AbstractCapability[AgentDepsT]):
         ctx.enqueue(SystemPromptPart(content=f'{_DISCOVERY_ANNOUNCEMENT_PREFIX}: {listing}.'))
 
 
-def _extract_discovered_names(content: Any) -> list[str]:
+class _DiscoveredCatalog(TypedDict):
+    """Lenient view of a tool-search return: just the entry list, items left unvalidated."""
+
+    discovered_tools: list[object]
+
+
+class _DiscoveredEntry(TypedDict):
+    """Lenient view of one discovered-tool entry: only the name we announce."""
+
+    name: str
+
+
+_CATALOG_ADAPTER = TypeAdapter(_DiscoveredCatalog)
+_ENTRY_ADAPTER = TypeAdapter(_DiscoveredEntry)
+
+
+def _extract_discovered_names(content: object) -> list[str]:
     """Read newly-discovered tool names from a tool-search return content.
 
-    Accepts both the local `ToolSearchReturnContent` (TypedDict shape) and the same shape
-    on a `NativeToolSearchReturnPart`. Returns `[]` for any malformed/unexpected input --
-    the announcement is a courtesy nudge, not load-bearing logic.
+    Carried on both the local `ToolSearchReturnPart` and the native
+    `NativeToolSearchReturnPart`. Validated leniently: a malformed catalog yields `[]` and a
+    malformed entry is skipped, since the announcement is a courtesy nudge, not load-bearing
+    logic.
     """
-    if not isinstance(content, dict):
+    try:
+        catalog = _CATALOG_ADAPTER.validate_python(content)
+    except ValidationError:
         return []
-    typed = cast(dict[str, Any], content)
-    raw = typed.get('discovered_tools')
-    if not isinstance(raw, list):
-        return []
-    raw_list = cast(list[Any], raw)
     names: list[str] = []
-    for match in raw_list:
-        if isinstance(match, dict):
-            name = cast(dict[str, Any], match).get('name')
-            if isinstance(name, str):
-                names.append(name)
+    for entry in catalog['discovered_tools']:
+        try:
+            names.append(_ENTRY_ADAPTER.validate_python(entry)['name'])
+        except ValidationError:
+            continue
     return names
