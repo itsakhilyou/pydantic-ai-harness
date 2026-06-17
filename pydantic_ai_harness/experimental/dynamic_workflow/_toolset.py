@@ -185,7 +185,7 @@ def _render_reveal(name: str, description: str | None, tool_name: str) -> str:
     return f'A new sub-agent is now available to call from inside the `{tool_name}` script:\n\n```python\n{block}\n```'
 
 
-def _workflow_result(result: Any, printed: str) -> Any:
+def _workflow_result(result: object, printed: str) -> object:
     """Shape the tool return: the script's result, its captured `print()` output, or both."""
     if not printed:
         return result if result is not None else {}

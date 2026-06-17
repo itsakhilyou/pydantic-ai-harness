@@ -27,7 +27,7 @@ Each callable is a full `Agent.run` -- its own model loop, message history, tool
 `output_type` -- not a plain function. Inside the script the model composes them with ordinary
 control flow: `asyncio.gather` to fan out, a `max(...)` to pick a winner, a `for`/`while` to loop.
 
-> If you know [Code Mode](../code_mode/README.md): this is the same sandbox and the same idea, with
+> If you know [Code Mode](../../code_mode/README.md): this is the same sandbox and the same idea, with
 > sub-agents as the callables instead of the agent's own tools.
 
 ## Why
@@ -316,7 +316,7 @@ loop patterns shown above ship now; fork and durable resume are planned.
 
 ## Further reading
 
-- [Code Mode](../code_mode/README.md) -- the same sandbox, calling the agent's own tools instead of sub-agents.
+- [Code Mode](../../code_mode/README.md) -- the same sandbox, calling the agent's own tools instead of sub-agents.
 - [Capabilities](https://pydantic.dev/docs/ai/core-concepts/capabilities/) ·
   [On-demand capabilities](https://pydantic.dev/docs/ai/core-concepts/capabilities/#on-demand-capabilities)
 - [Monty](https://github.com/pydantic/monty)
