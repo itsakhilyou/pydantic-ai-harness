@@ -6,51 +6,65 @@ Let an agent orchestrate several sub-agents from a single Python script it write
 > `HarnessExperimentalWarning`: the API may change in any release. Silence it with
 > `warnings.filterwarnings('ignore', category=HarnessExperimentalWarning)` once you've accepted that.
 
-## Why
+You give `DynamicWorkflow` a catalog of named sub-agents. It exposes one tool, `run_workflow`; the
+model calls it by writing a Python script in which each sub-agent is an `async` function. The
+script runs to completion in a single tool call, and only its return value goes back to the model.
 
-When an orchestrator coordinates sub-agents by calling them **one per tool call**, two costs add
-up. Each step that depends on a previous result -- score these drafts, pick the best, refine it,
-loop until it passes -- has to be its own model turn, because the orchestrator must see each result
-before it can issue the next call. And every one of those intermediate results lands back in the
-orchestrator's context, growing the prompt and pulling the model's attention off the goal.
+```python
+from pydantic_ai import Agent
+from pydantic_ai_harness.experimental.dynamic_workflow import DynamicWorkflow, WorkflowAgent
 
-`DynamicWorkflow` moves that coordination out of the model's turns and into code. The orchestrator
-writes one Python script that calls the sub-agents, and ordinary control flow does the rest --
-`asyncio.gather` to run them in parallel, a `max(...)` to choose a winner, a `for`/`while` to loop.
-The script runs to completion in a **single** tool call, and only its final value returns to the
-model; the intermediate drafts and scores stay in the sandbox as local variables.
+reviewer = Agent('openai:gpt-5', name='reviewer', instructions='Review code for bugs.')
+summarizer = Agent('openai:gpt-5', name='summarizer', instructions='Summarize findings.')
 
-> Score three drafts, pick the best, refine it. One-per-call, that's three sequential model turns
-> after drafting -- and all three drafts and all three scores travel back through the orchestrator's
-> context to get there. As a script it's one tool call: the scoring, the `max(...)`, and the refine
-> are plain Python, and the model only ever sees the winner.
+orchestrator = Agent(
+    'openai:gpt-5',
+    capabilities=[DynamicWorkflow(agents=[WorkflowAgent(agent=reviewer), WorkflowAgent(agent=summarizer)])],
+)
+```
 
-The mechanism -- control flow as code, with intermediate results kept out of the model's context --
-is the one Anthropic describes in
-[*code execution with MCP*](https://www.anthropic.com/engineering/code-execution-with-mcp); the
-orchestration patterns it expresses (chaining, parallelization, orchestrator-workers,
-evaluator-optimizer) are catalogued in
-[*Building Effective Agents*](https://www.anthropic.com/engineering/building-effective-agents).
-`DynamicWorkflow` applies both to sub-agents, in the spirit of
-[Claude Code's dynamic workflows](https://claude.com/blog/introducing-dynamic-workflows-in-claude-code).
-
-## What it is
-
-You give `DynamicWorkflow` a **catalog of named sub-agents**. It exposes a single `run_workflow`
-tool; the model calls it by writing a Python script in which each sub-agent is an `async` function.
-The script runs in [Monty](https://github.com/pydantic/monty), a restricted-Python sandbox -- it can
-fan out with `asyncio.gather`, chain one agent's output into the next, vote across several, and
-loop, all before returning. Only the script's result goes back to the model; the intermediate
-results stay in the sandbox.
-
-Each callable is a full `Agent.run`, not a plain function -- its own model loop, its own message
-history, its own tools and typed `output_type`. Because those "tools" are themselves
-non-deterministic, token-expensive, and capable of orchestrating, `DynamicWorkflow` adds an exact
-ceiling on sub-agent calls (`max_agent_calls`), usage shared across the tree, and a guard against
-nesting workflows.
+Each callable is a full `Agent.run` -- its own model loop, message history, tools, and typed
+`output_type` -- not a plain function. Inside the script the model composes them with ordinary
+control flow: `asyncio.gather` to fan out, a `max(...)` to pick a winner, a `for`/`while` to loop.
 
 > If you know [Code Mode](../code_mode/README.md): this is the same sandbox and the same idea, with
 > sub-agents as the callables instead of the agent's own tools.
+
+## Why
+
+Coordinating sub-agents one-per-tool-call has two costs. Any step that depends on a previous result
+-- score these drafts, pick the best, refine it, loop until it passes -- must be its own model
+turn, because the orchestrator has to see each result before issuing the next call. And every
+intermediate result lands back in the orchestrator's context, growing the prompt and pulling the
+model off the goal.
+
+`DynamicWorkflow` moves that coordination out of the model's turns and into a script. The scoring,
+the selection, and the refine step are plain Python that runs in one tool call; the intermediate
+drafts and scores stay in the sandbox as local variables, and only the final value returns to the
+model. A generate-score-refine tournament that is three sequential turns one-per-call (with every
+draft and score traveling back through context) becomes a single turn where the model sees only the
+winner.
+
+This is the mechanism Anthropic describes in
+[*code execution with MCP*](https://www.anthropic.com/engineering/code-execution-with-mcp), applied
+to sub-agents. The orchestration patterns the script can express (chaining, parallelization,
+orchestrator-workers, evaluator-optimizer) are catalogued in
+[*Building Effective Agents*](https://www.anthropic.com/engineering/building-effective-agents), in
+the spirit of
+[Claude Code's dynamic workflows](https://claude.com/blog/introducing-dynamic-workflows-in-claude-code).
+
+Because each callable is a real agent run -- non-deterministic, token-expensive, and itself capable
+of orchestrating -- `DynamicWorkflow` adds an exact ceiling on sub-agent calls (`max_agent_calls`),
+usage shared across the tree, and a guard against nesting workflows. See
+[Budget and safety](#budget-and-safety).
+
+## Installation
+
+`DynamicWorkflow` runs scripts in the [Monty](https://github.com/pydantic/monty) sandbox:
+
+```bash
+pip install "pydantic-ai-harness[dynamic-workflow]"
+```
 
 ## Runnable example
 
@@ -62,7 +76,7 @@ uv run --with 'pydantic-ai-harness[dynamic-workflow]' --with anthropic --with lo
 ```
 
 ```python
-# wf.py -- an orchestrator that runs a generate → score → refine tournament in one tool call.
+# wf.py -- an orchestrator that runs a generate -> score -> refine tournament in one tool call.
 import asyncio
 
 import logfire
@@ -138,23 +152,8 @@ await editor(task="Answer:\n" + drafts[best] + "\n\nCritique:\n" + scores[best][
 ```
 
 Every call is a real, isolated `Agent.run`, run concurrently by `asyncio.gather`. The handoff is
-typed the Pydantic way -- the critic returns a `Score`, so the script reads `scores[i]["value"]`
+typed the Pydantic way: the critic returns a `Score`, so the script reads `scores[i]["value"]`
 instead of parsing a string.
-
-## In practice
-
-Each sub-agent runs in isolation: its own message history, never the parent conversation. The
-parent's `deps` are forwarded, and by default its `usage` accumulator is shared, so the whole
-tree's spend is tallied in one place. For a hard cap on sub-agent runs use `max_agent_calls`; see
-[Budget and safety](#budget-and-safety) for why a shared `usage_limits` is only best-effort.
-
-## Installation
-
-`DynamicWorkflow` runs scripts in the [Monty](https://github.com/pydantic/monty) sandbox:
-
-```bash
-pip install "pydantic-ai-harness[dynamic-workflow]"
-```
 
 ## Sub-agent catalog
 
@@ -192,7 +191,7 @@ agents.append(WorkflowAgent(agent=fixer, description='Applies a fix for a report
 
 The newcomer is announced to the model with a short message (its function signature) via the
 auto-injected `PendingMessageDrainCapability`. The `run_workflow` description itself stays frozen
-at the agents present when the run started -- so even a runtime reveal never moves the prompt-cache
+at the agents present when the run started, so even a runtime reveal never moves the prompt-cache
 prefix.
 
 `agents` is a `list` precisely so this works -- you hold the reference and append. Reveal is
@@ -215,29 +214,37 @@ If the script also called `print()`, the result is wrapped as `{"output": "<prin
 
 ## Budget and safety
 
-- **`max_agent_calls`** (default `50`) -- an exact, host-enforced ceiling on sub-agent runs per
-  parent run. It holds even under concurrent fan-out. When exhausted, the workflow returns a
-  terminal message telling the model to conclude.
-- **`max_agent_calls` bounds count, not cost.** For a token ceiling, set **`sub_agent_usage_limits`**
-  -- a `UsageLimits` applied to every sub-agent run. With `forward_usage=False` each sub-agent run is
-  sequential, so its own limit is enforced exactly: a per-sub-agent `total_tokens_limit` of `T`
-  together with `max_agent_calls` of `N` give a **hard worst-case ceiling of `N * T` tokens**. With
-  `forward_usage=True` the parent's `usage` accumulator is shared so the whole tree's spend tallies
-  in one place, and the limit is checked against that shared counter -- a tree-wide cap, but
-  best-effort under concurrent fan-out (sub-agents can pass the check before any of them increments
-  it). The parent's own `usage_limits` on `run()` is **not** forwarded into sub-agents (`RunContext`
-  doesn't expose it); it is re-checked only at the parent's request boundaries. Use `max_agent_calls`
-  for an exact ceiling on sub-agent *runs*.
-- **`resource_limits`** -- Monty limits on the *script's own* memory/allocations (default: 256 MB,
-  50M allocations). There is deliberately **no default `max_duration_secs`**: the sandbox's duration
-  timer counts total wall-clock *including* time awaiting sub-agents fanned out with `asyncio.gather`,
-  so a default cap would abort ordinary parallel workflows, not just a runaway. Set one explicitly to
-  bound a whole orchestration's runtime (it's also the only guard against a pure-CPU `while True`).
-  Pass `'unlimited'` to remove all limits; a partial dict (e.g. `{'max_memory': ...}`) is merged onto
-  the backstop, overriding only the caps it names and leaving the others at their default.
-- **Workflows do not nest.** A sub-agent that tries to start its own workflow is refused. Don't
-  give the sub-agents in `agents` the `DynamicWorkflow` capability -- they are leaves of the
-  orchestration, not orchestrators.
+Sub-agents are non-deterministic and token-expensive, so a workflow needs both a ceiling on *how
+many* run and a ceiling on *how much* they spend.
+
+**Count: `max_agent_calls`** (default `50`) is an exact, host-enforced ceiling on sub-agent runs
+per parent run. It holds even under concurrent fan-out. When exhausted, the workflow returns a
+terminal message telling the model to conclude. This is the only knob that bounds the number of
+runs exactly.
+
+**Cost: `sub_agent_usage_limits`** is a `UsageLimits` applied to every sub-agent run. How tight a
+ceiling it gives depends on `forward_usage`:
+
+| `forward_usage` | Usage counter | Limit semantics |
+| --------------- | ------------- | --------------- |
+| `False` | each sub-agent run is independent and sequential | The limit is enforced exactly per run. A per-run `total_tokens_limit` of `T` with `max_agent_calls` of `N` gives a hard worst-case ceiling of `N * T` tokens. |
+| `True` (default) | the parent's `usage` accumulator is shared across the whole tree | The limit is checked against the shared counter -- a tree-wide cap, but best-effort under concurrent fan-out (sub-agents can pass the check before any of them increments it). |
+
+The parent's own `usage_limits` on `run()` is **not** forwarded into sub-agents (`RunContext`
+doesn't expose it); it is re-checked only at the parent's own request boundaries. For an exact
+ceiling on sub-agent *runs*, reach for `max_agent_calls`.
+
+**Sandbox: `resource_limits`** are Monty limits on the *script's own* memory/allocations (default:
+256 MB, 50M allocations). There is deliberately **no default `max_duration_secs`**: the sandbox's
+duration timer counts total wall-clock *including* time awaiting sub-agents fanned out with
+`asyncio.gather`, so a default cap would abort ordinary parallel workflows, not just a runaway. Set
+one explicitly to bound a whole orchestration's runtime (it's also the only guard against a
+pure-CPU `while True`). Pass `'unlimited'` to remove all limits; a partial dict (e.g.
+`{'max_memory': ...}`) is merged onto the backstop, overriding only the caps it names.
+
+**Nesting: workflows do not nest.** A sub-agent that tries to start its own workflow is refused.
+Don't give the sub-agents in `agents` the `DynamicWorkflow` capability -- they are leaves of the
+orchestration, not orchestrators.
 
 ## On-demand loading
 
@@ -293,7 +300,7 @@ WorkflowAgent(
 ## Planned: fork and durable resume
 
 Running the script on Monty opens a door a plain function call doesn't: a *suspended* Monty program
-is a tiny serializable value you can dump, reload, and **fork**. That is the foundation for two
+is a small serializable value you can dump, reload, and **fork**. That is the foundation for two
 patterns the capability is built toward but does **not** ship yet:
 
 - **Best-of-N from a shared prefix** -- build the expensive context once, then fork the snapshot
