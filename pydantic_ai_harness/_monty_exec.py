@@ -22,13 +22,16 @@ from typing import Any
 
 try:
     from pydantic_monty import (
+        AbstractOS,
         ExternalException,
         ExternalResult,
         ExternalReturnValue,
         FunctionSnapshot,
         FutureSnapshot,
         MontyComplete,
+        MountDir,
         NameLookupSnapshot,
+        OsFunction,
     )
 except ImportError as _import_error:  # pragma: no cover
     raise ImportError(
@@ -41,6 +44,12 @@ except ImportError as _import_error:  # pragma: no cover
 DispatchFn = Callable[[str, dict[str, Any]], Coroutine[Any, Any, Any]]
 
 MontyState = FunctionSnapshot | FutureSnapshot | NameLookupSnapshot | MontyComplete
+
+# OS handler and host-directory mounts that route environment, clock, and filesystem
+# calls from inside the sandbox. A raw callback or a ready-made `AbstractOS` is accepted.
+MontyOSCallback = Callable[[OsFunction, tuple[object, ...], dict[str, object]], object]
+MontyOS = AbstractOS | MontyOSCallback
+MontyMount = MountDir | list[MountDir]
 
 # A coroutine not yet scheduled on the event loop, or its running Task.
 PendingCall = asyncio.Task[Any] | Coroutine[Any, Any, Any]
@@ -100,6 +109,10 @@ class MontyExecutor:
     valid_names: Container[str]
     sequential_names: set[str] = field(default_factory=set[str])
     global_sequential: bool = False
+    # OS handler and mounts. Monty auto-dispatches OS calls only while every `resume`
+    # carries them, so they are threaded through each resume below, not just `feed_start`.
+    os_access: MontyOS | None = None
+    mount: MontyMount | None = None
 
     # Parallel calls deferred but not yet resolved, keyed by Monty call id.
     _pending: dict[int, PendingCall] = field(default_factory=dict[int, PendingCall], init=False)
@@ -111,7 +124,7 @@ class MontyExecutor:
         try:
             while not isinstance(state, MontyComplete):
                 if isinstance(state, NameLookupSnapshot):
-                    state = state.resume()
+                    state = state.resume(os=self.os_access, mount=self.mount)
                 elif isinstance(state, FunctionSnapshot):
                     state = await self._handle_function(state)
                 else:
@@ -137,10 +150,14 @@ class MontyExecutor:
         """Dispatch (or defer) a single external function call."""
         name = snapshot.function_name
         if name not in self.valid_names:
-            return snapshot.resume({'exception': NameError(f'Unknown function: {name}')})
+            return snapshot.resume(
+                {'exception': NameError(f'Unknown function: {name}')}, os=self.os_access, mount=self.mount
+            )
         if snapshot.args:
             return snapshot.resume(
-                {'exception': TypeError(f'{name}() does not accept positional arguments; use keyword arguments')}
+                {'exception': TypeError(f'{name}() does not accept positional arguments; use keyword arguments')},
+                os=self.os_access,
+                mount=self.mount,
             )
 
         if name in self.sequential_names:
@@ -153,7 +170,9 @@ class MontyExecutor:
                 self._pre_resolved[cid] = await _await_external(self._pending.pop(cid))
             # The wrapped outcome (`{'return_value': ...}` / `{'exception': ...}`) is already
             # exactly the payload `resume` expects.
-            return snapshot.resume(await _await_external(self.dispatch(name, snapshot.kwargs)))
+            return snapshot.resume(
+                await _await_external(self.dispatch(name, snapshot.kwargs)), os=self.os_access, mount=self.mount
+            )
 
         # Deferred execution -- resolved later at FutureSnapshot.
         call = self.dispatch(name, snapshot.kwargs)
@@ -163,7 +182,7 @@ class MontyExecutor:
         else:
             # Schedule now as a Task so concurrently-deferred calls actually run in parallel.
             self._pending[snapshot.call_id] = asyncio.ensure_future(call)
-        return snapshot.resume({'future': ...})
+        return snapshot.resume({'future': ...}, os=self.os_access, mount=self.mount)
 
     async def _resolve_futures(self, snapshot: FutureSnapshot) -> MontyState:
         """Resolve the deferred calls a `FutureSnapshot` is waiting on."""
@@ -184,7 +203,7 @@ class MontyExecutor:
                 del self._pending[cid]
                 results[cid] = _wrap_gathered(outcome)
 
-        return snapshot.resume(results=results)
+        return snapshot.resume(results=results, os=self.os_access, mount=self.mount)
 
 
 async def _await_external(call: PendingCall) -> ExternalReturnValue | ExternalException:
