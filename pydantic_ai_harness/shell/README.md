@@ -52,11 +52,13 @@ which all land at the end -- survive truncation.
 | `denied_operators` | Shell operators (e.g. `>`, `>>`, `|`) that are rejected when present. |
 | `allow_interactive` | If `False` (default), commands that expect a TTY (`vi`, `sudo`, `ssh`, …) are blocked. |
 
-`allowed_commands` and `denied_commands` are mutually exclusive -- set one, not
-both. `denied_commands` defaults to a list of destructive commands (`rm`,
-`rmdir`, `mkfs`, `dd`, `shutdown`, `reboot`, …); pass an empty list to disable.
-The executable name is extracted with `shlex`, so arguments don't bypass the
-check.
+Use one strategy, not both: setting `allowed_commands` together with an explicit
+`denied_commands` is rejected. Left unset, `denied_commands` blocks a built-in
+list of destructive commands (`rm`, `rmdir`, `mkfs`, `dd`, `format`, `shutdown`,
+`reboot`, `halt`, `poweroff`, `init`). Setting `allowed_commands` alone is fine --
+the allowlist becomes the control and the default denylist steps aside. Pass an
+explicit `denied_commands=[]` to disable blocking entirely. The executable name
+is extracted with `shlex`, so arguments don't bypass the check.
 
 > **These checks are best-effort, not a security boundary.** A sufficiently
 > motivated agent can defeat them (e.g. `bash -c '...'`, env-var indirection).
@@ -128,17 +130,18 @@ agent that forgets to call `stop_command` won't leak processes.
 ## Working directory
 
 By default each command runs in `cwd` and `cd` has no lasting effect. Set
-`persist_cwd=True` to make `cd` sticky: the toolset appends a `pwd` sentinel to
-successful commands, parses the result, and carries the new directory into
-subsequent calls. Commands containing `;` skip the sentinel injection so the
-`&&`-gated sentinel can't be bypassed.
+`persist_cwd=True` to make `cd` sticky: the toolset appends `pwd > <tempfile>`
+to the command (preserving the original exit code), reads the working directory
+back from that private temp file, and carries it into subsequent calls. Capturing
+`pwd` out-of-band, rather than parsing it from stdout, means a command that prints
+a path of its own cannot spoof the tracked directory.
 
 ## Configuration
 
 ```python
 Shell(
     cwd='.',                       # str | Path -- working directory
-    allowed_commands=[],           # allowlist (mutually exclusive with denied)
+    allowed_commands=[],           # allowlist; suppresses the default denylist when set
     denied_commands=[...],         # denylist (defaults to destructive commands)
     denied_operators=[],           # blocked shell operators
     default_timeout=30.0,          # seconds, per run_command

@@ -208,7 +208,7 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
         Args:
             path: File path relative to the root directory.
             offset: Zero-based line offset to start reading from.
-            limit: Maximum number of lines to return (default: 2000).
+            limit: Maximum number of lines to return. Defaults to the configured read cap.
 
         Returns:
             File content with line numbers, plus metadata header.

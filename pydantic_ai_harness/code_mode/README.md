@@ -64,10 +64,10 @@ The [harness Quick start](../../README.md#quick-start) wires `CodeMode` up again
 Code mode requires the Monty sandbox:
 
 ```bash
-uv add "pydantic-ai-harness[codemode]"
+uv add "pydantic-ai-harness[code-mode]"
 ```
 
-The `code-mode` extra is also supported as an alias.
+The `codemode` extra (no hyphen) is also supported as an alias.
 
 ## Selective tool sandboxing
 
@@ -252,6 +252,7 @@ CodeMode(
     max_retries: int = 3,               # retries on sandbox execution errors
     os_access: CodeModeOS | None = None,   # host handler for env vars, clock, and file I/O
     mount: CodeModeMount | None = None,    # host directories to share with the sandbox
+    dynamic_catalog: bool = False,      # keep run_code's description cache-stable as the toolset grows
 )
 ```
 

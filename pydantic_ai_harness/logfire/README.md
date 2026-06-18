@@ -6,7 +6,7 @@ so you can iterate on it from the Logfire UI -- versioned, labelled, and rolled 
 Install the extra:
 
 ```bash
-pip install 'pydantic-ai-harness[logfire]'
+uv add "pydantic-ai-harness[logfire]"
 ```
 
 ## `ManagedPrompt`

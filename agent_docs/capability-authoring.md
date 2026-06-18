@@ -35,8 +35,11 @@ capabilities. Keep implementation helpers private unless users need them.
 
 New capabilities land under `pydantic_ai_harness/experimental/`. Each
 experimental package calls `warn_experimental('<name>')` in its `__init__.py` so
-importing it emits `HarnessExperimentalWarning`. Anything under `experimental`
-may change or be removed in any release, without a deprecation period.
+importing it emits `HarnessExperimentalWarning`. The parent
+`experimental/__init__.py` deliberately does not warn -- it only re-exports
+`HarnessExperimentalWarning`, so users can import the warning class to silence
+the category before importing a capability. Anything under `experimental` may
+change or be removed in any release, without a deprecation period.
 
 Promote a capability to a top-level package and a top-level re-export in
 `pydantic_ai_harness/__init__.py` only when its API is stable.

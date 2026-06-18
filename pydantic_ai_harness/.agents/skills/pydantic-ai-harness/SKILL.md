@@ -1,8 +1,8 @@
 ---
 name: pydantic-ai-harness
-description: Extend Pydantic AI agents with batteries-included capabilities from pydantic-ai-harness -- currently Code Mode, which collapses many tool calls into one sandboxed Python execution. Use when the user mentions pydantic-ai-harness, CodeMode, Monty, code mode, or tool sandboxing, when they want an agent to run agent-written Python, or when a Pydantic AI agent would benefit from orchestrating multiple tool calls in a single sandboxed script.
+description: Extend Pydantic AI agents with batteries-included capabilities from pydantic-ai-harness -- stable capabilities CodeMode (collapse many tool calls into one sandboxed Python execution), FileSystem, Shell, and ManagedPrompt, plus experimental capabilities for planning, sub-agents, and context management. Use when the user mentions pydantic-ai-harness, CodeMode, Monty, code mode, tool sandboxing, or wants harness capabilities like sandboxed file/shell access, sub-agents, planning, or context compaction on a Pydantic AI agent.
 license: MIT
-compatibility: Requires Python 3.10+ and pydantic-ai-slim>=1.95.1
+compatibility: Requires Python 3.10+ and pydantic-ai-slim>=1.105.0
 metadata:
   version: "0.1.0"
   author: pydantic
@@ -33,13 +33,20 @@ Do **not** use this skill for:
 
 ## Supported Capabilities
 
+Stable, imported from the top level (`from pydantic_ai_harness import ...`):
+
 | Capability | Description | Reference |
 |---|---|---|
 | `CodeMode` | Wraps eligible tools into a single sandboxed `run_code` tool so the model orchestrates them in Python | [Code Mode](./references/CODE-MODE.md) |
+| `FileSystem` | Sandboxed file tools scoped to one directory, with path-traversal prevention and glob filtering | [README](../../../filesystem/README.md) |
+| `Shell` | Run commands with allow/deny lists, timeouts, and managed background processes | [README](../../../shell/README.md) |
+| `ManagedPrompt` | Back an agent's instructions with a Logfire-managed prompt (needs the `[logfire]` extra) | [README](../../../logfire/README.md) |
 
-More capability areas are tracked in the
-[capability matrix](https://github.com/pydantic/pydantic-ai-harness#capability-matrix); as they stabilize,
-this skill grows to cover them.
+Experimental capabilities (imported from `pydantic_ai_harness.experimental.*`, API may change) cover
+planning, sub-agents, context compaction, tool-output overflow, and step persistence. See the
+[harness README](https://github.com/pydantic/pydantic-ai-harness#whats-available-today) for the full,
+current list and stability tiers. CodeMode has a bundled reference below; the others are documented in
+their package READMEs.
 
 ## Install
 
@@ -50,10 +57,10 @@ uv add pydantic-ai-harness
 Each capability declares its own extra. Code Mode needs the Monty sandbox:
 
 ```bash
-uv add "pydantic-ai-harness[codemode]"   # `code-mode` is also accepted as an alias
+uv add "pydantic-ai-harness[code-mode]"   # `codemode` (no hyphen) is also accepted as an alias
 ```
 
-Requires Python 3.10+ and `pydantic-ai-slim>=1.95.1`.
+Requires Python 3.10+ and `pydantic-ai-slim>=1.105.0`.
 
 ## Quick Start
 
@@ -92,10 +99,10 @@ collapsing many calls into one `run_code`.
 
 - **Confirm a harness capability is actually needed.** If core Pydantic AI tools and capabilities are enough, use the `building-pydantic-ai-agents` skill instead -- don't reach for the harness by default.
 - **Read the reference before writing code.** Each capability has its own configuration, constraints, and gotchas -- load the linked reference (e.g. [Code Mode](./references/CODE-MODE.md)) first.
-- **Install the capability's extra.** Importing `CodeMode` without `pydantic-ai-harness[codemode]` raises an `ImportError`; the Monty sandbox is an optional dependency.
+- **Install the capability's extra.** Importing `CodeMode` without `pydantic-ai-harness[code-mode]` raises an `ImportError`; the Monty sandbox is an optional dependency.
 
 ## Common Gotchas
 
 - **`native=True` tools bypass `CodeMode`.** Provider-native MCP servers and web search execute server-side, so `run_code` never sees them. Construct them with `native=False` to keep them local and wrappable.
 - **The Monty sandbox is a Python subset.** No class definitions, no third-party imports, and only a small stdlib allowlist -- read [Code Mode](./references/CODE-MODE.md#sandbox-restrictions) before debugging generated code that fails to run.
-- **`CodeMode` needs its extra.** Install `pydantic-ai-harness[codemode]`, not the bare package.
+- **`CodeMode` needs its extra.** Install `pydantic-ai-harness[code-mode]`, not the bare package.

@@ -1592,3 +1592,37 @@ class TestEnvControlPropagation:
             or name == 'PYDANTIC_AI_GATEWAY_API_KEY'
         }
         assert leaked == set()
+
+
+class TestAllowDenyResolution:
+    """Regression tests for allowlist / denylist resolution at the capability boundary."""
+
+    def test_allowlist_alone_builds_without_error(self, tmp_path: Path) -> None:
+        # Regression: the default denylist used to collide with an allowlist and
+        # raise ValueError, breaking the documented `Shell(allowed_commands=[...])`.
+        shell = Shell(cwd=tmp_path, allowed_commands=['ls', 'cat', 'rg'])
+        toolset = shell.get_toolset()
+        assert isinstance(toolset, ShellToolset)
+        # The default destructive denylist steps aside for the allowlist.
+        assert list(toolset._denied_commands) == []
+        assert list(toolset._allowed_commands) == ['ls', 'cat', 'rg']
+
+    def test_default_blocks_destructive_commands(self, tmp_path: Path) -> None:
+        toolset = Shell(cwd=tmp_path).get_toolset()
+        assert isinstance(toolset, ShellToolset)
+        assert 'rm' in toolset._denied_commands
+
+    def test_explicit_denylist_is_honored(self, tmp_path: Path) -> None:
+        toolset = Shell(cwd=tmp_path, denied_commands=['rm', 'rmdir']).get_toolset()
+        assert isinstance(toolset, ShellToolset)
+        assert list(toolset._denied_commands) == ['rm', 'rmdir']
+
+    def test_empty_denylist_disables_blocking(self, tmp_path: Path) -> None:
+        toolset = Shell(cwd=tmp_path, denied_commands=[]).get_toolset()
+        assert isinstance(toolset, ShellToolset)
+        assert list(toolset._denied_commands) == []
+
+    def test_explicit_allow_and_deny_together_is_rejected(self, tmp_path: Path) -> None:
+        shell = Shell(cwd=tmp_path, allowed_commands=['ls'], denied_commands=['rm'])
+        with pytest.raises(ValueError, match='not both'):
+            shell.get_toolset()

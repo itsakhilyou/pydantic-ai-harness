@@ -57,9 +57,9 @@ print(result.output)
 
 ## Deps, usage, tools, and capabilities
 
-- **Deps are forwarded.** The parent run's `deps` are passed to each sub-agent, so sub-agents share the parent's `AgentDepsT` (enforced by the type signature -- every sub-agent is an `AbstractAgent[AgentDepsT, Any]`).
+- **Deps are forwarded.** The parent run's `deps` are passed to each sub-agent, so sub-agents share the parent's `AgentDepsT` (expressed in the type signature -- every sub-agent is an `AbstractAgent[AgentDepsT, Any]`).
 - **Usage is shared by default.** The parent's `usage` is passed to each sub-agent run, so token usage aggregates and a parent `usage_limits` applies across the whole agent tree. Set `forward_usage=False` to give each sub-agent run its own accounting.
-- **Tools can be inherited.** With `inherit_tools=True`, the parent agent's own tools (registered directly or via `toolsets`) are added to each sub-agent run, on top of the sub-agent's own. Tools contributed by the parent's capabilities are not inherited: they are bound to capability instances registered in the parent run, and would arrive without the hooks and instructions they depend on. Use `shared_capabilities` to give sub-agents a capability. This also excludes the delegate tool itself, so a sub-agent can't recurse into further delegation. Off by default.
+- **Tools can be inherited.** With `inherit_tools=True`, the parent agent's own tools (registered directly or via `toolsets`) are added to each sub-agent run, on top of the sub-agent's own. Tools contributed by the parent's capabilities are not inherited: they are bound to capability instances registered in the parent run, and would arrive without the hooks and instructions they depend on. Use `shared_capabilities` to give sub-agents a capability. The inherited set also excludes the parent's own delegate tool, so inheriting tools alone does not let a sub-agent delegate back (a sub-agent gains delegation only if it carries its own `SubAgents` -- see Notes). Off by default.
 - **Capabilities can be shared.** `shared_capabilities` are applied to every sub-agent run -- e.g. give all sub-agents a common guardrail, memory, or planning capability without rebuilding each `Agent`.
 - **Sub-agent events can be streamed.** Pass an `event_stream_handler` and it's forwarded to each sub-agent run, so the sub-agent's model-streaming and tool events surface to the caller (the handler receives the sub-agent's own `RunContext`).
 
@@ -71,15 +71,15 @@ print(result.output)
 from pydantic_ai.usage import UsageLimits
 from pydantic_ai_harness.experimental.subagents import SubAgentLimits, SubAgents
 
-# reproducer and librarian are Agent instances, as in the example above.
+# researcher and writer are the Agent instances from the example above.
 orchestrator = Agent(
     'anthropic:claude-opus-4-7',
     capabilities=[
         SubAgents(
-            agents={'reproducer': reproducer, 'librarian': librarian},
+            agents={'researcher': researcher, 'writer': writer},
             limits={
-                'reproducer': SubAgentLimits(usage_limits=UsageLimits(request_limit=35), timeout_seconds=600, max_calls=1),
-                'librarian': SubAgentLimits(usage_limits=UsageLimits(request_limit=18), timeout_seconds=300, max_calls=2),
+                'researcher': SubAgentLimits(usage_limits=UsageLimits(request_limit=35), timeout_seconds=600, max_calls=1),
+                'writer': SubAgentLimits(usage_limits=UsageLimits(request_limit=18), timeout_seconds=300, max_calls=2),
             },
         )
     ],

@@ -50,14 +50,11 @@ Before implementing or reviewing a capability change:
 
 ## Capabilities API reference
 
-When implementing a new capability, reference these docs:
+When implementing a new capability, read the public Pydantic AI docs listed in
+the [AICA preflight](#aica-preflight) above (capabilities, hooks, toolsets,
+advanced tools, agents, testing), plus:
 
-- <https://pydantic.dev/docs/ai/core-concepts/capabilities/> -- main capabilities documentation, usage patterns, built-in capabilities
-- <https://pydantic.dev/docs/ai/core-concepts/hooks/> -- lifecycle hooks reference, hook ordering, all hook categories
 - <https://pydantic.dev/docs/ai/guides/extensibility/> -- publishing capabilities as packages, spec serialization
-- <https://pydantic.dev/docs/ai/tools-toolsets/toolsets/> -- toolset abstraction, building tools for capabilities
-- <https://pydantic.dev/docs/ai/tools-toolsets/tools-advanced/> -- tool hooks, prepare tools, tool validation
-- <https://pydantic.dev/docs/ai/core-concepts/agent/> -- agent configuration, instructions, model settings
 - Installed `pydantic_ai.capabilities` source -- `AbstractCapability`, hook signatures, and composition behavior
 - Installed `pydantic_ai.toolsets` source -- `AbstractToolset`, `WrapperToolset`, and `ToolsetTool`
 
@@ -66,7 +63,9 @@ When implementing a new capability, reference these docs:
 - Python 3.10+ (target version for pyright and ruff)
 - **pyright strict** mode -- no `Any` types, full type annotations
 - **ruff**: line-length=120, single quotes, max-complexity=15
-- **100% branch coverage** required (enforced by `make testcov`)
+- **100% branch coverage** required -- `make testcov` runs the suite and fails if
+  `coverage report` drops below the `fail_under` threshold (`make test` alone does
+  not check coverage)
 - docstrings use single backticks (markdown), not RST double backticks
 - no typecasting (`as` in TypeScript, `cast()` in Python) -- use type narrowing instead
 - prefer the most generic input types possible (reduce dependency chains)
@@ -113,21 +112,26 @@ Always run `make lint && make typecheck && make test` before committing.
 
 ```
 pydantic_ai_harness/
-  __init__.py          # public API re-exports
-  <capability>/        # each capability gets its own package
+  __init__.py          # public API re-exports (stable capabilities only)
+  <capability>/        # a promoted, stable capability package
     __init__.py        # public exports for the capability
     _capability.py     # capability class (AbstractCapability subclass)
     _toolset.py        # toolset implementation
     README.md          # standalone docs for the capability
+  experimental/        # new capabilities land here first
+    __init__.py        # exports HarnessExperimentalWarning (does not warn on its own import)
+    <capability>/      # same package shape; __init__ calls warn_experimental('<name>')
 tests/
   conftest.py          # shared fixtures (TestModel, test_agent)
   <capability>/        # tests mirror source packages
     test_<capability>.py
 ```
 
-Do not add placeholder template files for new capabilities. Start from the
-existing `CodeMode` package shape, then delete what the new capability does not
-need.
+New capabilities start under `experimental/` (see
+`agent_docs/capability-authoring.md`, "Experimental Vs Released Exports"); they
+graduate to a top-level package and a top-level re-export only once the API is
+stable. Do not add placeholder template files. Start from the existing
+`code_mode` package shape, then delete what the new capability does not need.
 
 ## Testing patterns
 

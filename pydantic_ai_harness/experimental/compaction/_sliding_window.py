@@ -46,10 +46,10 @@ class SlidingWindow(AbstractCapability[AgentDepsT]):
     """
 
     max_messages: int | None = None
-    """Trigger trimming when message count reaches this value. ``None`` disables."""
+    """Trigger trimming when message count exceeds this value. ``None`` disables."""
 
     max_tokens: int | None = None
-    """Trigger trimming when estimated token count reaches this value. ``None`` disables."""
+    """Trigger trimming when estimated token count exceeds this value. ``None`` disables."""
 
     keep_messages: int = 40
     """Number of tail messages to retain after trimming (message-count trigger)."""

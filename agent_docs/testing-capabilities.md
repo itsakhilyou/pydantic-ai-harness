@@ -39,6 +39,11 @@ capability should cover:
 Use snapshots when behavior is protocol-shaped: messages, event streams,
 schemas, telemetry spans, or structured tool metadata.
 
+For a branch that genuinely cannot run in the test environment (an `except` for
+an error the harness can't provoke, a defensive guard), mark it with a
+`# pragma: no cover` comment rather than contorting a test to reach it. Reserve
+this for truly unreachable paths -- a missing test is not an excuse to pragma.
+
 ## Commands
 
 Run focused checks first, then broaden:

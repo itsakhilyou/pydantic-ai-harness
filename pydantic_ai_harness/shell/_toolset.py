@@ -311,7 +311,7 @@ class ShellToolset(FunctionToolset[AgentDepsT]):
 
         Args:
             command: The shell command to run.
-            timeout_seconds: Maximum seconds to wait (default: 30).
+            timeout_seconds: Maximum seconds to wait. Defaults to the configured timeout.
 
         Returns:
             Labeled stdout/stderr output with exit code on non-zero exit.

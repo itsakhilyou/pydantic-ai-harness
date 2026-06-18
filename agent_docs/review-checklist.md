@@ -42,6 +42,8 @@ well before now, or that was built against unreleased Pydantic AI changes.
 - Error paths and important option combinations are covered.
 - Relevant protocol-shaped output is snapshotted.
 - `make lint`, `make typecheck`, and `make test` pass before handoff.
+- `make testcov` passes -- `coverage report` enforces 100% branch coverage via
+  `fail_under` (plain `make test` does not check coverage).
 
 ## Docs
 

@@ -22,13 +22,13 @@
 
 `StepPersistence` records what an agent did at each boundary, separate from
 whether the run can be safely resumed. It is the persistence substrate for
-orchestrators that delegate to sub-agents (e.g. an AICA orchestrator spawning
-a `code_librarian` to investigate one symbol, then continuing that delegate's
+orchestrators that delegate to sub-agents (e.g. an orchestrator spawning a
+research sub-agent to investigate one symbol, then continuing that delegate's
 investigation with a follow-up question).
 
 It is not a full graph-state checkpoint. Capability-state restore, workspace
-snapshots, and graph-node resume are out of scope and tracked separately
-(see `pydantic-ai-harness` issues #149 and #196).
+snapshots, and graph-node resume are out of scope and tracked separately as
+follow-up work.
 
 ## What it gives you
 

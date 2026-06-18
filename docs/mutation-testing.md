@@ -43,5 +43,6 @@ with a new test.
 
 Trio-parametrized tests are excluded during mutation testing (`-k 'not trio'`
 in `pyproject.toml [tool.mutmut]`) because trio segfaults in mutmut's
-subprocess environment on Python 3.14 / macOS. The kill rate is unaffected --
-the trio tests exercise the same code paths as the asyncio tests.
+subprocess environment on Python 3.14 / macOS. Excluding them does not change
+which mutants are killed, because the trio tests exercise the same code paths as
+the asyncio tests that still run.

@@ -38,8 +38,7 @@ dropping context already inside it.
 | `Summarize` | one LLM call | yes | A size-gated summary (inherits the run's model by default) |
 
 `Spill` is lossless: the full payload is persisted and the model reads slices of it through
-the registered `read_tool_result(handle, offset, limit, from_end, pattern)` tool (the Claude
-Code pattern, the core [#4352](https://github.com/pydantic/pydantic-ai/issues/4352) design).
+the registered `read_tool_result(handle, offset, limit, from_end, pattern)` tool.
 That tool is bounded: `offset >= 0`, `limit` clamped to a built-in line cap, the joined output
 capped, and `pattern` is a literal substring (not a regex), so a model-supplied value cannot
 hang the host with catastrophic backtracking.
@@ -121,8 +120,8 @@ Spilled payloads go through the narrow `OverflowStore` protocol. The default `Lo
 writes one file per `(run_id, tool_call_id, retry)` under a stable root directory and keeps it
 after the run, so a later `read_tool_result` -- in this run or a subsequent agent/run -- can
 still reach it. The handle is backend-addressable (a relative key), not an absolute local
-path, so a durable backend (Temporal, a blob store, or the core `ExecutionEnvironment`
-workspace once #4352 lands) can resolve the same handle in another process. Supply your own
+path, so a durable backend (Temporal, a blob store, or a shared execution-environment
+workspace) can resolve the same handle in another process. Supply your own
 backend with `store=...`.
 
 ```python
@@ -192,10 +191,9 @@ token caps are imposed on the summary call. A `UsageLimits` request limit will s
 
 ## Relationship to other capabilities
 
-- Supersedes the spill scope of PR #185 `ToolOutputManagement` (one-way truncate / spill with
-  no read-back); this capability's truncation and ANSI / binary handling are harvested from it.
-- Consumes core [#4352](https://github.com/pydantic/pydantic-ai/issues/4352) (the canonical
-  queryable-file primitive) through the `OverflowStore` seam once it lands.
+- Replaces an earlier one-way truncate / spill approach that had no read-back; the truncation
+  and ANSI / binary handling are carried over from it.
+- Can adopt a durable queryable-file primitive from Pydantic AI core through the `OverflowStore`
+  seam if one ships.
 - Distinct from `compaction`, which compresses or drops context already inside the window, and
-  from `ClampOversizedMessages` (PR #286), which clamps runaway model responses, not tool
-  returns.
+  from `ClampOversizedMessages`, which clamps runaway model responses, not tool returns.

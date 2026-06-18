@@ -8,10 +8,10 @@ tool work with `asyncio.gather`, or anywhere a simple Python script is more reli
 
 ## Install
 
-Code Mode needs the Monty sandbox, pulled in by the `codemode` extra:
+Code Mode needs the Monty sandbox, pulled in by the `code-mode` extra:
 
 ```bash
-uv add "pydantic-ai-harness[codemode]"   # `code-mode` is also accepted as an alias
+uv add "pydantic-ai-harness[code-mode]"   # `codemode` (no hyphen) is also accepted as an alias
 ```
 
 ## Basic Pattern
@@ -113,7 +113,7 @@ conversation has drifted or stale state is causing wrong behavior.
 
 ## Sandbox Restrictions
 
-Code runs inside Monty, an implementation of Python which intentionally supports only a subset of features.
+Code runs inside [Monty](https://github.com/pydantic/monty), a sandboxed subset of Python.
 
 Key restrictions:
 
@@ -121,17 +121,43 @@ Key restrictions:
 - No third-party imports
 - No `import *`
 - Only a small stdlib subset is allowed: `sys`, `typing`, `asyncio`, `math`, `json`, `re`, `datetime`, `os`, `pathlib`
-- No wall-clock or timing primitives: `asyncio.sleep`, `datetime.datetime.now()`, `datetime.date.today()`, and the `time` module are unavailable
+- No host access by default: filesystem I/O needs an `os_access` handler or a `mount`; `os.getenv`/`os.environ` need an `os_access` handler
+- No wall-clock or timing primitives by default: `datetime.now()`/`date.today()` become available with an `os_access` handler; `asyncio.sleep` and the `time` module never do
 - Tools that need approval or deferred execution are excluded from the sandbox
 
 When a generated example keeps failing, check these restrictions before changing the rest of the agent.
+
+## Host Access
+
+By default sandboxed code sees no host files, environment, or clock. Two constructor params grant
+scoped access; reach for them only when the task needs the host.
+
+- `mount` shares host directories with the sandbox so `pathlib` code can read (and optionally write) real files.
+- `os_access` routes the sandbox's OS calls (env vars, clock, file I/O) to a handler you supply, so you decide what each call sees.
+
+```python {test="skip" lint="skip"}
+from pydantic_monty import MountDir, OSAccess
+from pydantic_ai_harness import CodeMode
+
+# Share a working directory, and pin a fixed set of env values.
+CodeMode(
+    mount=MountDir('/work', '/tmp/agent-workspace', mode='read-write'),
+    os_access=OSAccess(environ={'API_BASE': 'https://api.example.com'}),
+)
+```
+
+Both expose the real host to model-written code, so grant only what the task needs. See the
+[Code Mode README](../../../code_mode/README.md#filesystem-and-os-access) for the full handler contract.
 
 ## API
 
 ```python {test="skip" lint="skip"}
 CodeMode(
-    tools: ToolSelector = 'all',   # 'all', list[str], callable, or dict
-    max_retries: int = 3,          # retries on sandbox execution errors
+    tools: ToolSelector = 'all',        # 'all', list[str], callable, or dict
+    max_retries: int = 3,               # retries on sandbox execution errors
+    os_access: CodeModeOS | None = None,   # host handler for env vars, clock, and file I/O
+    mount: CodeModeMount | None = None,    # host directories to share with the sandbox
+    dynamic_catalog: bool = False,      # keep run_code's description cache-stable as the toolset grows
 )
 ```
 

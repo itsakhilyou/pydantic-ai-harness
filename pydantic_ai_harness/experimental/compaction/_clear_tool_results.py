@@ -52,10 +52,10 @@ class ClearToolResults(AbstractCapability[AgentDepsT]):
     """
 
     max_messages: int | None = None
-    """Trigger clearing when message count reaches this value. ``None`` disables."""
+    """Trigger clearing when message count exceeds this value. ``None`` disables."""
 
     max_tokens: int | None = None
-    """Trigger clearing when estimated token count reaches this value. ``None`` disables."""
+    """Trigger clearing when estimated token count exceeds this value. ``None`` disables."""
 
     keep_pairs: int = 3
     """Number of most-recent tool-call / tool-return pairs left untouched."""

@@ -61,8 +61,11 @@ class Shell(AbstractCapability[AgentDepsT]):
     denied_commands: Sequence[str] = field(default_factory=lambda: list(_DEFAULT_DENIED_COMMANDS))
     """These command names are always rejected (denylist).
 
-    Defaults to blocking destructive commands (rm, dd, shutdown, etc.).
-    Set to an empty list to disable.
+    Defaults to blocking destructive commands (rm, dd, shutdown, etc.); pass an
+    empty list to disable. When `allowed_commands` is set and this is left at the
+    default, the allowlist becomes the control and the default denylist steps
+    aside. Setting `allowed_commands` together with an explicit `denied_commands`
+    is rejected.
     """
 
     denied_operators: Sequence[str] = field(default_factory=list[str])
@@ -100,12 +103,22 @@ class Shell(AbstractCapability[AgentDepsT]):
     `LLM_API_KEY_ENV_PATTERNS` for a ready-made provider-credential denylist.
     """
 
+    def _resolved_denied_commands(self) -> Sequence[str]:
+        # An allowlist alongside the *default* denylist means the caller chose an
+        # allowlist and never customized the denylist, so the default protection
+        # steps aside (the toolset rejects having both). An explicit denylist is
+        # always passed through, so an allowlist plus a custom denylist still
+        # surfaces as the intended conflict.
+        if self.allowed_commands and list(self.denied_commands) == _DEFAULT_DENIED_COMMANDS:
+            return []
+        return self.denied_commands
+
     def get_toolset(self) -> AgentToolset[AgentDepsT]:
         """Build and return the shell toolset."""
         return ShellToolset[AgentDepsT](
             cwd=Path(self.cwd),
             allowed_commands=self.allowed_commands,
-            denied_commands=self.denied_commands,
+            denied_commands=self._resolved_denied_commands(),
             denied_operators=self.denied_operators,
             default_timeout=self.default_timeout,
             max_output_chars=self.max_output_chars,

@@ -66,7 +66,7 @@ need `**`.
 | `denied_patterns` | Matching paths are always rejected (denylist). |
 | `protected_patterns` | Matching paths are read-only -- reads succeed, writes are rejected. |
 
-`protected_patterns` defaults to `.git/`, `.env`/`.env.*`, `*.pem`, `*.key`,
+`protected_patterns` defaults to `.git/*`, `.env`/`.env.*`, `*.pem`, `*.key`,
 and `**/secrets*`. Pass an empty list to disable protection.
 
 ### Direct access vs. walkers
@@ -77,14 +77,17 @@ The three rules apply at two different granularities:
   `create_directory`) gates the operation's target path. You must name a path
   that the patterns permit.
 - **Walkers** (`list_directory`, `search_files`, `find_files`) gate their root
-  by deny/protected patterns, but **not** by `allowed_patterns` -- a directory
-  root like `.` never matches a file pattern such as `src/*.py`, so requiring
-  it to would make every listing fail. Instead, the root is always walked and
-  each **entry** is filtered against all three lists. A directory listing can
-  never surface a path the agent couldn't otherwise read or write.
+  by deny patterns only -- not by `allowed_patterns` (a directory root like `.`
+  never matches a file pattern such as `src/*.py`, so requiring it to would make
+  every listing fail) and not by `protected_patterns` (those gate writes, and a
+  listing is a read). The root is always walked and each **entry** is filtered
+  against all three lists with write semantics, so a walker only surfaces paths
+  that are freely readable *and* writable.
 
 So with `allowed_patterns=['*.py']`, `list_directory('.')` succeeds and shows
-only the `.py` entries; `read_file('notes.md')` is rejected.
+only the `.py` entries; `read_file('notes.md')` is rejected. Note the asymmetry:
+a `protected_patterns` path (e.g. `.env`) is omitted from walker output because
+it is not writable, even though `read_file` on it directly still succeeds.
 
 > Dotfiles and dot-directories (`.git`, `.env`, `.github`, …) are skipped by
 > all three walkers -- `list_directory`, `search_files`, and `find_files` --
