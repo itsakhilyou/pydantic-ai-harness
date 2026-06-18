@@ -31,7 +31,7 @@ from pydantic_monty import NOT_HANDLED, MountDir, OSAccess, OsFunction
 from typing_extensions import TypedDict
 
 from pydantic_ai_harness import CodeMode
-from pydantic_ai_harness.code_mode import CodeModeToolset
+from pydantic_ai_harness.code_mode import CodeModeToolset, default_run_code_instructions
 from pydantic_ai_harness.code_mode._toolset import (  # pyright: ignore[reportPrivateUsage]
     _SEARCH_TOOLS_MODIFIER,
     _TOOL_SEARCH_ADDENDUM,
@@ -247,15 +247,16 @@ class TestCodeMode:
         assert 'async def add(*, a: int, b: int) -> int' in description  # catalog preserved
         assert 'Monty' not in description  # built-in prose replaced
 
-    async def test_instructions_callable_transforms_base_prose(self) -> None:
-        """`instructions` as a callable receives the built-in prose and can append to it."""
+    async def test_instructions_builds_on_exported_default(self) -> None:
+        """`default_run_code_instructions()` is exported so callers can append/edit and pass a str."""
         toolset = _build_function_toolset(add)
-        wrapper = CodeMode[None](instructions=lambda base: f'{base}\n\nPROJECT NOTE').get_wrapper_toolset(toolset)
+        custom = default_run_code_instructions() + '\n\nPROJECT NOTE'
+        wrapper = CodeMode[None](instructions=custom).get_wrapper_toolset(toolset)
         assert isinstance(wrapper, CodeModeToolset)
         description = (await wrapper.get_tools(build_run_context(None)))['run_code'].tool_def.description
         assert description is not None
-        assert 'Monty' in description  # built-in prose kept
-        assert 'PROJECT NOTE' in description  # appended
+        assert 'Monty' in description  # the default prose was kept
+        assert 'PROJECT NOTE' in description  # the caller's addition
         assert 'async def add' in description  # catalog preserved
 
     async def test_run_code_executes_call_through_monty(self) -> None:

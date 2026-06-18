@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Sequence
 from dataclasses import KW_ONLY, dataclass, field, replace
 from typing import TYPE_CHECKING, Any
 
@@ -119,17 +119,22 @@ class CodeMode(AbstractCapability[AgentDepsT]):
     keeps the system prompt shorter and is the better choice.
     """
 
-    instructions: str | Callable[[str], str] | None = None
-    """Replace or rewrite the `run_code` tool description (the prose before the tool catalog).
+    instructions: str | None = None
+    """Replace the `run_code` tool description prose (the part before the tool catalog).
 
-    The auto-generated tool catalog (TypedDict definitions + function signatures) is always
-    appended afterward, so `run_code` stays callable whatever you do here.
+    `None` (default) uses the built-in prose. The auto-generated tool catalog (TypedDict
+    definitions + function signatures) is always appended afterward, so `run_code` stays
+    callable whatever you set here.
 
-    - `None` (default): use the built-in prose.
-    - `str`: use this in place of the built-in prose.
-    - `Callable[[str], str]`: receives the built-in (host-aware) prose and returns the
-      replacement, so you can append, prepend, or transform it -- e.g.
-      `instructions=lambda base: base + '\\n\\nProject notes: ...'`."""
+    To build on the default rather than replace it wholesale, import it and edit:
+
+    ```python
+    from pydantic_ai_harness.code_mode import default_run_code_instructions
+
+    agent = Agent(model, capabilities=[CodeMode(
+        instructions=default_run_code_instructions() + '\\n\\nProject notes: ...',
+    )])
+    ```"""
 
     _announced_tools: set[str] = field(default_factory=set[str], init=False, repr=False)
 

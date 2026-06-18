@@ -154,6 +154,16 @@ def _base_description(*, has_os: bool, has_mount: bool) -> str:
     return f'{_RUN_CODE_DESCRIPTION_HEAD}\n{restriction}\n{_RUN_CODE_DESCRIPTION_TAIL}'
 
 
+def default_run_code_instructions(*, has_os: bool = False, has_mount: bool = False) -> str:
+    """The built-in `run_code` prose, so you can build on it for `CodeMode.instructions`.
+
+    Pass `has_os`/`has_mount` matching the `CodeMode` config you use them with, so the
+    OS-access restriction line matches what the sandbox actually allows. The tool catalog
+    is appended by `CodeMode` itself and is not part of this string.
+    """
+    return _base_description(has_os=has_os, has_mount=has_mount)
+
+
 def _functions_header(*, has_sync: bool, has_async: bool) -> str:
     """Build the functions-header paragraph for the `run_code` tool description."""
     base = (
@@ -284,10 +294,9 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
     so Tool Search discoveries don't bust the tool-definitions cache prefix.
     """
 
-    instructions: str | Callable[[str], str] | None = None
-    """Replace or rewrite the `run_code` base prose (the tool catalog is always appended).
-    `str` replaces it; a callable receives the built-in host-aware prose and returns the
-    replacement. Set via `CodeMode.instructions`."""
+    instructions: str | None = None
+    """Replace the `run_code` base prose (the tool catalog is always appended afterward).
+    `None` uses the built-in prose. Set via `CodeMode.instructions`."""
 
     # init=False so `replace()` in `for_run` produces a fresh instance with _repl=None,
     # giving each agent run isolated REPL state. Lazy-initialized on first call_tool.
@@ -649,13 +658,10 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
         return callable_defs, sanitized_to_original
 
     def _resolved_base(self, *, has_os: bool, has_mount: bool) -> str:
-        """The base prose, after applying any `instructions` override/transform."""
-        base = _base_description(has_os=has_os, has_mount=has_mount)
-        if self.instructions is None:
-            return base
-        if callable(self.instructions):
-            return self.instructions(base)
-        return self.instructions
+        """The base prose: the `instructions` override if set, else the built-in default."""
+        if self.instructions is not None:
+            return self.instructions
+        return _base_description(has_os=has_os, has_mount=has_mount)
 
     def _build_description(self, callable_defs: dict[str, ToolDefinition], *, has_os: bool, has_mount: bool) -> str:
         """Render the `run_code` description: base prose + TypedDicts + function signatures."""
