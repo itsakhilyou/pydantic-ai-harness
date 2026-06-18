@@ -94,7 +94,7 @@ Write and run Python code in a sandboxed environment.
 The sandbox uses Monty, a subset of Python. Key restrictions:
 - **No classes**: class definitions are not supported
 - **No third-party libraries**: only the standard library modules listed below can be used
-- **Importable standard library modules**: `sys`, `typing`, `asyncio`, `math`, `json`, `re`, `datetime`, `os`, `pathlib`. These must be imported before use, just like in regular Python. For example: `import asyncio` then `results = await asyncio.gather(tool_one(...), tool_two(...))`. No other module is importable; anything outside this list (e.g. `textwrap`, `collections`) fails. The functions listed below are already in scope -- call them by name, do not import them from any module."""
+- **Importable standard library modules**: `sys`, `typing`, `asyncio`, `math`, `json`, `re`, `datetime`, `os`, `pathlib`. These must be imported before use, just like in regular Python. For example: `import asyncio` then `results = await asyncio.gather(tool_one(...), tool_two(...))`. No other module is importable -- anything outside this list is unavailable. The functions listed below are already in scope; call them by name, do not import them from any module."""
 
 # Timing/OS restriction line, swapped depending on what host access the agent
 # configured. Three states, because `mount` and `os` enable different things:
@@ -284,6 +284,11 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
     so Tool Search discoveries don't bust the tool-definitions cache prefix.
     """
 
+    instructions: str | Callable[[str], str] | None = None
+    """Replace or rewrite the `run_code` base prose (the tool catalog is always appended).
+    `str` replaces it; a callable receives the built-in host-aware prose and returns the
+    replacement. Set via `CodeMode.instructions`."""
+
     # init=False so `replace()` in `for_run` produces a fresh instance with _repl=None,
     # giving each agent run isolated REPL state. Lazy-initialized on first call_tool.
     _repl: MontyRepl | None = field(default=None, init=False, repr=False)
@@ -370,7 +375,7 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
         has_os = self.os_access is not None
         has_mount = self.mount is not None
         if self.dynamic_catalog:
-            description = _base_description(has_os=has_os, has_mount=has_mount)
+            description = self._resolved_base(has_os=has_os, has_mount=has_mount)
             self._last_catalog = self._render_catalog(callable_defs)
         else:
             description = self._build_description(callable_defs, has_os=has_os, has_mount=has_mount)
@@ -643,11 +648,19 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
             callable_defs[safe_name] = td
         return callable_defs, sanitized_to_original
 
-    @staticmethod
-    def _build_description(callable_defs: dict[str, ToolDefinition], *, has_os: bool, has_mount: bool) -> str:
-        """Render the `run_code` description: base prose + TypedDicts + function signatures."""
+    def _resolved_base(self, *, has_os: bool, has_mount: bool) -> str:
+        """The base prose, after applying any `instructions` override/transform."""
         base = _base_description(has_os=has_os, has_mount=has_mount)
-        catalog = CodeModeToolset._render_catalog(callable_defs)
+        if self.instructions is None:
+            return base
+        if callable(self.instructions):
+            return self.instructions(base)
+        return self.instructions
+
+    def _build_description(self, callable_defs: dict[str, ToolDefinition], *, has_os: bool, has_mount: bool) -> str:
+        """Render the `run_code` description: base prose + TypedDicts + function signatures."""
+        base = self._resolved_base(has_os=has_os, has_mount=has_mount)
+        catalog = self._render_catalog(callable_defs)
         if not catalog:
             return base
         return base + '\n\n' + catalog

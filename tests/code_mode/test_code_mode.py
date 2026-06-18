@@ -236,6 +236,28 @@ class TestCodeMode:
         # The base description must tell the model to await tool calls.
         assert 'await' in description
 
+    async def test_instructions_str_replaces_base_prose(self) -> None:
+        """`instructions` as a str replaces the built-in prose; the catalog is still appended."""
+        toolset = _build_function_toolset(add)
+        wrapper = CodeMode[None](instructions='CUSTOM RUN_CODE PROSE').get_wrapper_toolset(toolset)
+        assert isinstance(wrapper, CodeModeToolset)
+        description = (await wrapper.get_tools(build_run_context(None)))['run_code'].tool_def.description
+        assert description is not None
+        assert description.startswith('CUSTOM RUN_CODE PROSE')
+        assert 'async def add(*, a: int, b: int) -> int' in description  # catalog preserved
+        assert 'Monty' not in description  # built-in prose replaced
+
+    async def test_instructions_callable_transforms_base_prose(self) -> None:
+        """`instructions` as a callable receives the built-in prose and can append to it."""
+        toolset = _build_function_toolset(add)
+        wrapper = CodeMode[None](instructions=lambda base: f'{base}\n\nPROJECT NOTE').get_wrapper_toolset(toolset)
+        assert isinstance(wrapper, CodeModeToolset)
+        description = (await wrapper.get_tools(build_run_context(None)))['run_code'].tool_def.description
+        assert description is not None
+        assert 'Monty' in description  # built-in prose kept
+        assert 'PROJECT NOTE' in description  # appended
+        assert 'async def add' in description  # catalog preserved
+
     async def test_run_code_executes_call_through_monty(self) -> None:
         """End-to-end: `run_code` runs Python in Monty and dispatches to a sync wrapped tool."""
         toolset = _build_function_toolset(add)
