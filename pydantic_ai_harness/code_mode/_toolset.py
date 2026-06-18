@@ -94,7 +94,7 @@ Write and run Python code in a sandboxed environment.
 The sandbox uses Monty, a subset of Python. Key restrictions:
 - **No classes**: class definitions are not supported
 - **No third-party libraries**: only the standard library modules listed below can be used
-- **Importable standard library modules**: `sys`, `typing`, `asyncio`, `math`, `json`, `re`, `datetime`, `os`, `pathlib`. These must be imported before use, just like in regular Python. For example: `import asyncio` then `results = await asyncio.gather(tool_one(...), tool_two(...))`."""
+- **Importable standard library modules**: `sys`, `typing`, `asyncio`, `math`, `json`, `re`, `datetime`, `os`, `pathlib`. These must be imported before use, just like in regular Python. For example: `import asyncio` then `results = await asyncio.gather(tool_one(...), tool_two(...))`. No other module is importable; anything outside this list (e.g. `textwrap`, `collections`) fails. The functions listed below are already in scope -- call them by name, do not import them from any module."""
 
 # Timing/OS restriction line, swapped depending on what host access the agent
 # configured. Three states, because `mount` and `os` enable different things:
@@ -129,7 +129,12 @@ The last expression's value is automatically captured as the return value -- you
 structured data. Use `print()` only for supplementary logging or debug output.
 
 Returns the last expression's value directly. If `print()` was also called, returns \
-`{"output": "<printed text>", "result": <last expression>}`.\
+`{"output": "<printed text>", "result": <last expression>}`.
+
+Do not paste large data as a code literal -- a long string on one line causes an unterminated-literal \
+error; reference the variable holding a prior result instead. Tool results are already typed objects: \
+read their fields directly, do not `json.loads` them or index a string as a dict, and never pass a \
+truncation placeholder like `...` or `??` from a clamped result back as an argument.\
 """
 
 
