@@ -295,8 +295,13 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
     """
 
     instructions: str | None = None
-    """Replace the `run_code` base prose (the tool catalog is always appended afterward).
-    `None` uses the built-in prose. Set via `CodeMode.instructions`."""
+    """Extra prose appended after the built-in `run_code` base prose (catalog still follows).
+    `None` uses the built-in prose alone. Set via `CodeMode.instructions`."""
+
+    dangerously_replace_instructions: str | None = None
+    """Fully replace the built-in `run_code` base prose (the tool catalog is always appended).
+    `None` keeps the built-in prose. Set via `CodeMode.dangerously_replace_instructions`.
+    Mutually exclusive with `instructions` (enforced by `CodeMode.__post_init__`)."""
 
     # init=False so `replace()` in `for_run` produces a fresh instance with _repl=None,
     # giving each agent run isolated REPL state. Lazy-initialized on first call_tool.
@@ -658,10 +663,13 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
         return callable_defs, sanitized_to_original
 
     def _resolved_base(self, *, has_os: bool, has_mount: bool) -> str:
-        """The base prose: the `instructions` override if set, else the built-in default."""
-        if self.instructions is not None:
-            return self.instructions
-        return _base_description(has_os=has_os, has_mount=has_mount)
+        """The base prose: a full replacement, the built-in default, or default + appended text."""
+        if self.dangerously_replace_instructions is not None:
+            return self.dangerously_replace_instructions
+        base = _base_description(has_os=has_os, has_mount=has_mount)
+        if self.instructions is None:
+            return base
+        return f'{base}\n\n{self.instructions}'
 
     def _build_description(self, callable_defs: dict[str, ToolDefinition], *, has_os: bool, has_mount: bool) -> str:
         """Render the `run_code` description: base prose + TypedDicts + function signatures."""
