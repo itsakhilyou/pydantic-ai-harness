@@ -44,7 +44,9 @@ Before implementing or reviewing a capability change:
    signatures when needed. Do not assume a contributor's local checkout layout.
 5. Use `pydantic_ai_harness.code_mode` as the exemplar for capability shape,
    docs, tests, and public exports until another capability becomes a better
-   example.
+   example. `code_mode` is a released top-level capability; new capabilities
+   start under `pydantic_ai_harness.experimental` (see
+   `agent_docs/capability-authoring.md`, "Experimental Vs Released Exports").
 
 ## Capabilities API reference
 
@@ -69,6 +71,25 @@ When implementing a new capability, reference these docs:
 - no typecasting (`as` in TypeScript, `cast()` in Python) -- use type narrowing instead
 - prefer the most generic input types possible (reduce dependency chains)
 - don't add comments that restate what the code does
+
+## Writing style
+
+Applies to docs, READMEs, docstrings, comments, commit messages, and PR text.
+
+- No em-dashes (`—`). Use `--` for an aside or interruption, or split into two
+  sentences. Em-dash-heavy prose reads as machine-generated.
+- State facts, not sales copy. Cut marketing superlatives and hype ("blazingly
+  fast", "battle-tested", "the single most expensive thing you can do",
+  "footgun") and editorializing adjectives ("sprawling", "noisy", "silently").
+- Avoid absolute claims ("never", "always", "guaranteed") unless they are
+  literally true and load-bearing. Name the specific mechanism instead of the
+  slogan.
+- Use bold sparingly -- for the lead-in term of a list item, not to emphasize
+  whole sentences.
+- Document the why, the constraints, and the non-obvious. Don't restate what the
+  code or signature already says.
+- Prefer plain ASCII punctuation over decorative Unicode (arrows, fancy quotes)
+  in prose and comments.
 
 ## Package management
 

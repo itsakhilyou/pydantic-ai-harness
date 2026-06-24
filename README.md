@@ -278,7 +278,7 @@ make testcov   # pytest with 100% branch coverage
 
 Pydantic AI Harness uses **0.x versioning** to signal that APIs are still stabilizing. During 0.x:
 
-- **Minor releases** (0.1 → 0.2) may include breaking changes — renamed parameters, changed defaults, restructured APIs. As the library grows, especially as capabilities gain provider-native support (starting as a local implementation, then auto-switching to the provider's built-in API when available), we may need to reshape APIs we couldn't fully anticipate in the initial design.
+- **Minor releases** (0.1 → 0.2) may include breaking changes -- renamed parameters, changed defaults, restructured APIs. As the library grows, especially as capabilities gain provider-native support (starting as a local implementation, then auto-switching to the provider's built-in API when available), we may need to reshape APIs we couldn't fully anticipate in the initial design.
 - **Patch releases** (0.1.0 → 0.1.1) will not intentionally break existing behavior.
 - **All breaking changes** are documented in release notes with migration guidance.
 - Where practical, we'll keep the previous behavior available under a deprecated name or configuration option before removing it.
@@ -292,6 +292,14 @@ This is why Pydantic AI Harness is a separate package from [Pydantic AI](https:/
 - [Extensibility](https://ai.pydantic.dev/extensibility/) -- publishing packages, third-party ecosystem
 - [Toolsets](https://ai.pydantic.dev/toolsets/) -- building tools for capabilities
 - [API reference](https://ai.pydantic.dev/api/capabilities/) -- full API docs
+
+## Part of the Pydantic Stack
+
+The Pydantic Stack is everything you need to ship production-grade AI agents:
+
+- [Pydantic AI](https://pydantic.dev/pydantic-ai?utm_source=github&utm_medium=readme&utm_campaign=pydantic-ai-harness) - Type-safe agent framework
+- [Pydantic Logfire](https://pydantic.dev/logfire?utm_source=github&utm_medium=readme&utm_campaign=pydantic-ai-harness) - AI-first, full-stack observability
+- [Logfire AI Gateway](https://pydantic.dev/ai-gateway?utm_source=github&utm_medium=readme&utm_campaign=pydantic-ai-harness) - Unified LLM proxy
 
 ## License
 

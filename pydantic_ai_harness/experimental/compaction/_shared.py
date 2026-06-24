@@ -1,7 +1,7 @@
 """Shared utilities for the compaction capabilities.
 
 Token estimation, the `CompactionStrategy` protocol, tool-pair-safe cutoff logic, first-user
-preservation, and in-place tool-result clearing — anything used by more than one capability.
+preservation, and in-place tool-result clearing -- anything used by more than one capability.
 """
 
 from __future__ import annotations
@@ -69,6 +69,16 @@ def _user_prompt_text_for_counting(part: UserPromptPart) -> str:
     return ''.join(texts)
 
 
+def estimate_text_tokens(text: str, tokenizer: Callable[[str], int] | None = None) -> int:
+    """Approximate the token count of a single string.
+
+    Uses *tokenizer* when given, otherwise the ~4 characters-per-token heuristic.
+    """
+    if tokenizer is not None:
+        return tokenizer(text)
+    return len(text) // _CHARS_PER_TOKEN
+
+
 def estimate_token_count(
     messages: Sequence[ModelMessage],
     tokenizer: Callable[[str], int] | None = None,
@@ -121,7 +131,7 @@ class CompactionStrategy(Protocol[AgentDepsT]):
 
 
 # ---------------------------------------------------------------------------
-# Safe cutoff logic — preserves tool-call / tool-return pairs
+# Safe cutoff logic -- preserves tool-call / tool-return pairs
 # ---------------------------------------------------------------------------
 
 _TOOL_PAIR_SEARCH_RANGE = 5
