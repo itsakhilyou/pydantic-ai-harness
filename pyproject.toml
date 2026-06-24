@@ -76,6 +76,7 @@ dev = [
     'pydantic-ai-slim[spec]>=1.95.1',
     "pytest-examples>=0.0.18",
     "pytest-recording>=0.13.4",
+    "vcrpy>=8.2.1",
 ]
 lint = [
     'ruff>=0.14',
