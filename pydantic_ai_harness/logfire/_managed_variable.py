@@ -77,7 +77,9 @@ class ManagedVariableCapability(AbstractCapability[AgentDepsT], Generic[AgentDep
             warnings.warn(
                 f'`logfire_instance` is ignored when `{field_name}` is a `Variable`; '
                 'the variable already carries its own Logfire instance.',
-                stacklevel=3,
+                # 1=warn, 2=_warn_logfire_instance_ignored, 3=__post_init__,
+                # 4=dataclass-generated __init__, 5=user's `ManagedTool(...)` call.
+                stacklevel=4,
             )
 
     def _build_managed_variable(
@@ -89,7 +91,8 @@ class ManagedVariableCapability(AbstractCapability[AgentDepsT], Generic[AgentDep
         if name.startswith(prefix):
             warnings.warn(
                 f'The {prefix!r} prefix is added automatically; pass the bare name rather than {name!r}.',
-                stacklevel=3,
+                # Same chain as `_warn_logfire_instance_ignored`: helper → __post_init__ → dataclass __init__ → user.
+                stacklevel=4,
             )
             name = name[len(prefix) :]
 

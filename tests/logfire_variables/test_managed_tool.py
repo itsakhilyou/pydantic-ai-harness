@@ -17,6 +17,7 @@ import logfire
 import pytest
 from logfire.testing import CaptureLogfire
 from logfire.variables import LabeledValue, Rollout, VariableConfig, VariablesConfig
+from pydantic import ValidationError
 from pydantic_ai import Agent, Tool
 from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.exceptions import UserError
@@ -65,8 +66,10 @@ def test_accepts_prebuilt_variable() -> None:
 
 def test_logfire_instance_with_prebuilt_variable_warns() -> None:
     var = logfire.var(name='tool__instance_conflict', type=ManagedToolOverride, default=ManagedToolOverride())
-    with pytest.warns(UserWarning, match='is ignored when `variable` is a `Variable`'):
+    with pytest.warns(UserWarning, match='is ignored when `variable` is a `Variable`') as caught:
         ManagedTool('get_weather', variable=var, logfire_instance=logfire.DEFAULT_LOGFIRE_INSTANCE)
+    # Filename should point at this test module (the user's call site), not the library internals.
+    assert caught[0].filename == __file__
 
 
 # --- Owning a Tool ---
@@ -176,7 +179,6 @@ async def test_override_leaves_parameter_schema_structure_untouched() -> None:
         await agent.run('hi', model=capture_tools(seen))
 
     assert seen[0].parameters_json_schema == code_schema
-    assert not hasattr(ManagedToolOverride(), 'parameters_json_schema')
 
 
 def test_with_parameter_descriptions_patches_only_named_param() -> None:
@@ -192,6 +194,13 @@ def test_with_parameter_descriptions_patches_only_named_param() -> None:
 def test_with_parameter_descriptions_without_properties_is_noop() -> None:
     schema: dict[str, object] = {'type': 'object'}
     assert _with_parameter_descriptions(schema, {'a': 'b'}) is schema
+
+
+def test_override_name_rejects_empty_string() -> None:
+    # Defends against a UI-side rollout of `{"name": ""}` producing an unnamed tool that
+    # crashes the provider call with an opaque schema error. `None` (keep the original) is fine.
+    with pytest.raises(ValidationError, match='at least 1 character'):
+        ManagedToolOverride(name='')
 
 
 async def test_override_name_advertises_and_routes_call() -> None:

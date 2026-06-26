@@ -40,9 +40,12 @@ def test_hyphenated_name_is_normalized() -> None:
 
 
 def test_prefix_in_name_warns_and_is_stripped() -> None:
-    with pytest.warns(UserWarning, match='added automatically'):
+    with pytest.warns(UserWarning, match='added automatically') as caught:
         capability = _StrVariable('var__already_prefixed')
     assert capability._variable.name == 'var__already_prefixed'
+    # The warning's filename should be this test module (the user's call site), not the
+    # library's internal `_managed_variable.py`. Anchors the `stacklevel` against regressions.
+    assert caught[0].filename == __file__
 
 
 def test_invalid_name_raises() -> None:

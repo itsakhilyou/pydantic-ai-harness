@@ -7,6 +7,8 @@ a whole group of tools from one variable holding a `dict[str, ManagedToolOverrid
 
 from __future__ import annotations
 
+from unittest.mock import patch
+
 import logfire
 import pytest
 from logfire.testing import CaptureLogfire
@@ -185,8 +187,6 @@ async def test_resolved_property_exposes_active_resolution() -> None:
 
 
 async def test_resolved_once_per_run() -> None:
-    from unittest.mock import patch
-
     capability = _weather_toolset('once_set')
     agent: Agent[None, str] = Agent(TestModel(), capabilities=[capability])
 
@@ -197,8 +197,6 @@ async def test_resolved_once_per_run() -> None:
 
 
 async def test_callable_targeting_and_attributes() -> None:
-    from unittest.mock import patch
-
     capability: ManagedToolset[None] = ManagedToolset(
         'targeting_set',
         label='production',
@@ -214,8 +212,6 @@ async def test_callable_targeting_and_attributes() -> None:
 
 
 async def test_static_targeting_and_attributes() -> None:
-    from unittest.mock import patch
-
     capability: ManagedToolset[None] = ManagedToolset(
         'static_set', targeting_key='tenant-1', attributes={'tier': 'free'}
     )

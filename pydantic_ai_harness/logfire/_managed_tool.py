@@ -7,7 +7,7 @@ from dataclasses import dataclass, field, replace
 from typing import Any, TypeAlias
 
 from logfire.variables import Variable
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from pydantic_ai import AbstractToolset, RunContext, Tool, ToolDefinition, WrapperToolset
 from pydantic_ai.exceptions import UserError
 from pydantic_ai.tools import AgentDepsT
@@ -32,7 +32,9 @@ class ManagedToolOverride(BaseModel):
     exactly as defined in code.
     """
 
-    name: str | None = None
+    # Reject empty string so a UI-side rollout of `{"name": ""}` can't produce an unnamed tool that
+    # crashes the provider call with an opaque schema error. `None` (keep the original) is still allowed.
+    name: str | None = Field(default=None, min_length=1)
     """Replacement tool name shown to the model. `None` keeps the original name."""
 
     description: str | None = None
