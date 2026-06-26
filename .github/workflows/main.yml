@@ -240,6 +240,7 @@ jobs:
       - uses: LocalStack/setup-localstack@7c8a0cb3405bc58be4c8f763f812aa000bc46303 # v0.3.2
         with:
           install-awslocal: 'true'
+          use-pro: 'false'
 
       - run: aws --version
 
