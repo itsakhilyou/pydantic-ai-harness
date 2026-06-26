@@ -109,7 +109,12 @@ jobs:
       # The lock validation must be off here: this job deviates from the lock
       # on purpose, and under UV_LOCKED=1 the lowest-direct resolution fails
       # because uv refuses to write the lowest-resolved lockfile it produces.
-      - run: uv sync --resolution lowest-direct --group dev --all-extras
+      # greenlet 3.5.3 was published without Linux wheels, which makes uv's
+      # install phase fail on Ubuntu runners after resolution succeeds.
+      - run: >
+          uv sync --resolution lowest-direct
+          --exclude-newer-package greenlet=2026-06-25T00:00:00Z
+          --group dev --all-extras
         env:
           UV_LOCKED: '0'
       - run: uv run --no-sync pytest

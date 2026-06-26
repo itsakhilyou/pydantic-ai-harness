@@ -21,6 +21,12 @@ _LOCALSTACK_INFO = TypeAdapter(dict[str, object])
 _STARTUP_TIMEOUT = 240.0
 
 
+@pytest.fixture
+def anyio_backend() -> str:
+    """Run live Docker tests once under asyncio."""
+    return 'asyncio'
+
+
 def _requires_auth_token() -> bool:
     return os.environ.get('LOCALSTACK_REQUIRE_AUTH_TOKEN', '').lower() in {'1', 'true', 'yes'}
 
@@ -70,8 +76,8 @@ def _free_port() -> int:
     return port
 
 
-def _container_environment() -> dict[str, str]:
-    return _auth_environment()
+def _container_environment(services: str) -> dict[str, str]:
+    return {'SERVICES': services, **_auth_environment()}
 
 
 def _bucket_name() -> str:
@@ -101,6 +107,20 @@ def test_default_live_image_is_community_localstack(monkeypatch: pytest.MonkeyPa
     monkeypatch.delenv('LOCALSTACK_IMAGE', raising=False)
 
     assert _localstack_image() == 'localstack/localstack'
+
+
+def test_live_container_environment_scopes_requested_services(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Live tests should keep harness-started LocalStack containers narrow enough for CI startup."""
+    monkeypatch.delenv('LOCALSTACK_AUTH_TOKEN', raising=False)
+    monkeypatch.delenv('LOCALSTACK_API_KEY', raising=False)
+    monkeypatch.delenv('LOCALSTACK_REQUIRE_AUTH_TOKEN', raising=False)
+
+    assert _container_environment('s3') == {'SERVICES': 's3'}
+
+
+def test_live_tests_run_on_asyncio_backend(anyio_backend: str) -> None:
+    """Live Docker tests should not duplicate slow container startup under trio."""
+    assert anyio_backend == 'asyncio'
 
 
 def _assert_success(output: str) -> None:
@@ -145,7 +165,7 @@ async def test_external_container_s3_round_trip(tmp_path: Path) -> None:
     async with LocalStackContainer(
         image=_localstack_image(),
         host_port=port,
-        environment=_container_environment(),
+        environment=_container_environment('s3'),
         docker_path=docker,
         startup_timeout=_STARTUP_TIMEOUT,
     ) as localstack:
@@ -189,7 +209,7 @@ async def test_managed_container_sqs_round_trip_and_cleanup() -> None:
         aws_cli_path=aws_cli,
         manage_container=True,
         image=_localstack_image(),
-        container_env=_container_environment(),
+        container_env=_container_environment('sqs'),
         docker_path=docker,
         startup_timeout=_STARTUP_TIMEOUT,
     ).get_toolset()
