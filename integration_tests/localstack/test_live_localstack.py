@@ -68,6 +68,14 @@ def _localstack_image() -> str:
     return os.environ.get('LOCALSTACK_IMAGE', 'localstack/localstack')
 
 
+def _external_endpoint_url() -> str | None:
+    return os.environ.get('LOCALSTACK_ENDPOINT_URL')
+
+
+def _skip_managed_container_tests() -> bool:
+    return os.environ.get('LOCALSTACK_SKIP_MANAGED_CONTAINERS', '').lower() in {'1', 'true', 'yes'}
+
+
 def _free_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         sock.bind(('127.0.0.1', 0))
@@ -123,6 +131,13 @@ def test_live_tests_run_on_asyncio_backend(anyio_backend: str) -> None:
     assert anyio_backend == 'asyncio'
 
 
+def test_managed_container_round_trips_can_be_skipped_in_ci(monkeypatch: pytest.MonkeyPatch) -> None:
+    """CI can use the setup action's LocalStack service instead of starting nested containers."""
+    monkeypatch.setenv('LOCALSTACK_SKIP_MANAGED_CONTAINERS', '1')
+
+    assert _skip_managed_container_tests() is True
+
+
 def _assert_success(output: str) -> None:
     assert '[exit code:' not in output, output
     assert '[error:' not in output, output
@@ -155,9 +170,49 @@ def _assert_license_if_auth_required(info: dict[str, object]) -> None:
         assert info.get('is_license_activated') is True
 
 
+async def _s3_round_trip(endpoint_url: str, aws_cli: str, tmp_path: Path) -> None:
+    info = await _info(endpoint_url)
+    _assert_license_if_auth_required(info)
+
+    toolset = LocalStack(endpoint_url=endpoint_url, aws_cli_path=aws_cli).get_toolset()
+    assert isinstance(toolset, LocalStackToolset)
+
+    bucket = _bucket_name()
+    payload = tmp_path / 'payload.txt'
+    payload.write_text('hello from pydantic-ai-harness\n')
+
+    create_bucket = await toolset.aws_cli(f's3api create-bucket --bucket {bucket}', timeout_seconds=60.0)
+    _assert_success(create_bucket)
+
+    put_object = await toolset.aws_cli(
+        f's3api put-object --bucket {bucket} --key payload.txt --body {shlex.quote(str(payload))}',
+        timeout_seconds=60.0,
+    )
+    _assert_success(put_object)
+
+    list_objects = await toolset.aws_cli(f's3api list-objects-v2 --bucket {bucket}', timeout_seconds=60.0)
+    _assert_success(list_objects)
+    assert 'payload.txt' in list_objects
+
+    health = await toolset.localstack_health()
+    assert '[error:' not in health
+
+
+@pytest.mark.anyio(backends=['asyncio'])
+async def test_existing_localstack_s3_round_trip(tmp_path: Path) -> None:
+    """Drive S3 through a LocalStack service started by the test environment."""
+    endpoint_url = _external_endpoint_url()
+    if endpoint_url is None:
+        pytest.skip('Set LOCALSTACK_ENDPOINT_URL to test against an existing LocalStack service.')
+
+    await _s3_round_trip(endpoint_url, _aws_cli_path(), tmp_path)
+
+
 @pytest.mark.anyio(backends=['asyncio'])
 async def test_external_container_s3_round_trip(tmp_path: Path) -> None:
     """Drive S3 through an unmanaged capability against a harness-started container."""
+    if _skip_managed_container_tests():
+        pytest.skip('Managed container round trips are disabled for this environment.')
     docker = _docker_path()
     aws_cli = _aws_cli_path()
     port = _free_port()
@@ -169,36 +224,14 @@ async def test_external_container_s3_round_trip(tmp_path: Path) -> None:
         docker_path=docker,
         startup_timeout=_STARTUP_TIMEOUT,
     ) as localstack:
-        info = await _info(localstack.endpoint_url)
-        _assert_license_if_auth_required(info)
-
-        toolset = LocalStack(endpoint_url=localstack.endpoint_url, aws_cli_path=aws_cli).get_toolset()
-        assert isinstance(toolset, LocalStackToolset)
-
-        bucket = _bucket_name()
-        payload = tmp_path / 'payload.txt'
-        payload.write_text('hello from pydantic-ai-harness\n')
-
-        create_bucket = await toolset.aws_cli(f's3api create-bucket --bucket {bucket}', timeout_seconds=60.0)
-        _assert_success(create_bucket)
-
-        put_object = await toolset.aws_cli(
-            f's3api put-object --bucket {bucket} --key payload.txt --body {shlex.quote(str(payload))}',
-            timeout_seconds=60.0,
-        )
-        _assert_success(put_object)
-
-        list_objects = await toolset.aws_cli(f's3api list-objects-v2 --bucket {bucket}', timeout_seconds=60.0)
-        _assert_success(list_objects)
-        assert 'payload.txt' in list_objects
-
-        health = await toolset.localstack_health()
-        assert '[error:' not in health
+        await _s3_round_trip(localstack.endpoint_url, aws_cli, tmp_path)
 
 
 @pytest.mark.anyio(backends=['asyncio'])
 async def test_managed_container_sqs_round_trip_and_cleanup() -> None:
     """Drive SQS through `manage_container=True` and verify cleanup."""
+    if _skip_managed_container_tests():
+        pytest.skip('Managed container round trips are disabled for this environment.')
     docker = _docker_path()
     aws_cli = _aws_cli_path()
     port = _free_port()

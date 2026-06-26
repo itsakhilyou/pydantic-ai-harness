@@ -221,7 +221,9 @@ jobs:
     name: LocalStack integration tests
     env:
       LOCALSTACK_AWS_CLI: aws
+      LOCALSTACK_ENDPOINT_URL: http://localhost.localstack.cloud:4566
       LOCALSTACK_IMAGE: localstack/localstack
+      LOCALSTACK_SKIP_MANAGED_CONTAINERS: '1'
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
@@ -237,7 +239,6 @@ jobs:
 
       - uses: LocalStack/setup-localstack@7c8a0cb3405bc58be4c8f763f812aa000bc46303 # v0.3.2
         with:
-          skip-startup: 'true'
           install-awslocal: 'true'
 
       - run: aws --version

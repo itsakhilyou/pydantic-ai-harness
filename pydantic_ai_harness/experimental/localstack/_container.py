@@ -15,6 +15,8 @@ _HEALTH_PATH = '/_localstack/health'
 _AUTH_TOKEN_ENV = 'LOCALSTACK_AUTH_TOKEN'
 _LEGACY_API_KEY_ENV = 'LOCALSTACK_API_KEY'
 _DOCKER_SOCKET = '/var/run/docker.sock'
+_GATEWAY_LISTEN_ENV = 'GATEWAY_LISTEN'
+_GATEWAY_LISTEN = f'0.0.0.0:{_EDGE_PORT}'
 
 
 class LocalStackError(RuntimeError):
@@ -73,6 +75,11 @@ class LocalStackContainer:
         return f'http://localhost.localstack.cloud:{self._host_port}'
 
     @property
+    def _readiness_url(self) -> str:
+        host = '127.0.0.1' if self._host_address == '0.0.0.0' else self._host_address
+        return f'http://{host}:{self._host_port}{_HEALTH_PATH}'
+
+    @property
     def container_id(self) -> str | None:
         """The running container's id, or None when it is not running."""
         return self._container_id
@@ -118,6 +125,7 @@ class LocalStackContainer:
     def _effective_environment(self) -> dict[str, str]:
         """Return container env, forwarding LocalStack auth from the process when present."""
         environment = dict(self._environment)
+        environment.setdefault(_GATEWAY_LISTEN_ENV, _GATEWAY_LISTEN)
         if _AUTH_TOKEN_ENV in environment or _LEGACY_API_KEY_ENV in environment:
             return environment
         auth_token = os.environ.get(_AUTH_TOKEN_ENV)
@@ -155,7 +163,7 @@ class LocalStackContainer:
 
     async def _wait_until_ready(self) -> None:
         """Poll the health endpoint until LocalStack responds or the timeout elapses."""
-        url = self.endpoint_url + _HEALTH_PATH
+        url = self._readiness_url
         try:
             with anyio.fail_after(self._startup_timeout):
                 async with httpx.AsyncClient() as client:
