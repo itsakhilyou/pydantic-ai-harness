@@ -134,6 +134,16 @@ class TestAwsCli:
         with pytest.raises(ModelRetry, match="'s3' is denied"):
             await _toolset(denied_services=['s3'], aws_cli_path=stub).aws_cli('--output prod s3 ls')
 
+    async def test_end_of_options_separator_does_not_bypass_denylist(self, tmp_path: Path) -> None:
+        stub = _make_stub(tmp_path, 'echo "$@"')
+        with pytest.raises(ModelRetry, match="'s3' is denied"):
+            await _toolset(denied_services=['s3'], aws_cli_path=stub).aws_cli('-- s3 ls')
+
+    async def test_trailing_end_of_options_separator_resolves_no_service(self, tmp_path: Path) -> None:
+        stub = _make_stub(tmp_path, 'echo "$@"')
+        with pytest.raises(ModelRetry, match='Could not determine the AWS service'):
+            await _toolset(aws_cli_path=stub).aws_cli('--')
+
     async def test_allowed_service_permitted(self, tmp_path: Path) -> None:
         stub = _make_stub(tmp_path, 'echo permitted')
         result = await _toolset(allowed_services=['s3'], aws_cli_path=stub).aws_cli('s3 ls')
