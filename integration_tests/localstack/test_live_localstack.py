@@ -70,8 +70,8 @@ def _free_port() -> int:
     return port
 
 
-def _container_environment(services: str) -> dict[str, str]:
-    return {'SERVICES': services, **_auth_environment()}
+def _container_environment() -> dict[str, str]:
+    return _auth_environment()
 
 
 def _bucket_name() -> str:
@@ -145,7 +145,7 @@ async def test_external_container_s3_round_trip(tmp_path: Path) -> None:
     async with LocalStackContainer(
         image=_localstack_image(),
         host_port=port,
-        environment=_container_environment('s3'),
+        environment=_container_environment(),
         docker_path=docker,
         startup_timeout=_STARTUP_TIMEOUT,
     ) as localstack:
@@ -189,7 +189,7 @@ async def test_managed_container_sqs_round_trip_and_cleanup() -> None:
         aws_cli_path=aws_cli,
         manage_container=True,
         image=_localstack_image(),
-        container_env=_container_environment('sqs'),
+        container_env=_container_environment(),
         docker_path=docker,
         startup_timeout=_STARTUP_TIMEOUT,
     ).get_toolset()

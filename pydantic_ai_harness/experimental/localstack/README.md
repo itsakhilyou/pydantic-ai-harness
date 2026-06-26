@@ -102,8 +102,8 @@ both. The service is the first non-flag token of the command (`s3` in `s3 ls`).
 
 > **These checks are best-effort, not a security boundary.** They gate which
 > commands the agent issues, not what it can reach. For hard guarantees,
-> restrict the services LocalStack itself emulates (e.g. the `SERVICES`
-> environment variable) and run the agent under OS-level isolation.
+> configure LocalStack itself with the narrowest service and IAM behavior the
+> run needs, and run the agent under OS-level isolation.
 
 ## Managing the container
 
@@ -164,7 +164,7 @@ The same lifecycle is available standalone as an async context manager:
 ```python
 from pydantic_ai_harness.experimental.localstack import LocalStackContainer
 
-async with LocalStackContainer(environment={'SERVICES': 's3'}) as localstack:
+async with LocalStackContainer(environment={'DEBUG': '1'}) as localstack:
     ...  # talk to localstack.endpoint_url
 ```
 
@@ -210,7 +210,7 @@ community `localstack/localstack` image and does not require an Auth Token.
 make integration-localstack
 ```
 
-To make missing prerequisites fail instead of skip, set:
+To make a missing Auth Token fail instead of skip for Pro verification, set:
 
 ```bash
 LOCALSTACK_REQUIRE_AUTH_TOKEN=1 make integration-localstack
