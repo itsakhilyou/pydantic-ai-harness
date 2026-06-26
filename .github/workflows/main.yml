@@ -220,6 +220,7 @@ jobs:
     runs-on: ubuntu-latest
     name: LocalStack integration tests
     env:
+      LOCALSTACK_ACKNOWLEDGE_ACCOUNT_REQUIREMENT: '1'
       LOCALSTACK_AWS_CLI: aws
       LOCALSTACK_ENDPOINT_URL: http://localhost.localstack.cloud:4566
       LOCALSTACK_IMAGE: localstack/localstack

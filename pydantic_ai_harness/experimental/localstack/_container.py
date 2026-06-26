@@ -14,6 +14,7 @@ _EDGE_PORT = 4566
 _HEALTH_PATH = '/_localstack/health'
 _AUTH_TOKEN_ENV = 'LOCALSTACK_AUTH_TOKEN'
 _LEGACY_API_KEY_ENV = 'LOCALSTACK_API_KEY'
+_ACCOUNT_REQUIREMENT_ENV = 'LOCALSTACK_ACKNOWLEDGE_ACCOUNT_REQUIREMENT'
 _DOCKER_SOCKET = '/var/run/docker.sock'
 _GATEWAY_LISTEN_ENV = 'GATEWAY_LISTEN'
 _GATEWAY_LISTEN = f'0.0.0.0:{_EDGE_PORT}'
@@ -126,6 +127,7 @@ class LocalStackContainer:
         """Return container env, forwarding LocalStack auth from the process when present."""
         environment = dict(self._environment)
         environment.setdefault(_GATEWAY_LISTEN_ENV, _GATEWAY_LISTEN)
+        environment.setdefault(_ACCOUNT_REQUIREMENT_ENV, '1')
         if _AUTH_TOKEN_ENV in environment or _LEGACY_API_KEY_ENV in environment:
             return environment
         auth_token = os.environ.get(_AUTH_TOKEN_ENV)

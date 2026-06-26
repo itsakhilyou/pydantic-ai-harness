@@ -328,7 +328,10 @@ class TestContainerManagement:
             async with _toolset(endpoint_url=health.endpoint_url, manage_container=True, docker_path=docker):
                 pass
         log_text = log.read_text()
-        assert f'run -d --rm -p 127.0.0.1:{health.port}:4566 -e GATEWAY_LISTEN localstack/localstack' in log_text
+        assert (
+            f'run -d --rm -p 127.0.0.1:{health.port}:4566 '
+            '-e GATEWAY_LISTEN -e LOCALSTACK_ACKNOWLEDGE_ACCOUNT_REQUIREMENT localstack/localstack'
+        ) in log_text
         assert 'stop managed-xyz' in log_text
 
     async def test_managed_defaults_to_edge_port_when_endpoint_has_no_port(self, tmp_path: Path) -> None:

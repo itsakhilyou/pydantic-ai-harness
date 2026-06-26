@@ -13,3 +13,10 @@ def test_localstack_ci_uses_community_setup_action() -> None:
     action_block = lines[action_index : action_index + 4]
 
     assert "          use-pro: 'false'" in action_block
+
+
+def test_localstack_ci_acknowledges_community_account_requirement() -> None:
+    workflow = Path(__file__).parents[3] / '.github' / 'workflows' / 'main.yml'
+    lines = workflow.read_text().splitlines()
+
+    assert "      LOCALSTACK_ACKNOWLEDGE_ACCOUNT_REQUIREMENT: '1'" in lines
