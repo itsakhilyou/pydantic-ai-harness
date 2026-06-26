@@ -222,7 +222,6 @@ jobs:
     env:
       LOCALSTACK_ACKNOWLEDGE_ACCOUNT_REQUIREMENT: '1'
       LOCALSTACK_AWS_CLI: aws
-      LOCALSTACK_ENDPOINT_URL: http://localhost.localstack.cloud:4566
       LOCALSTACK_IMAGE: localstack/localstack
       LOCALSTACK_SKIP_MANAGED_CONTAINERS: '1'
     steps:
@@ -241,7 +240,7 @@ jobs:
       - uses: LocalStack/setup-localstack@7c8a0cb3405bc58be4c8f763f812aa000bc46303 # v0.3.2
         with:
           install-awslocal: 'true'
-          use-pro: 'false'
+          skip-startup: 'true'
 
       - run: aws --version
 
