@@ -9,6 +9,32 @@ Install the extra:
 pip install 'pydantic-ai-harness[logfire]'
 ```
 
+## `ManagedAgentSpec`
+
+Build a whole `Agent` from a Logfire-managed spec — instructions, model, model_settings, tool/MCP/skill metadata, and harness-capability config all sourced from one variable. Pass your tool implementations and any harness capability classes you want the spec to be able to enable; the spec is the source of truth for everything else.
+
+```python
+from pydantic_ai_harness import CodeMode
+from pydantic_ai_harness.logfire import ManagedAgentSpec
+
+
+def fetch_weather(city: str) -> str:
+    return f'sunny and 72°F in {city}'
+
+
+spec = ManagedAgentSpec(
+    'checkout_assistant',
+    tools={'tool__weather': fetch_weather},
+    capability_classes={'code_mode': CodeMode},
+)
+agent = await spec.build()
+result = await agent.run('What is the weather in Lisbon?')
+```
+
+The Logfire backend compiles `agentspec__*` variables server-side, so one variable read returns the full assembled spec. Tool implementations stay in your code (function bodies aren't config) and capability classes stay in your code (the harness package is optional). Capability `type` keys in the spec that you haven't registered are silently dropped — a spec referencing `code_mode` doesn't break callers who haven't installed the extra.
+
+See `_managed_agent_spec.py` for the full option surface (label / targeting_key / attributes / default_model / logfire_instance / `Variable[dict]` for typed specs).
+
 ## `ManagedPrompt`
 
 Back an agent's instructions with a Logfire-managed
@@ -17,8 +43,9 @@ Back an agent's instructions with a Logfire-managed
 > A broader, first-party `Managed` capability is in flight in
 > [pydantic-ai#5107](https://github.com/pydantic/pydantic-ai/pull/5107) and will eventually be
 > importable as `pydantic_ai.managed.logfire.Managed` -- covering instructions, model settings,
-> and whole-spec variables. Until then, `ManagedPrompt` is the supported path for backing
-> instructions with a Logfire-managed prompt.
+> and whole-spec variables. `ManagedAgentSpec` above is the harness path for
+> whole-spec resolution today; `ManagedPrompt` is the supported path for
+> backing instructions alone.
 
 ### The problem
 

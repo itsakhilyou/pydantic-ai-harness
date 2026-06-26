@@ -5,13 +5,14 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from .code_mode import CodeMode
     from .filesystem import FileSystem
-    from .logfire import ManagedPrompt
+    from .logfire import ManagedAgentSpec, ManagedPrompt
     from .shell import LLM_API_KEY_ENV_PATTERNS, Shell
 
 __all__ = [
     'CodeMode',
     'FileSystem',
     'LLM_API_KEY_ENV_PATTERNS',
+    'ManagedAgentSpec',
     'ManagedPrompt',
     'Shell',
 ]
@@ -26,6 +27,10 @@ def __getattr__(name: str) -> object:
         from .filesystem import FileSystem
 
         return FileSystem
+    if name == 'ManagedAgentSpec':
+        from .logfire import ManagedAgentSpec
+
+        return ManagedAgentSpec
     if name == 'ManagedPrompt':
         from .logfire import ManagedPrompt
 
