@@ -311,10 +311,10 @@ class TestContainerManagement:
         assert dict(cap.container_env) == {}
 
     def test_custom_container_config(self) -> None:
-        cap = LocalStack(manage_container=True, container_name='ls', container_env={'SERVICES': 's3'})
+        cap = LocalStack(manage_container=True, container_name='ls', container_env={'DEBUG': '1'})
         assert cap.manage_container is True
         assert cap.container_name == 'ls'
-        assert dict(cap.container_env) == {'SERVICES': 's3'}
+        assert dict(cap.container_env) == {'DEBUG': '1'}
 
     async def test_unmanaged_does_not_touch_docker(self, tmp_path: Path) -> None:
         docker, log = _docker_stub(tmp_path)

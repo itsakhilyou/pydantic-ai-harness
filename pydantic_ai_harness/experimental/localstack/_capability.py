@@ -94,7 +94,7 @@ class LocalStack(AbstractCapability[AgentDepsT]):
     """Optional name for the managed container. Leave None to let Docker assign one."""
 
     container_env: Mapping[str, str] = field(default_factory=dict[str, str])
-    """Environment variables passed to the managed container, e.g. `{'SERVICES': 's3,dynamodb'}`."""
+    """Environment variables passed to the managed container, e.g. `{'DEBUG': '1'}`."""
 
     docker_path: str = 'docker'
     """Path or name of the Docker executable used to manage the container."""
