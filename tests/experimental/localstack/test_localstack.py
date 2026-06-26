@@ -124,10 +124,58 @@ class TestAwsCli:
         with pytest.raises(ModelRetry, match="'iam' is not in the allowed list"):
             await _toolset(allowed_services=['s3'], aws_cli_path=stub).aws_cli('iam list-users')
 
+    async def test_global_option_value_does_not_bypass_allowlist(self, tmp_path: Path) -> None:
+        stub = _make_stub(tmp_path, 'echo "$@"')
+        with pytest.raises(ModelRetry, match="'iam' is not in the allowed list"):
+            await _toolset(allowed_services=['s3'], aws_cli_path=stub).aws_cli('--output s3 iam list-users')
+
+    async def test_global_option_value_does_not_bypass_denylist(self, tmp_path: Path) -> None:
+        stub = _make_stub(tmp_path, 'echo "$@"')
+        with pytest.raises(ModelRetry, match="'s3' is denied"):
+            await _toolset(denied_services=['s3'], aws_cli_path=stub).aws_cli('--output prod s3 ls')
+
     async def test_allowed_service_permitted(self, tmp_path: Path) -> None:
         stub = _make_stub(tmp_path, 'echo permitted')
         result = await _toolset(allowed_services=['s3'], aws_cli_path=stub).aws_cli('s3 ls')
         assert 'permitted' in result
+
+    @pytest.mark.parametrize(
+        'command',
+        [
+            's3 ls --endpoint-url https://s3.amazonaws.com',
+            's3 ls --endpoint-url=https://s3.amazonaws.com',
+            's3 ls --profile prod',
+            's3 ls --region us-west-2',
+            's3 ls --no-sign-request',
+        ],
+    )
+    async def test_rejects_model_supplied_global_endpoint_or_credential_options(
+        self, command: str, tmp_path: Path
+    ) -> None:
+        stub = _make_stub(tmp_path, 'echo "$@"')
+        with pytest.raises(ModelRetry, match='Do not pass AWS global options'):
+            await _toolset(aws_cli_path=stub).aws_cli(command)
+
+    async def test_scrubs_aws_environment_before_running_cli(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv('AWS_PROFILE', 'prod-profile')
+        monkeypatch.setenv('AWS_CONFIG_FILE', '/tmp/real-config')
+        monkeypatch.setenv('AWS_SHARED_CREDENTIALS_FILE', '/tmp/real-creds')
+        monkeypatch.setenv('AWS_SESSION_TOKEN', 'real-session-token')
+        monkeypatch.setenv('AWS_WEB_IDENTITY_TOKEN_FILE', '/tmp/web-token')
+        monkeypatch.setenv('AWS_ROLE_ARN', 'arn:aws:iam::123:role/prod')
+        stub = _make_stub(
+            tmp_path,
+            'printf "%s\\n" '
+            '"${AWS_PROFILE-unset}|${AWS_CONFIG_FILE-unset}|${AWS_SHARED_CREDENTIALS_FILE-unset}|'
+            '${AWS_SESSION_TOKEN-unset}|${AWS_WEB_IDENTITY_TOKEN_FILE-unset}|${AWS_ROLE_ARN-unset}|'
+            '$AWS_ACCESS_KEY_ID|$AWS_SECRET_ACCESS_KEY"',
+        )
+
+        result = await _toolset(aws_cli_path=stub).aws_cli('s3 ls')
+
+        assert 'unset|unset|unset|unset|unset|unset|test|test' in result
 
     async def test_nonzero_exit_shows_code_and_stderr(self, tmp_path: Path) -> None:
         stub = _make_stub(tmp_path, 'echo boom >&2\nexit 3')

@@ -35,7 +35,7 @@ def _auth_environment() -> dict[str, str]:
     message = 'Set LOCALSTACK_AUTH_TOKEN to run live LocalStack integration tests.'
     if _requires_auth_token():
         pytest.fail(message)
-    pytest.skip(message)
+    return {}
 
 
 def _docker_path() -> str:
@@ -59,7 +59,7 @@ def _aws_cli_path() -> str:
 
 
 def _localstack_image() -> str:
-    return os.environ.get('LOCALSTACK_IMAGE', 'localstack/localstack-pro')
+    return os.environ.get('LOCALSTACK_IMAGE', 'localstack/localstack')
 
 
 def _free_port() -> int:
@@ -80,6 +80,27 @@ def _bucket_name() -> str:
 
 def _queue_name() -> str:
     return f'harness-{uuid.uuid4().hex}'
+
+
+def test_auth_token_is_not_required_for_default_live_tests(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Default live tests should exercise community LocalStack without Pro credentials."""
+    monkeypatch.delenv('LOCALSTACK_AUTH_TOKEN', raising=False)
+    monkeypatch.delenv('LOCALSTACK_API_KEY', raising=False)
+    monkeypatch.delenv('LOCALSTACK_REQUIRE_AUTH_TOKEN', raising=False)
+
+    try:
+        environment = _auth_environment()
+    except pytest.skip.Exception as exc:  # pragma: no cover - regression path
+        pytest.fail(f'default live tests should run against community LocalStack without auth: {exc}')
+
+    assert environment == {}
+
+
+def test_default_live_image_is_community_localstack(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Default live tests should not require the Pro image."""
+    monkeypatch.delenv('LOCALSTACK_IMAGE', raising=False)
+
+    assert _localstack_image() == 'localstack/localstack'
 
 
 def _assert_success(output: str) -> None:
@@ -109,9 +130,14 @@ async def _wait_until_unreachable(endpoint_url: str) -> None:
             await anyio.sleep(0.25)
 
 
+def _assert_license_if_auth_required(info: dict[str, object]) -> None:
+    if _requires_auth_token():
+        assert info.get('is_license_activated') is True
+
+
 @pytest.mark.anyio(backends=['asyncio'])
 async def test_external_container_s3_round_trip(tmp_path: Path) -> None:
-    """Drive S3 through an externally managed LocalStack container."""
+    """Drive S3 through an unmanaged capability against a harness-started container."""
     docker = _docker_path()
     aws_cli = _aws_cli_path()
     port = _free_port()
@@ -124,7 +150,7 @@ async def test_external_container_s3_round_trip(tmp_path: Path) -> None:
         startup_timeout=_STARTUP_TIMEOUT,
     ) as localstack:
         info = await _info(localstack.endpoint_url)
-        assert info.get('is_license_activated') is True
+        _assert_license_if_auth_required(info)
 
         toolset = LocalStack(endpoint_url=localstack.endpoint_url, aws_cli_path=aws_cli).get_toolset()
         assert isinstance(toolset, LocalStackToolset)
@@ -171,7 +197,7 @@ async def test_managed_container_sqs_round_trip_and_cleanup() -> None:
 
     async with toolset:
         info = await _info(endpoint_url)
-        assert info.get('is_license_activated') is True
+        _assert_license_if_auth_required(info)
 
         create_queue = await toolset.aws_cli(f'sqs create-queue --queue-name {_queue_name()}', timeout_seconds=60.0)
         _assert_success(create_queue)

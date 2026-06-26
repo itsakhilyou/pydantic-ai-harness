@@ -49,7 +49,7 @@ print(result.output)
 > configuration or starting up LocalStack, please also refer to the instructions
 > here: <https://blog.localstack.cloud/ai/agents.md>
 
-By default the agent connects to a LocalStack instance you started separately —
+By default the agent connects to a LocalStack instance you started separately -
 for example with the [`localstack`
 CLI](https://docs.localstack.cloud/aws/tooling/localstack-cli/) (`localstack
 start`) or its [Docker
@@ -60,18 +60,35 @@ defaults match LocalStack's conventions: the edge endpoint
 for you, set `manage_container=True` (see
 [Managing the container](#managing-the-container)).
 
+For a first local run, start LocalStack before constructing the agent:
+
+```bash
+localstack start
+```
+
+Or let the capability manage a fresh Docker container for each run:
+
+```python
+LocalStack(manage_container=True)
+```
+
 ## Tools
 
 | Tool | Purpose |
 |---|---|
-| `aws_cli` | Run an AWS CLI command against LocalStack. Pass the command **without** the leading `aws` and **without** `--endpoint-url` — both are injected. Returns labelled stdout/stderr plus an exit code on failure. |
-| `localstack_health` | Query LocalStack's health endpoint and return the JSON of which services (s3, dynamodb, sqs, …) are available. |
+| `aws_cli` | Run an AWS CLI command against LocalStack. Pass the command **without** the leading `aws` and **without** `--endpoint-url` - both are injected. Returns labelled stdout/stderr plus an exit code on failure. |
+| `localstack_health` | Query LocalStack's health endpoint and return the JSON of which services (s3, dynamodb, sqs, etc.) are available. |
 
 Commands run as an argument vector (no shell), so shell operators and
 redirection in the command string have no effect. Output is labelled with
 `[stdout]` / `[stderr]` markers and an `[exit code: N]` line on non-zero exit.
 When it exceeds `max_output_chars` the **tail** is kept (the head is dropped),
 so errors survive truncation.
+
+The AWS CLI can read from and write to local files through arguments such as
+`--body`, `file://`, `fileb://`, `s3 cp`, and similar service commands. Treat
+this capability as both AWS-emulator access and AWS CLI access to the process's
+filesystem.
 
 ## Service controls
 
@@ -80,7 +97,7 @@ so errors survive truncation.
 | `allowed_services` | If non-empty, only these AWS services may be used (allowlist), e.g. `['s3', 'dynamodb']`. |
 | `denied_services` | These AWS services are always rejected (denylist). |
 
-`allowed_services` and `denied_services` are mutually exclusive — set one, not
+`allowed_services` and `denied_services` are mutually exclusive - set one, not
 both. The service is the first non-flag token of the command (`s3` in `s3 ls`).
 
 > **These checks are best-effort, not a security boundary.** They gate which
@@ -138,6 +155,10 @@ LocalStack(
 )
 ```
 
+Mounting the Docker socket gives the LocalStack container host-level Docker
+control. Keep `mount_docker_socket=False` unless the emulated service requires
+it and the run environment is already trusted.
+
 The same lifecycle is available standalone as an async context manager:
 
 ```python
@@ -181,15 +202,18 @@ you supply your own.
 ## Integration testing
 
 The live integration tests start LocalStack in Docker and then drive AWS CLI
-commands through this capability. They are skipped unless Docker, an AWS
-CLI-compatible executable, and a LocalStack Auth Token are available. The CI job
-uses the standard `aws` binary to verify the capability's endpoint injection;
-local runs default to `aws` when available and can use `awslocal` as an
-override.
+commands through this capability. Local runs are skipped unless Docker and an
+AWS CLI-compatible executable are available. The default target uses the
+community `localstack/localstack` image and does not require an Auth Token.
 
 ```bash
-export LOCALSTACK_AUTH_TOKEN='...'
 make integration-localstack
+```
+
+To make missing prerequisites fail instead of skip, set:
+
+```bash
+LOCALSTACK_REQUIRE_AUTH_TOKEN=1 make integration-localstack
 ```
 
 Optional environment variables:
@@ -199,8 +223,8 @@ Optional environment variables:
 | `LOCALSTACK_AUTH_TOKEN` | Auth Token forwarded to the LocalStack container. |
 | `LOCALSTACK_API_KEY` | Legacy fallback when `LOCALSTACK_AUTH_TOKEN` is absent. |
 | `LOCALSTACK_AWS_CLI` | CLI executable for tests; defaults to `aws` when available, then `awslocal`. |
-| `LOCALSTACK_IMAGE` | Docker image for live tests; defaults to `localstack/localstack-pro` to verify Auth Token support. |
-| `LOCALSTACK_REQUIRE_AUTH_TOKEN` | Fail instead of skip when no Auth Token is configured; CI sets this for trusted runs. |
+| `LOCALSTACK_IMAGE` | Docker image for live tests; defaults to `localstack/localstack`. |
+| `LOCALSTACK_REQUIRE_AUTH_TOKEN` | Fail instead of skip when no Auth Token is configured. Use this for Pro/Auth Token verification. |
 
 Store the token in your shell or CI secret store; do not commit it to the repo.
 

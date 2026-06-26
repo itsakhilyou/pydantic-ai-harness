@@ -5,7 +5,6 @@ from __future__ import annotations
 import os
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Any
 
 import anyio
 import httpx
@@ -88,7 +87,7 @@ class LocalStackContainer:
             raise
         return self
 
-    async def __aexit__(self, *args: Any) -> None:
+    async def __aexit__(self, *args: object) -> None:
         """Stop and remove the container."""
         await self._stop()
 

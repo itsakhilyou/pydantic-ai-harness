@@ -7,7 +7,6 @@ import shlex
 import tempfile
 from collections.abc import Mapping, Sequence
 from pathlib import Path
-from typing import Any
 from urllib.parse import urlsplit
 
 import anyio
@@ -22,6 +21,24 @@ from pydantic_ai_harness.experimental.localstack._container import LocalStackCon
 
 _HEALTH_PATH = '/_localstack/health'
 _DEFAULT_EDGE_PORT = 4566
+_AWS_GLOBAL_OPTIONS_WITH_VALUE = {
+    '--ca-bundle',
+    '--cli-binary-format',
+    '--cli-connect-timeout',
+    '--cli-read-timeout',
+    '--color',
+    '--endpoint-url',
+    '--output',
+    '--profile',
+    '--query',
+    '--region',
+}
+_FORBIDDEN_MODEL_GLOBAL_OPTIONS = {
+    '--endpoint-url',
+    '--no-sign-request',
+    '--profile',
+    '--region',
+}
 
 
 class LocalStackToolset(FunctionToolset[AgentDepsT]):
@@ -135,7 +152,7 @@ class LocalStackToolset(FunctionToolset[AgentDepsT]):
             self._endpoint_url = container.endpoint_url
         return self
 
-    async def __aexit__(self, *args: Any) -> None:
+    async def __aexit__(self, *args: object) -> None:
         """Stop the managed LocalStack container, if one was started."""
         if self._container is not None:
             container = self._container
@@ -156,11 +173,38 @@ class LocalStackToolset(FunctionToolset[AgentDepsT]):
             tokens = tokens[1:]
         if not tokens:
             raise ModelRetry('Provide an AWS CLI command, e.g. "s3 ls" or "dynamodb list-tables".')
+        self._check_global_options(tokens)
         return tokens
 
     def _service_name(self, tokens: Sequence[str]) -> str | None:
         """Return the first non-flag token, which is the AWS service name."""
-        return next((token for token in tokens if not token.startswith('-')), None)
+        index = 0
+        while index < len(tokens):
+            token = tokens[index]
+            if token == '--':
+                return tokens[index + 1] if index + 1 < len(tokens) else None
+            if token.startswith('--'):
+                name = token.split('=', 1)[0]
+                if '=' not in token and name in _AWS_GLOBAL_OPTIONS_WITH_VALUE:
+                    index += 2
+                else:
+                    index += 1
+                continue
+            return token
+        return None
+
+    def _check_global_options(self, tokens: Sequence[str]) -> None:
+        """Reject model-supplied AWS globals that can override the injected target or credentials."""
+        for token in tokens:
+            if not token.startswith('--'):
+                continue
+            name = token.split('=', 1)[0]
+            if name in _FORBIDDEN_MODEL_GLOBAL_OPTIONS:
+                forbidden = ', '.join(sorted(_FORBIDDEN_MODEL_GLOBAL_OPTIONS))
+                raise ModelRetry(
+                    f'Do not pass AWS global options that change the LocalStack target or credentials '
+                    f'({forbidden}); the capability injects them.'
+                )
 
     def _check_service(self, tokens: Sequence[str]) -> None:
         """Validate the command's service against the allow/deny lists.
@@ -177,8 +221,8 @@ class LocalStackToolset(FunctionToolset[AgentDepsT]):
             raise ModelRetry(f'AWS service {service!r} is not in the allowed list.')
 
     def _build_env(self) -> dict[str, str]:
-        """Inherit the current environment, overriding the AWS settings."""
-        env = dict(os.environ)
+        """Inherit non-AWS environment, then set only the intended LocalStack AWS settings."""
+        env = {key: value for key, value in os.environ.items() if not key.startswith('AWS_')}
         env['AWS_ACCESS_KEY_ID'] = self._access_key_id
         env['AWS_SECRET_ACCESS_KEY'] = self._secret_access_key
         env['AWS_DEFAULT_REGION'] = self._region
