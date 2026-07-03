@@ -41,7 +41,7 @@ def _run_ctx(
     partial_output: bool = False,
     trace_include_content: bool = False,
     tracer: Tracer | None = None,
-) -> RunContext[None]:
+) -> RunContext[object]:
     return RunContext(
         deps=None,
         model=TestModel(),
@@ -67,21 +67,21 @@ class TestOutputGuard:
     async def test_allows_safe_output(self):
         agent = Agent(
             TestModel(custom_output_text='harmless reply'),
-            capabilities=[OutputGuard[None](guard=lambda out: 'SSN' not in str(out))],
+            capabilities=[OutputGuard(guard=lambda out: 'SSN' not in str(out))],
         )
         assert (await agent.run('hello')).output == 'harmless reply'
 
     async def test_guard_result_allow(self):
         agent = Agent(
             TestModel(custom_output_text='harmless reply'),
-            capabilities=[OutputGuard[None](guard=lambda _: GuardResult.allow())],
+            capabilities=[OutputGuard(guard=lambda _: GuardResult.allow())],
         )
         assert (await agent.run('hello')).output == 'harmless reply'
 
     async def test_blocks_with_default_message(self):
         agent = Agent(
             TestModel(custom_output_text='leaks SSN 123-45-6789'),
-            capabilities=[OutputGuard[None](guard=lambda out: 'SSN' not in str(out))],
+            capabilities=[OutputGuard(guard=lambda out: 'SSN' not in str(out))],
         )
         with pytest.raises(OutputBlocked, match='Output blocked by output guardrail.'):
             await agent.run('hello')
@@ -89,7 +89,7 @@ class TestOutputGuard:
     async def test_blocks_with_custom_message(self):
         agent = Agent(
             TestModel(custom_output_text='leaks SSN'),
-            capabilities=[OutputGuard[None](guard=lambda _: GuardResult.block('contains SSN'))],
+            capabilities=[OutputGuard(guard=lambda _: GuardResult.block('contains SSN'))],
         )
         with pytest.raises(OutputBlocked, match='contains SSN'):
             await agent.run('hello')
@@ -100,7 +100,7 @@ class TestOutputGuard:
 
         agent = Agent(
             TestModel(custom_output_text='leaks SSN here'),
-            capabilities=[OutputGuard[None](guard=guard)],
+            capabilities=[OutputGuard(guard=guard)],
         )
         result = await agent.run('hello')
         assert result.output == 'leaks [redacted] here'
@@ -114,7 +114,7 @@ class TestOutputGuard:
                 return GuardResult.retry('Try again without personal data.')
             return GuardResult.allow()
 
-        agent = Agent(TestModel(custom_output_text='answer'), capabilities=[OutputGuard[None](guard=guard)])
+        agent = Agent(TestModel(custom_output_text='answer'), capabilities=[OutputGuard(guard=guard)])
         result = await agent.run('hello')
 
         assert result.output == 'answer'
@@ -125,10 +125,10 @@ class TestOutputGuard:
             await asyncio.sleep(0)
             return 'bad' not in str(output)
 
-        agent = Agent(TestModel(custom_output_text='ok reply'), capabilities=[OutputGuard[None](guard=guard)])
+        agent = Agent(TestModel(custom_output_text='ok reply'), capabilities=[OutputGuard(guard=guard)])
         assert (await agent.run('prompt')).output == 'ok reply'
 
-        agent_bad = Agent(TestModel(custom_output_text='bad reply'), capabilities=[OutputGuard[None](guard=guard)])
+        agent_bad = Agent(TestModel(custom_output_text='bad reply'), capabilities=[OutputGuard(guard=guard)])
         with pytest.raises(OutputBlocked):
             await agent_bad.run('prompt')
 
@@ -136,18 +136,18 @@ class TestOutputGuard:
         def guard(_: object) -> bool:
             raise RuntimeError('guard exploded')
 
-        agent = Agent(TestModel(custom_output_text='anything'), capabilities=[OutputGuard[None](guard=guard)])
+        agent = Agent(TestModel(custom_output_text='anything'), capabilities=[OutputGuard(guard=guard)])
         with pytest.raises(RuntimeError, match='guard exploded'):
             await agent.run('hello')
 
     async def test_guard_receives_run_context(self):
         seen: list[object] = []
 
-        def guard(ctx: RunContext[None], output: object) -> bool:
+        def guard(ctx: RunContext[object], output: object) -> bool:
             seen.append(ctx.prompt)
             return 'SSN' not in str(output)
 
-        agent = Agent(TestModel(custom_output_text='harmless reply'), capabilities=[OutputGuard[None](guard=guard)])
+        agent = Agent(TestModel(custom_output_text='harmless reply'), capabilities=[OutputGuard(guard=guard)])
         result = await agent.run('hello')
         assert result.output == 'harmless reply'
         assert seen == ['hello']
@@ -169,7 +169,7 @@ class TestOutputGuard:
         agent = Agent(
             TestModel(custom_output_args={'reply': 'hi', 'internal_url': 'https://public.example.com/x'}),
             output_type=Answer,
-            capabilities=[OutputGuard[None](guard=guard)],
+            capabilities=[OutputGuard(guard=guard)],
         )
         result = await agent.run('hello')
         assert isinstance(result.output, Answer)
@@ -178,7 +178,7 @@ class TestOutputGuard:
         agent_bad = Agent(
             TestModel(custom_output_args={'reply': 'hi', 'internal_url': 'https://internal.example.com/x'}),
             output_type=Answer,
-            capabilities=[OutputGuard[None](guard=guard)],
+            capabilities=[OutputGuard(guard=guard)],
         )
         with pytest.raises(OutputBlocked):
             await agent_bad.run('hello')
@@ -197,7 +197,7 @@ class TestOutputGuardDirect:
             called.append(output)
             return False
 
-        og = OutputGuard[None](guard=guard)
+        og = OutputGuard(guard=guard)
         out = await og.after_output_process(
             _run_ctx(partial_output=True), output_context=_TEXT_OUTPUT_CONTEXT, output='partial'
         )
@@ -211,7 +211,7 @@ class TestOutputGuardStreaming:
     async def test_allows_under_run_stream(self):
         agent = Agent(
             TestModel(custom_output_text='clean reply'),
-            capabilities=[OutputGuard[None](guard=lambda out: 'SSN' not in str(out))],
+            capabilities=[OutputGuard(guard=lambda out: 'SSN' not in str(out))],
         )
         async with agent.run_stream('hello') as result:
             assert (await result.get_output()) == 'clean reply'
@@ -219,7 +219,7 @@ class TestOutputGuardStreaming:
     async def test_block_under_run_stream(self):
         agent = Agent(
             TestModel(custom_output_text='leaks SSN'),
-            capabilities=[OutputGuard[None](guard=lambda _: GuardResult.block('contains SSN'))],
+            capabilities=[OutputGuard(guard=lambda _: GuardResult.block('contains SSN'))],
         )
         with pytest.raises(OutputBlocked, match='contains SSN'):
             async with agent.run_stream('hello') as result:
@@ -229,7 +229,7 @@ class TestOutputGuardStreaming:
         """pydantic-ai does not support output retries while streaming."""
         agent = Agent(
             TestModel(custom_output_text='answer'),
-            capabilities=[OutputGuard[None](guard=lambda _: GuardResult.retry('redo'))],
+            capabilities=[OutputGuard(guard=lambda _: GuardResult.retry('redo'))],
         )
         with pytest.raises(UnexpectedModelBehavior):
             async with agent.run_stream('hello') as result:
@@ -241,7 +241,7 @@ class TestOutputGuardTracing:
 
     async def test_block_span_includes_message_when_enabled(self):
         tracer, exporter = _recording_tracer()
-        og = OutputGuard[None](guard=lambda _: GuardResult.block('contains SSN'))
+        og = OutputGuard(guard=lambda _: GuardResult.block('contains SSN'))
 
         with pytest.raises(OutputBlocked):
             await og.after_output_process(
@@ -261,7 +261,7 @@ class TestOutputGuardTracing:
     async def test_block_span_omits_message_by_default(self):
         """The refusal message may quote sensitive output, so it is gated like redactions are."""
         tracer, exporter = _recording_tracer()
-        og = OutputGuard[None](guard=lambda _: GuardResult.block('contains SSN'))
+        og = OutputGuard(guard=lambda _: GuardResult.block('contains SSN'))
 
         with pytest.raises(OutputBlocked):
             await og.after_output_process(
@@ -277,12 +277,12 @@ class TestOutputGuardOrdering:
     """`get_ordering()` placement: outermost but wrapped by `Instrumentation`."""
 
     def test_declares_outermost_inside_instrumentation(self):
-        ordering = OutputGuard[None](guard=lambda _: True).get_ordering()
+        ordering = OutputGuard(guard=lambda _: True).get_ordering()
         assert ordering == CapabilityOrdering(position='outermost', wrapped_by=[Instrumentation])
 
     async def test_redaction_span_includes_content_when_enabled(self):
         tracer, exporter = _recording_tracer()
-        og = OutputGuard[None](guard=lambda _: GuardResult.replace('clean'))
+        og = OutputGuard(guard=lambda _: GuardResult.replace('clean'))
 
         out = await og.after_output_process(
             _run_ctx(tracer=tracer, trace_include_content=True),
@@ -302,7 +302,7 @@ class TestOutputGuardOrdering:
 
     async def test_redaction_span_omits_content_by_default(self):
         tracer, exporter = _recording_tracer()
-        og = OutputGuard[None](guard=lambda _: GuardResult.replace('clean'))
+        og = OutputGuard(guard=lambda _: GuardResult.replace('clean'))
 
         await og.after_output_process(_run_ctx(tracer=tracer), output_context=_TEXT_OUTPUT_CONTEXT, output='dirty')
 

@@ -52,7 +52,7 @@ def _build_ctx_and_req(
     messages: list[ModelMessage] | None = None,
     trace_include_content: bool = False,
     tracer: Tracer | None = None,
-) -> tuple[RunContext[None], ModelRequestContext]:
+) -> tuple[RunContext[object], ModelRequestContext]:
     model = TestModel()
     if messages is None:
         messages = [ModelRequest(parts=[UserPromptPart(content=prompt)])] if prompt is not None else []
@@ -62,7 +62,7 @@ def _build_ctx_and_req(
         model_settings=None,
         model_request_parameters=ModelRequestParameters(),
     )
-    run_ctx: RunContext[None] = RunContext(
+    run_ctx: RunContext[object] = RunContext(
         deps=None,
         model=model,
         usage=RunUsage(),
@@ -85,7 +85,7 @@ class TestInputGuard:
             calls.append(prompt)
             return True
 
-        agent = Agent(TestModel(custom_output_text='ok'), capabilities=[InputGuard[None](guard=guard)])
+        agent = Agent(TestModel(custom_output_text='ok'), capabilities=[InputGuard(guard=guard)])
         result = await agent.run('hello')
 
         assert result.output == 'ok'
@@ -94,14 +94,14 @@ class TestInputGuard:
     async def test_guard_result_allow(self):
         agent = Agent(
             TestModel(custom_output_text='ok'),
-            capabilities=[InputGuard[None](guard=lambda _: GuardResult.allow())],
+            capabilities=[InputGuard(guard=lambda _: GuardResult.allow())],
         )
         assert (await agent.run('hello')).output == 'ok'
 
     async def test_block_uses_default_message(self):
         agent = Agent(
             TestModel(custom_output_text='would be model output'),
-            capabilities=[InputGuard[None](guard=lambda _: False)],
+            capabilities=[InputGuard(guard=lambda _: False)],
         )
         result = await agent.run('hello')
 
@@ -110,14 +110,14 @@ class TestInputGuard:
     async def test_block_with_custom_message(self):
         agent = Agent(
             TestModel(custom_output_text='would be model output'),
-            capabilities=[InputGuard[None](guard=lambda _: GuardResult.block('nope'))],
+            capabilities=[InputGuard(guard=lambda _: GuardResult.block('nope'))],
         )
         assert (await agent.run('hello')).output == 'nope'
 
     async def test_block_without_message_uses_default(self):
         agent = Agent(
             TestModel(custom_output_text='would be model output'),
-            capabilities=[InputGuard[None](guard=lambda _: GuardResult.block())],
+            capabilities=[InputGuard(guard=lambda _: GuardResult.block())],
         )
         assert (await agent.run('hello')).output == 'Request blocked by input guardrail.'
 
@@ -126,7 +126,7 @@ class TestInputGuard:
             await asyncio.sleep(0)
             return 'safe' in prompt
 
-        agent = Agent(TestModel(custom_output_text='ok'), capabilities=[InputGuard[None](guard=guard)])
+        agent = Agent(TestModel(custom_output_text='ok'), capabilities=[InputGuard(guard=guard)])
 
         assert (await agent.run('safe message')).output == 'ok'
         assert (await agent.run('bad message')).output == 'Request blocked by input guardrail.'
@@ -135,18 +135,18 @@ class TestInputGuard:
         def guard(_: str) -> bool:
             raise InputBlocked('policy violation')
 
-        agent = Agent(TestModel(custom_output_text='ok'), capabilities=[InputGuard[None](guard=guard)])
+        agent = Agent(TestModel(custom_output_text='ok'), capabilities=[InputGuard(guard=guard)])
         with pytest.raises(InputBlocked, match='policy violation'):
             await agent.run('anything')
 
     async def test_guard_receives_run_context(self):
         seen: list[object] = []
 
-        def guard(ctx: RunContext[None], prompt: str) -> bool:
+        def guard(ctx: RunContext[object], prompt: str) -> bool:
             seen.append(ctx.prompt)
             return True
 
-        agent = Agent(TestModel(custom_output_text='ok'), capabilities=[InputGuard[None](guard=guard)])
+        agent = Agent(TestModel(custom_output_text='ok'), capabilities=[InputGuard(guard=guard)])
         result = await agent.run('hello')
 
         assert result.output == 'ok'
@@ -155,7 +155,7 @@ class TestInputGuard:
     async def test_retry_action_is_a_usage_error(self):
         agent = Agent(
             TestModel(custom_output_text='ok'),
-            capabilities=[InputGuard[None](guard=lambda _: GuardResult.retry('redo'))],
+            capabilities=[InputGuard(guard=lambda _: GuardResult.retry('redo'))],
         )
         with pytest.raises(UserError, match='cannot return GuardResult.retry'):
             await agent.run('hello')
@@ -169,7 +169,7 @@ class TestInputGuard:
             return True
 
         model = TestModel(call_tools='all', custom_output_text='done')
-        agent = Agent(model, capabilities=[InputGuard[None](guard=guard)])
+        agent = Agent(model, capabilities=[InputGuard(guard=guard)])
 
         @agent.tool_plain
         def ping() -> str:  # pyright: ignore[reportUnusedFunction]
@@ -194,7 +194,7 @@ class TestInputGuardRedaction:
             seen.append(part.content)
             return sentinel
 
-        ig = InputGuard[None](guard=lambda _: GuardResult.replace('[redacted]'))
+        ig = InputGuard(guard=lambda _: GuardResult.replace('[redacted]'))
         out = await ig.wrap_model_request(run_ctx, request_context=req_ctx, handler=handler)
 
         assert out is sentinel
@@ -207,7 +207,7 @@ class TestInputGuardRedaction:
         def guard(prompt: str) -> GuardResult:
             return GuardResult.replace(prompt.replace('secret', '***'))
 
-        agent = Agent(TestModel(custom_output_text='ok'), capabilities=[InputGuard[None](guard=guard)])
+        agent = Agent(TestModel(custom_output_text='ok'), capabilities=[InputGuard(guard=guard)])
         result = await agent.run('my secret value')
 
         assert result.output == 'ok'
@@ -218,7 +218,7 @@ class TestInputGuardRedaction:
     async def test_replace_with_non_str_is_a_usage_error(self):
         agent = Agent(
             TestModel(custom_output_text='ok'),
-            capabilities=[InputGuard[None](guard=lambda _: GuardResult.replace(123))],
+            capabilities=[InputGuard(guard=lambda _: GuardResult.replace(123))],
         )
         with pytest.raises(UserError, match='must provide replacement prompt text'):
             await agent.run('hello')
@@ -227,7 +227,7 @@ class TestInputGuardRedaction:
         # `ctx.prompt` is set so the guard runs, but the request carries no `UserPromptPart`.
         run_ctx, req_ctx = _build_ctx_and_req(messages=[ModelResponse(parts=[TextPart(content='no user prompt here')])])
 
-        ig = InputGuard[None](guard=lambda _: GuardResult.replace('[redacted]'))
+        ig = InputGuard(guard=lambda _: GuardResult.replace('[redacted]'))
         with pytest.raises(UserError, match='could not find a user prompt'):
             await ig.wrap_model_request(run_ctx, request_context=req_ctx, handler=_unreachable_handler)
 
@@ -247,7 +247,7 @@ class TestInputGuardSequential:
         async def handler(_: Any) -> ModelResponse:
             return sentinel
 
-        ig = InputGuard[None](guard=guard, parallel=False)
+        ig = InputGuard(guard=guard, parallel=False)
         out = await ig.wrap_model_request(run_ctx, request_context=req_ctx, handler=handler)
         assert out is sentinel
         assert calls == ['hello world']
@@ -264,7 +264,7 @@ class TestInputGuardSequential:
         async def handler(_: Any) -> ModelResponse:
             return sentinel
 
-        ig = InputGuard[None](guard=guard, parallel=False)
+        ig = InputGuard(guard=guard, parallel=False)
         out = await ig.wrap_model_request(run_ctx, request_context=req_ctx, handler=handler)
         assert out is sentinel
         assert called == []
@@ -281,7 +281,7 @@ class TestInputGuardSequential:
         async def handler(_: Any) -> ModelResponse:
             return sentinel
 
-        ig = InputGuard[None](guard=guard, parallel=False)
+        ig = InputGuard(guard=guard, parallel=False)
         out = await ig.wrap_model_request(run_ctx, request_context=req_ctx, handler=handler)
         assert out is sentinel
         assert called == []
@@ -297,7 +297,7 @@ class TestInputGuardParallel:
         async def handler(_: Any) -> ModelResponse:
             return sentinel
 
-        guard = InputGuard[None](guard=lambda _: True, parallel=True)
+        guard = InputGuard(guard=lambda _: True, parallel=True)
         out = await guard.wrap_model_request(run_ctx, request_context=req_ctx, handler=handler)
         assert out is sentinel
 
@@ -319,7 +319,7 @@ class TestInputGuardParallel:
             await handler_started.wait()
             return GuardResult.block('blocked!')
 
-        ig = InputGuard[None](guard=guard, parallel=True)
+        ig = InputGuard(guard=guard, parallel=True)
         with pytest.raises(SkipModelRequest) as exc_info:
             await ig.wrap_model_request(run_ctx, request_context=req_ctx, handler=slow_handler)
 
@@ -337,7 +337,7 @@ class TestInputGuardParallel:
         async def guard(_: str) -> bool:
             raise InputBlocked('hard policy failure')
 
-        ig = InputGuard[None](guard=guard, parallel=True)
+        ig = InputGuard(guard=guard, parallel=True)
         with pytest.raises(InputBlocked, match='hard policy failure'):
             await ig.wrap_model_request(run_ctx, request_context=req_ctx, handler=slow_handler)
 
@@ -355,7 +355,7 @@ class TestInputGuardParallel:
             return True
 
         async def runner() -> ModelResponse:
-            ig = InputGuard[None](guard=slow_guard, parallel=True)
+            ig = InputGuard(guard=slow_guard, parallel=True)
             return await ig.wrap_model_request(run_ctx, request_context=req_ctx, handler=fast_handler)
 
         task = asyncio.create_task(runner())
@@ -377,7 +377,7 @@ class TestInputGuardParallel:
             return GuardResult.block('late trip')
 
         async def runner() -> ModelResponse:
-            ig = InputGuard[None](guard=slow_guard, parallel=True)
+            ig = InputGuard(guard=slow_guard, parallel=True)
             return await ig.wrap_model_request(run_ctx, request_context=req_ctx, handler=fast_handler)
 
         task = asyncio.create_task(runner())
@@ -404,7 +404,7 @@ class TestInputGuardParallel:
                 raise
             return True  # pragma: no cover
 
-        ig = InputGuard[None](guard=slow_guard, parallel=True)
+        ig = InputGuard(guard=slow_guard, parallel=True)
         with pytest.raises(RuntimeError, match='model boom'):
             await ig.wrap_model_request(run_ctx, request_context=req_ctx, handler=failing_handler)
         await asyncio.sleep(0)
@@ -422,7 +422,7 @@ class TestInputGuardParallel:
         async def handler(_: Any) -> ModelResponse:
             return sentinel
 
-        ig = InputGuard[None](guard=guard, parallel=True)
+        ig = InputGuard(guard=guard, parallel=True)
         out = await ig.wrap_model_request(run_ctx, request_context=req_ctx, handler=handler)
         assert out is sentinel
         assert called == []
@@ -439,7 +439,7 @@ class TestInputGuardParallel:
         async def handler(_: Any) -> ModelResponse:
             return sentinel
 
-        ig = InputGuard[None](guard=guard, parallel=True)
+        ig = InputGuard(guard=guard, parallel=True)
         out = await ig.wrap_model_request(run_ctx, request_context=req_ctx, handler=handler)
         assert out is sentinel
         assert called == []
@@ -450,7 +450,7 @@ class TestInputGuardParallel:
         async def handler(_: Any) -> ModelResponse:
             return ModelResponse(parts=[TextPart(content='from handler')])
 
-        ig = InputGuard[None](guard=lambda _: GuardResult.replace('[redacted]'), parallel=True)
+        ig = InputGuard(guard=lambda _: GuardResult.replace('[redacted]'), parallel=True)
         with pytest.raises(UserError, match='incompatible with GuardResult.replace'):
             await ig.wrap_model_request(run_ctx, request_context=req_ctx, handler=handler)
 
@@ -468,7 +468,7 @@ class TestInputGuardParallel:
         current = asyncio.current_task()
         before = {t for t in asyncio.all_tasks() if t is not current}
 
-        ig = InputGuard[None](guard=slow_guard, parallel=True)
+        ig = InputGuard(guard=slow_guard, parallel=True)
         with pytest.raises(RuntimeError, match='handler boom'):
             await ig.wrap_model_request(run_ctx, request_context=req_ctx, handler=failing_handler)
 
@@ -497,7 +497,7 @@ class TestInputGuardParallel:
         current = asyncio.current_task()
         before = {t for t in asyncio.all_tasks() if t is not current}
 
-        ig = InputGuard[None](guard=slow_guard, parallel=True)
+        ig = InputGuard(guard=slow_guard, parallel=True)
 
         async def runner() -> ModelResponse:
             return await ig.wrap_model_request(run_ctx, request_context=req_ctx, handler=slow_handler)
@@ -522,7 +522,7 @@ class TestInputGuardTracing:
         tracer, exporter = _recording_tracer()
         run_ctx, req_ctx = _build_ctx_and_req(tracer=tracer, trace_include_content=True)
 
-        ig = InputGuard[None](guard=lambda _: GuardResult.block('nope'))
+        ig = InputGuard(guard=lambda _: GuardResult.block('nope'))
         with pytest.raises(SkipModelRequest):
             await ig.wrap_model_request(run_ctx, request_context=req_ctx, handler=_unreachable_handler)
 
@@ -539,7 +539,7 @@ class TestInputGuardTracing:
         tracer, exporter = _recording_tracer()
         run_ctx, req_ctx = _build_ctx_and_req(tracer=tracer)
 
-        ig = InputGuard[None](guard=lambda _: GuardResult.block('nope'))
+        ig = InputGuard(guard=lambda _: GuardResult.block('nope'))
         with pytest.raises(SkipModelRequest):
             await ig.wrap_model_request(run_ctx, request_context=req_ctx, handler=_unreachable_handler)
 
@@ -551,7 +551,7 @@ class TestInputGuardTracing:
         tracer, exporter = _recording_tracer()
         run_ctx, req_ctx = _build_ctx_and_req(tracer=tracer, trace_include_content=True)
 
-        ig = InputGuard[None](guard=lambda _: GuardResult.replace('[redacted]'))
+        ig = InputGuard(guard=lambda _: GuardResult.replace('[redacted]'))
         await ig.wrap_model_request(run_ctx, request_context=req_ctx, handler=_sentinel_handler)
 
         span = _only_span(exporter)
@@ -567,7 +567,7 @@ class TestInputGuardTracing:
         tracer, exporter = _recording_tracer()
         run_ctx, req_ctx = _build_ctx_and_req(tracer=tracer)
 
-        ig = InputGuard[None](guard=lambda _: GuardResult.replace('[redacted]'))
+        ig = InputGuard(guard=lambda _: GuardResult.replace('[redacted]'))
         await ig.wrap_model_request(run_ctx, request_context=req_ctx, handler=_sentinel_handler)
 
         span = _only_span(exporter)
@@ -590,7 +590,7 @@ class TestInputGuardStreaming:
         """
         agent = Agent(
             TestModel(custom_output_text='streamed'),
-            capabilities=[InputGuard[None](guard=lambda _: True, parallel=True)],
+            capabilities=[InputGuard(guard=lambda _: True, parallel=True)],
         )
 
         async def run() -> str:
@@ -602,7 +602,7 @@ class TestInputGuardStreaming:
     async def test_block_under_run_stream(self):
         agent = Agent(
             TestModel(custom_output_text='would be model output'),
-            capabilities=[InputGuard[None](guard=lambda _: GuardResult.block('nope'))],
+            capabilities=[InputGuard(guard=lambda _: GuardResult.block('nope'))],
         )
         async with agent.run_stream('hello') as result:
             assert (await result.get_output()) == 'nope'
@@ -647,7 +647,7 @@ class TestInputGuardOrdering:
     """`get_ordering()` placement: innermost so message-morphing capabilities run first."""
 
     def test_declares_innermost(self):
-        ordering = InputGuard[None](guard=lambda _: True).get_ordering()
+        ordering = InputGuard(guard=lambda _: True).get_ordering()
         assert ordering == CapabilityOrdering(position='innermost')
 
 

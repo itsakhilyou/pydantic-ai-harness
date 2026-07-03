@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import keyword
 import re
 import warnings
-from collections.abc import Callable, Coroutine
+from collections.abc import Callable, Coroutine, Sequence
 from dataclasses import dataclass, field, replace
 from typing import Annotated, Any
 
@@ -14,8 +15,15 @@ from pydantic import Field, TypeAdapter
 from pydantic_ai import AbstractToolset, RunContext, ToolDefinition, WrapperToolset
 from pydantic_ai.exceptions import ApprovalRequired, CallDeferred, ModelRetry, UserError
 from pydantic_ai.function_signature import FunctionSignature
-from pydantic_ai.messages import ToolCallPart, ToolReturn, ToolReturnContent, ToolReturnPart, is_multi_modal_content
-from pydantic_ai.tool_manager import ToolManager
+from pydantic_ai.messages import (
+    InstructionPart,
+    ToolCallPart,
+    ToolReturn,
+    ToolReturnContent,
+    ToolReturnPart,
+    is_multi_modal_content,
+)
+from pydantic_ai.tool_manager import ParallelExecutionMode, ToolManager
 from pydantic_ai.tools import AgentDepsT, ToolDenied, ToolSelector, matches_tool_selector
 from pydantic_ai.toolsets.abstract import SchemaValidatorProt, ToolsetTool
 
@@ -26,6 +34,7 @@ except ImportError:  # pragma: no cover
 
 try:
     from pydantic_monty import (
+        AbstractOS,
         ExternalException,
         ExternalResult,
         ExternalReturnValue,
@@ -37,7 +46,9 @@ try:
         MontyRuntimeError,
         MontySyntaxError,
         MontyTypingError,
+        MountDir,
         NameLookupSnapshot,
+        OsFunction,
     )
 except ImportError as _import_error:  # pragma: no cover
     raise ImportError(
@@ -47,6 +58,14 @@ from typing_extensions import NotRequired, TypedDict
 
 # Type alias for the dispatch callback passed to _execution_loop.
 _DispatchFn = Callable[[str, dict[str, Any]], Coroutine[Any, Any, Any]]
+
+# A raw OS callback. Return `pydantic_monty.NOT_HANDLED` to defer the call to the
+# sandbox's default, which leaves it unavailable.
+CodeModeOSCallback = Callable[[OsFunction, tuple[object, ...], dict[str, object]], object]
+# Accepted by `CodeMode.os_access`: a ready-made OS implementation or a raw callback.
+CodeModeOS = AbstractOS | CodeModeOSCallback
+# Accepted by `CodeMode.mount`: one or more host-directory mounts.
+CodeModeMount = MountDir | list[MountDir]
 
 
 class _RunCodeArguments(TypedDict):
@@ -69,25 +88,65 @@ _RUN_CODE_ARGS_VALIDATOR: SchemaValidatorProt = _RUN_CODE_ADAPTER.validator  # p
 # and to reconstruct multimodal types (e.g. BinaryContent) from Monty results (validate_python).
 _TOOL_RETURN_CONTENT_TA: TypeAdapter[Any] = TypeAdapter(ToolReturnContent)
 
-_RUN_CODE_BASE_DESCRIPTION = """\
+_RUN_CODE_DESCRIPTION_HEAD = """\
 Write and run Python code in a sandboxed environment.
 
 The sandbox uses Monty, a subset of Python. Key restrictions:
 - **No classes**: class definitions are not supported
 - **No third-party libraries**: only the standard library modules listed below can be used
-- **Importable standard library modules**: `sys`, `typing`, `asyncio`, `math`, `json`, `re`, `datetime`, `os`, `pathlib`. These must be imported at the top of your snippet before use, just like in regular Python. For example: `import asyncio` then `results = await asyncio.gather(tool_one(...), tool_two(...))`.
-- **No wall-clock or timing primitives**: `asyncio.sleep`, `datetime.datetime.now()`, `datetime.date.today()`, and the `time` module are unavailable.
+- **Importable standard library modules**: `sys`, `typing`, `asyncio`, `math`, `json`, `re`, `datetime`, `os`, `pathlib`. These must be imported before use, just like in regular Python. For example: `import asyncio` then `results = await asyncio.gather(tool_one(...), tool_two(...))`."""
+
+# Timing/OS restriction line, swapped depending on what host access the agent
+# configured. Three states, because `mount` and `os` enable different things:
+# a `mount` only exposes filesystem paths, while environment and clock calls
+# require an `os` handler.
+_NO_OS_RESTRICTION = (
+    '- **No filesystem, environment, or timing primitives**: `pathlib.Path` I/O, '
+    '`os.getenv`/`os.environ`, `datetime.datetime.now()`, `datetime.date.today()`, `asyncio.sleep`, '
+    'and the `time` module are unavailable here (no filesystem mount or OS handler is configured). '
+    '`os` and `pathlib` import successfully, but their I/O operations are not supported in this '
+    'configuration.'
+)
+_MOUNT_ONLY_NOTE = (
+    '- **Mounted filesystem access**: `pathlib.Path` operations under the configured mount '
+    'point(s) are routed to the host. `os.getenv`/`os.environ`, `datetime.datetime.now()`, '
+    '`datetime.date.today()`, `asyncio.sleep`, and the `time` module remain unavailable.'
+)
+_OS_ENABLED_NOTE = (
+    '- **Host-backed OS access**: `pathlib.Path` operations, `os.getenv`/`os.environ`, '
+    '`datetime.datetime.now()`, and `datetime.date.today()` are routed to the OS handler '
+    'configured for this agent (availability depends on that configuration). `asyncio.sleep` and '
+    'the `time` module remain unavailable.'
+)
+
+_RUN_CODE_DESCRIPTION_TAIL = """\
 - **No `import *`**: wildcard imports are not supported
 
 State is preserved between calls (REPL-style). Set `restart: true` to reset state.
 
-The last expression's value is automatically captured as the return value — you do **not** need to \
+The last expression's value is automatically captured as the return value -- you do **not** need to \
 `print()` it. Avoid `print()` for return values as it produces Python string representations, not \
 structured data. Use `print()` only for supplementary logging or debug output.
 
 Returns the last expression's value directly. If `print()` was also called, returns \
 `{"output": "<printed text>", "result": <last expression>}`.\
 """
+
+
+def _base_description(*, has_os: bool, has_mount: bool) -> str:
+    """Assemble the `run_code` base description with the right OS-access restriction line.
+
+    `os` routes environment, clock, and filesystem calls; a `mount` alone only
+    exposes filesystem paths, so a mount-only sandbox must not advertise env or
+    clock access (the model would generate calls that fail and burn retries).
+    """
+    if has_os:
+        restriction = _OS_ENABLED_NOTE
+    elif has_mount:
+        restriction = _MOUNT_ONLY_NOTE
+    else:
+        restriction = _NO_OS_RESTRICTION
+    return f'{_RUN_CODE_DESCRIPTION_HEAD}\n{restriction}\n{_RUN_CODE_DESCRIPTION_TAIL}'
 
 
 def _functions_header(*, has_sync: bool, has_async: bool) -> str:
@@ -138,6 +197,25 @@ def _sanitize_tool_name(name: str) -> str:
     return sanitized or '_'
 
 
+def _global_mode_is_sequential(get_mode: Callable[..., ParallelExecutionMode]) -> bool:
+    """Whether the run-scoped execution mode forces sandbox tool calls to run sequentially.
+
+    pydantic-ai v1's `get_parallel_execution_mode` took the pending calls list
+    and folded per-tool `sequential` flags into the result; v2 dropped the
+    argument and returns only the run-scoped context-var mode. Passing `[]` in
+    v1 isolated that context var from per-tool flags, which is exactly what the
+    no-arg v2 call returns, so the two are equivalent.
+
+    Inspect the arity rather than catch `TypeError` so a genuine `TypeError`
+    raised inside the method is not swallowed. The `Callable[...]` parameter
+    type erases the bound signature so both call shapes typecheck whichever
+    major's stubs pyright resolves.
+    """
+    if inspect.signature(get_mode).parameters:
+        return get_mode([]) != 'parallel'
+    return get_mode() != 'parallel'
+
+
 @dataclass(kw_only=True)
 class _RunCodeTool(ToolsetTool[AgentDepsT]):
     """ToolsetTool subclass that caches data computed during `get_tools`.
@@ -168,11 +246,13 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
     callable from the sandbox at runtime. Non-selected tools remain visible
     to the model as normal tool calls.
 
-    Tools with `defer_loading=True` (Tool Search) are never sandboxed: they stay
-    native pass-through so the deferred-loading contract is honored, and only get
-    folded into `run_code` once they've been discovered (`defer_loading=False`).
-    Tools annotated with `unless_native` likewise stay native so
-    `Model.prepare_request` can drop them when the provider supports the native tool.
+    Some tools always stay native rather than being sandboxed:
+
+    - Framework control tools (`tool_kind` set: tool search, capability loading).
+    - `defer_loading=True` tools, until discovery flips them to `defer_loading=False`.
+    - `unless_native` tools, so `Model.prepare_request` can drop them when the
+      provider supports the native tool.
+
     To keep a Tool Search corpus native even after discovery (e.g. for prompt-cache
     stability), pass a `tool_selector` that excludes tools with `with_native` set.
     """
@@ -184,9 +264,30 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
     max_retries: int = 3
     """Maximum number of retries for the `run_code` tool (syntax errors count as retries)."""
 
+    os_access: CodeModeOS | None = None
+    """Give sandboxed code environment variables, the clock, and file I/O through a handler you provide; unset, they are unavailable."""
+
+    mount: CodeModeMount | None = None
+    """Host directories to expose to sandboxed `pathlib` code; each mount's `mode` controls whether writes reach the host."""
+
+    dynamic_catalog: bool = False
+    """Move the sandboxed-tool catalog out of `run_code.description` and into instructions.
+
+    When `False` (default), every sandboxed tool's signature is rendered into the
+    `run_code` description, which lives in the prompt-cache-keyed tool-definitions block.
+    When `True`, the description keeps only the static base prose and the catalog is
+    surfaced as a dynamic [`InstructionPart`][pydantic_ai.messages.InstructionPart] via
+    [`get_instructions`][pydantic_ai_harness.code_mode.CodeModeToolset.get_instructions],
+    so Tool Search discoveries don't bust the tool-definitions cache prefix.
+    """
+
     # init=False so `replace()` in `for_run` produces a fresh instance with _repl=None,
     # giving each agent run isolated REPL state. Lazy-initialized on first call_tool.
     _repl: MontyRepl | None = field(default=None, init=False, repr=False)
+
+    # Catalog string stashed during `get_tools` (when `dynamic_catalog`) and read back by
+    # `get_instructions` in the same step. Empty when there's nothing to surface.
+    _last_catalog: str = field(default='', init=False, repr=False)
 
     # Tracks deferred-tool names we've already warned about so we don't spam the
     # logs every step. Reset on `for_run` because each run gets a fresh instance.
@@ -205,29 +306,51 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
         new_self = replace(self, wrapped=new_wrapped)
         new_self._repl = self._repl
         new_self._warned_deferred = self._warned_deferred
+        new_self._last_catalog = self._last_catalog
         return new_self
+
+    async def get_instructions(
+        self, ctx: RunContext[AgentDepsT]
+    ) -> str | InstructionPart | Sequence[str | InstructionPart] | None:
+        """Surface the tool catalog as a dynamic instruction when `dynamic_catalog` is set.
+
+        The catalog is stashed by `get_tools` earlier in the same step. `dynamic=True` so
+        providers that split static/dynamic instructions (Anthropic, Bedrock) place a cache
+        breakpoint *before* the catalog -- discoveries change it but leave the static prefix
+        cache intact. When `dynamic_catalog` is off (or there are no sandboxed tools) the
+        stash is empty and we defer entirely to the wrapped toolset.
+        """
+        upstream = await self.wrapped.get_instructions(ctx)
+        if not self._last_catalog:
+            return upstream
+        catalog_part = InstructionPart(content=self._last_catalog, dynamic=True)
+        if upstream is None:
+            return catalog_part
+        if isinstance(upstream, (str, InstructionPart)):
+            return [upstream, catalog_part]
+        return [*upstream, catalog_part]
 
     async def get_tools(self, ctx: RunContext[AgentDepsT]) -> dict[str, ToolsetTool[AgentDepsT]]:
         """Return the `run_code` tool plus any native (non-sandboxed) tools."""
         wrapped_tools = await self.wrapped.get_tools(ctx)
 
         # Split tools into sandboxed vs native based on the selector.
-        # The search_tools tool (from ToolSearchToolset) is always kept native
-        # so the model can discover deferred tools alongside run_code.
         sandboxed_tools: dict[str, ToolsetTool[AgentDepsT]] = {}
         native_tools: dict[str, ToolsetTool[AgentDepsT]] = {}
         for name, tool in wrapped_tools.items():
-            if name == _SEARCH_TOOLS_NAME:
+            # Framework control tools (tool search, capability loading) stay native to
+            # drive protocol-level flows. `tool_kind` is the framework's discriminator
+            # for them; pydantic-ai has set it on `search_tools` since 1.95.0.
+            if tool.tool_def.tool_kind is not None:
                 native_tools[name] = tool
             elif tool.tool_def.defer_loading:
-                # Tool Search keeps these out of the model's initial context until discovered.
-                # Stay native pass-through so `ToolSearchToolset`'s `defer_loading` /
-                # `with_native` flags reach `Model.prepare_request` unaltered; once a tool is
-                # discovered it comes back with `defer_loading=False` and is sandboxed from then on.
+                # Stay native so Tool Search's `defer_loading`/`with_native` flags reach
+                # `Model.prepare_request` unaltered. Discovery flips `defer_loading` to
+                # False, and the tool is sandboxed from then on.
                 native_tools[name] = tool
             elif tool.tool_def.unless_native:
-                # Defer to `Model.prepare_request`'s `unless_native` filtering: keep the local
-                # fallback native so it can be dropped when the provider supports the native tool.
+                # Keep the local fallback native so `Model.prepare_request` can drop it
+                # when the provider supports the native tool.
                 native_tools[name] = tool
             elif await matches_tool_selector(self.tool_selector, ctx, tool.tool_def):
                 sandboxed_tools[name] = tool
@@ -236,7 +359,19 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
 
         callable_defs, sanitized_to_original = self._partition_callable_tools(sandboxed_tools)
 
-        description = self._build_description(callable_defs)
+        # `dynamic_catalog` keeps the catalog out of `run_code.description` (cache-stable
+        # tool-defs block) and surfaces it via `get_instructions` instead. Stash it for the
+        # `get_instructions` call later this step; empty string means "nothing to surface".
+        # The base prose stays host-aware in both modes -- its OS/mount restriction line is
+        # static (it doesn't change per discovery), so it belongs in the cached description.
+        has_os = self.os_access is not None
+        has_mount = self.mount is not None
+        if self.dynamic_catalog:
+            description = _base_description(has_os=has_os, has_mount=has_mount)
+            self._last_catalog = self._render_catalog(callable_defs)
+        else:
+            description = self._build_description(callable_defs, has_os=has_os, has_mount=has_mount)
+            self._last_catalog = ''
 
         if _RUN_CODE_TOOL_NAME in native_tools:
             raise UserError(
@@ -280,7 +415,7 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
     ) -> Any:
         """Execute Python code in the sandbox, or pass through to a native tool."""
         if not isinstance(tool, _RunCodeTool):
-            # Native (non-sandboxed) tool — pass through to the wrapped toolset.
+            # Native (non-sandboxed) tool -- pass through to the wrapped toolset.
             return await self.wrapped.call_tool(name, tool_args, ctx, tool)
 
         code = tool_args['code']
@@ -315,7 +450,7 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
         #   to isolate the context var from per-tool flags.
         # - sequential_tools: per-tool `sequential` flags on ToolDefinition.
         #   These tools are rendered as `def` (sync) and resolved inline.
-        global_sequential = tool_manager.get_parallel_execution_mode([]) != 'parallel'
+        global_sequential = _global_mode_is_sequential(tool_manager.get_parallel_execution_mode)
         sequential_tools = {name for name, td in callable_defs.items() if td.sequential}
 
         # Collect nested tool calls and returns keyed by tool_call_id so they
@@ -328,7 +463,7 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
             """Dispatch a single tool call from inside the sandbox.
 
             Returns the serialized tool result on success. On failure, the
-            exception propagates — the execution loop passes it back into
+            exception propagates -- the execution loop passes it back into
             Monty via `ExternalException` so the sandbox sees it at the
             `await` site.
             """
@@ -399,7 +534,7 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
         capture = _PrintCapture()
 
         try:
-            monty_state = self._repl.feed_start(code, print_callback=capture)
+            monty_state = self._repl.feed_start(code, print_callback=capture, os=self.os_access, mount=self.mount)
             completed = await _execution_loop(
                 monty_state,
                 dispatch=dispatch_tool_call,
@@ -407,10 +542,12 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
                 sanitized_to_original=sanitized_to_original,
                 sequential_tools=sequential_tools,
                 global_sequential=global_sequential,
+                os_access=self.os_access,
+                mount=self.mount,
             )
         except MontySyntaxError as e:
             raise ModelRetry(f'Syntax error in code:\n{_prepend_prints(e.display(), capture)}') from e
-        except MontyTypingError as e:  # pragma: no cover — MontyRepl.feed_start doesn't raise this
+        except MontyTypingError as e:  # pragma: no cover -- MontyRepl.feed_start doesn't raise this
             raise ModelRetry(f'Type error in code:\n{_prepend_prints(e.display(), capture)}') from e
         except MontyRuntimeError as e:
             # Exceptions raised inside dispatch_tool_call (e.g. UserError from
@@ -421,7 +558,7 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
             # in the display string, so the model sees a useful error. This means
             # ModelRetry from a wrapped tool gets double-wrapped
             # (ModelRetry → MontyRuntimeError → ModelRetry), but the retry
-            # semantics are the same — the model gets another chance.
+            # semantics are the same -- the model gets another chance.
             raise ModelRetry(f'Runtime error:\n{_prepend_prints(e.display(), capture)}') from e
 
         result = completed.output
@@ -484,7 +621,7 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
                     stacklevel=2,
                 )
                 continue
-            # Warn when a sandboxed tool has no return schema — the generated
+            # Warn when a sandboxed tool has no return schema -- the generated
             # signature will show `-> Any`, giving the model no type information
             # about the return shape, which limits code mode effectiveness.
             if td.return_schema is None and name not in self._warned_deferred:
@@ -504,10 +641,25 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
         return callable_defs, sanitized_to_original
 
     @staticmethod
-    def _build_description(callable_defs: dict[str, ToolDefinition]) -> str:
+    def _build_description(callable_defs: dict[str, ToolDefinition], *, has_os: bool, has_mount: bool) -> str:
         """Render the `run_code` description: base prose + TypedDicts + function signatures."""
+        base = _base_description(has_os=has_os, has_mount=has_mount)
+        catalog = CodeModeToolset._render_catalog(callable_defs)
+        if not catalog:
+            return base
+        return base + '\n\n' + catalog
+
+    @staticmethod
+    def _render_catalog(callable_defs: dict[str, ToolDefinition]) -> str:
+        """Render the functions-header + TypedDict + function-signature blocks, or `''` if no defs.
+
+        Excludes the `run_code` base prose; the catalog is the discovery-driven portion that's
+        cache-hostile when carried in `run_code.description`. Used by `_build_description`
+        (default static-description path) and by `get_instructions` (the `dynamic_catalog`
+        path, which moves it into instructions instead).
+        """
         if not callable_defs:
-            return _RUN_CODE_BASE_DESCRIPTION
+            return ''
 
         sigs, conflicting = _get_sigs_and_conflicting(callable_defs)
         type_blocks = FunctionSignature.render_type_definitions(sigs, conflicting)
@@ -518,9 +670,7 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
 
         has_sync = any(td.sequential for td in callable_defs.values())
         has_async = any(not td.sequential for td in callable_defs.values())
-        header = _functions_header(has_sync=has_sync, has_async=has_async)
-
-        sections = [_RUN_CODE_BASE_DESCRIPTION, header]
+        sections = [_functions_header(has_sync=has_sync, has_async=has_async)]
         if type_blocks:
             sections.append('```python\n' + '\n\n'.join(type_blocks) + '\n```')
         sections.append('```python\n' + '\n\n'.join(function_blocks) + '\n```')
@@ -579,6 +729,8 @@ async def _execution_loop(
     sanitized_to_original: dict[str, str],
     sequential_tools: set[str],
     global_sequential: bool,
+    os_access: CodeModeOS | None,
+    mount: CodeModeMount | None,
 ) -> MontyComplete:
     """Drive the Monty REPL via the synchronous snapshot API until completion.
 
@@ -597,6 +749,9 @@ async def _execution_loop(
     - **Global sequential mode** (DBOS/Temporal): all tools are deferred via
       `resume({'future': ...})` but stored as bare coroutines and awaited
       one-at-a-time at `FutureSnapshot` to prevent interleaving.
+
+    `os`/`mount` must be passed to every `resume` call (not just `feed_start`):
+    Monty's auto-dispatch of OS calls stops the moment a resume omits them.
     """
     pending: dict[int, asyncio.Task[Any] | Coroutine[Any, Any, Any]] = {}
     # Results from parallel tasks that were awaited early (at a sequential-tool
@@ -605,7 +760,7 @@ async def _execution_loop(
     try:
         while not isinstance(monty_state, MontyComplete):
             if isinstance(monty_state, NameLookupSnapshot):
-                monty_state = monty_state.resume()
+                monty_state = monty_state.resume(os=os_access, mount=mount)
             elif isinstance(monty_state, FunctionSnapshot):
                 monty_state = await _handle_function_snapshot(
                     monty_state,
@@ -616,6 +771,8 @@ async def _execution_loop(
                     global_sequential=global_sequential,
                     pending=pending,
                     pre_resolved=pre_resolved,
+                    os_access=os_access,
+                    mount=mount,
                 )
             else:
                 monty_state = await _resolve_future_snapshot(
@@ -623,6 +780,8 @@ async def _execution_loop(
                     pending=pending,
                     pre_resolved=pre_resolved,
                     global_sequential=global_sequential,
+                    os_access=os_access,
+                    mount=mount,
                 )
     finally:
         for item in pending.values():  # pragma: no cover
@@ -644,39 +803,43 @@ async def _handle_function_snapshot(
     global_sequential: bool,
     pending: dict[int, asyncio.Task[Any] | Coroutine[Any, Any, Any]],
     pre_resolved: dict[int, ExternalResult],
+    os_access: CodeModeOS | None,
+    mount: CodeModeMount | None,
 ) -> FunctionSnapshot | FutureSnapshot | NameLookupSnapshot | MontyComplete:
     """Handle a single FunctionSnapshot from the Monty execution loop."""
     fn_name = snapshot.function_name
 
     if fn_name not in callable_defs:
-        return snapshot.resume({'exception': NameError(f'Unknown function: {fn_name}')})
+        return snapshot.resume({'exception': NameError(f'Unknown function: {fn_name}')}, os=os_access, mount=mount)
 
     if snapshot.args:
         return snapshot.resume(
-            {'exception': TypeError(f'{fn_name}() does not accept positional arguments; use keyword arguments')}
+            {'exception': TypeError(f'{fn_name}() does not accept positional arguments; use keyword arguments')},
+            os=os_access,
+            mount=mount,
         )
 
     original_name = sanitized_to_original.get(fn_name, fn_name)
 
     if fn_name in sequential_tools:
-        # Per-tool sequential: rendered as `def` (sync), so must resolve inline —
+        # Per-tool sequential: rendered as `def` (sync), so must resolve inline --
         # the sandbox code doesn't `await` the result. Await pending parallel
         # tasks first (barrier) to maintain ordering.
         for cid in list(pending):
             pre_resolved[cid] = await _resolve_coro(pending.pop(cid))
         outcome = await _resolve_coro(dispatch(original_name, snapshot.kwargs))
         if 'return_value' in outcome:
-            return snapshot.resume({'return_value': outcome['return_value']})
-        return snapshot.resume({'exception': outcome['exception']})
+            return snapshot.resume({'return_value': outcome['return_value']}, os=os_access, mount=mount)
+        return snapshot.resume({'exception': outcome['exception']}, os=os_access, mount=mount)
 
-    # Deferred execution — store for later resolution at FutureSnapshot.
+    # Deferred execution -- store for later resolution at FutureSnapshot.
     if global_sequential:
-        # Bare coroutine — don't schedule on the event loop yet.
+        # Bare coroutine -- don't schedule on the event loop yet.
         pending[snapshot.call_id] = dispatch(original_name, snapshot.kwargs)
     else:
         # Eagerly schedule as a Task for concurrent execution.
         pending[snapshot.call_id] = asyncio.ensure_future(dispatch(original_name, snapshot.kwargs))
-    return snapshot.resume({'future': ...})
+    return snapshot.resume({'future': ...}, os=os_access, mount=mount)
 
 
 async def _resolve_future_snapshot(
@@ -685,11 +848,13 @@ async def _resolve_future_snapshot(
     pending: dict[int, asyncio.Task[Any] | Coroutine[Any, Any, Any]],
     pre_resolved: dict[int, ExternalResult],
     global_sequential: bool,
+    os_access: CodeModeOS | None,
+    mount: CodeModeMount | None,
 ) -> FunctionSnapshot | FutureSnapshot | NameLookupSnapshot | MontyComplete:
     """Resolve pending tool calls at a FutureSnapshot."""
     pending_ids = snapshot.pending_call_ids
     if not pending_ids:  # pragma: no cover
-        return snapshot.resume(results={})
+        return snapshot.resume(results={}, os=os_access, mount=mount)
 
     results: dict[int, ExternalResult] = {}
     for cid in pending_ids:
@@ -708,7 +873,7 @@ async def _resolve_future_snapshot(
         for cid, outcome in zip(gather_ids, settled):
             results[cid] = _settle_outcome(outcome)
 
-    return snapshot.resume(results=results)
+    return snapshot.resume(results=results, os=os_access, mount=mount)
 
 
 async def _resolve_coro(
