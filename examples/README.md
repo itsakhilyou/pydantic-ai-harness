@@ -14,11 +14,33 @@ Register sub-agents with the capability. Each one becomes an async function the 
 named after the agent and documented by its `description`:
 
 ```python
+from pydantic import BaseModel
 from pydantic_ai import Agent
 from pydantic_ai_harness.experimental.dynamic_workflow import DynamicWorkflow, WorkflowAgent
 
-migrator = Agent('anthropic:claude-sonnet-4-6', name='migrator', instructions='Rewrite the given file from os.path to pathlib.')
-reviewer = Agent('anthropic:claude-sonnet-4-6', name='reviewer', instructions='Review the given file; approve only if no os.path remains.')
+
+class MigrationReport(BaseModel):
+    path: str
+    content: str
+
+
+class Review(BaseModel):
+    approved: bool
+    issues: list[str]
+
+
+migrator = Agent(
+    'anthropic:claude-sonnet-4-6',
+    name='migrator',
+    output_type=MigrationReport,
+    instructions='Rewrite the given file from os.path to pathlib; return the path and migrated content.',
+)
+reviewer = Agent(
+    'anthropic:claude-sonnet-4-6',
+    name='reviewer',
+    output_type=Review,
+    instructions='Review migrated content; approve only if no os.path remains.',
+)
 
 orchestrator = Agent(
     'anthropic:claude-sonnet-4-6',
@@ -56,14 +78,23 @@ for _ in range(3):  # one initial pass plus up to two retries
         break
     # Migrate every pending file at once, then review each result at once.
     reports = await asyncio.gather(*[migrator(task=tasks[path]) for path in pending])
-    reviews = await asyncio.gather(*[reviewer(task=r["path"]) for r in reports])
+    reviews = await asyncio.gather(
+        *[reviewer(task="Review migrated content for " + r["path"] + ":\n" + r["content"]) for r in reports]
+    )
 
     still_pending = []
     for report, review in zip(reports, reviews):
         path = report["path"]
         outcomes[path] = {**report, "approved": review["approved"], "issues": review["issues"]}
         if not review["approved"]:
-            tasks[path] = path + "\n\nReviewer issues to fix:\n" + "\n".join(review["issues"])
+            tasks[path] = (
+                "Path: "
+                + path
+                + "\n\nCurrent content:\n"
+                + report["content"]
+                + "\n\nReviewer issues to fix:\n"
+                + "\n".join(review["issues"])
+            )
             still_pending.append(path)
     pending = still_pending
 

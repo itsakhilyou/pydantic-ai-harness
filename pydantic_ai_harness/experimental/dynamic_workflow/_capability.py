@@ -60,13 +60,15 @@ class DynamicWorkflow(AbstractCapability[AgentDepsT]):
     Each `WorkflowAgent` bundles the agent with its sandbox function name (a valid
     Python identifier, unique across the workflow) and an optional catalog description.
 
-    A `list` (not a read-only `Sequence`) because the host can keep a reference to it and append
-    a `WorkflowAgent` mid-run to reveal it: it becomes callable on the next step, announced to the
-    model via an enqueued message, while the `run_workflow` description stays frozen at the agents
-    present when the run started -- so the prompt-cache prefix never changes. Requires a
-    `PendingMessageDrainCapability` in the run (auto-injected by Pydantic AI) so the announcement
-    drains into the conversation. Reveal is **append-only**: a revealed sub-agent cannot be removed
-    or hidden again for the rest of the run -- plan the catalog as monotonically growing.
+    Use `reveal()` to add a `WorkflowAgent` mid-run. The method appends to this list, so direct
+    list append remains the underlying mechanism and keeps working for existing callers.
+
+    A revealed sub-agent becomes callable on the next step, announced to the model via an enqueued
+    message, while the `run_workflow` description stays frozen at the agents present when the run
+    started -- so the prompt-cache prefix never changes. Requires a `PendingMessageDrainCapability`
+    in the run (auto-injected by Pydantic AI) so the announcement drains into the conversation.
+    Reveal is append-only: a revealed sub-agent cannot be removed or hidden again for the rest of
+    the run -- plan the catalog as monotonically growing.
     """
 
     tool_name: str = 'run_workflow'
@@ -94,12 +96,13 @@ class DynamicWorkflow(AbstractCapability[AgentDepsT]):
     sub_agent_usage_limits: UsageLimits | None = None
     """`UsageLimits` applied to every sub-agent run, replacing pydantic-ai's default.
 
-    Each sub-agent run is sequential, so its own limits are enforced exactly. With
-    `forward_usage=False`, a per-sub-agent `total_tokens_limit` of `T` together with
-    `max_agent_calls` of `N` bound the whole agent tree to at most `N * T` tokens -- a hard
-    ceiling. With `forward_usage=True` the limit is checked against the shared counter instead,
-    a tree-wide cap that is best-effort under concurrent fan-out. `None` keeps the default
-    (`request_limit=50`, no token limit).
+    Requests within one sub-agent run happen one at a time, so request limits are enforced per
+    run. With `forward_usage=False`, a per-sub-agent `total_tokens_limit` of `T` together with
+    `max_agent_calls` of `N` bounds the whole agent tree to roughly `N * T` tokens; each run can
+    overshoot its token limit by the final response, because core checks token limits after a
+    response arrives. With `forward_usage=True` the limit is checked against the shared counter
+    instead, a tree-wide cap that is best-effort under concurrent fan-out. `None` keeps the
+    default (`request_limit=50`, no token limit).
     """
 
     resource_limits: WorkflowResourceLimits | Literal['unlimited'] | None = None
@@ -119,6 +122,22 @@ class DynamicWorkflow(AbstractCapability[AgentDepsT]):
     def get_serialization_name(cls) -> str | None:
         # Not spec-serializable: `agents` holds live Agent objects, not YAML-expressible config.
         return None
+
+    def reveal(self, agent: WorkflowAgent[AgentDepsT]) -> None:
+        """Reveal a sub-agent on the next model step.
+
+        This is the supported runtime API for revealing sub-agents after a run has started. The
+        method appends to `agents`; direct list append still works because list mutability is the
+        underlying mechanism.
+
+        The revealed sub-agent is announced to the model on the next step and becomes callable
+        then. The `run_workflow` tool description stays frozen at the agents present when the run
+        started. Reveal is append-only: a revealed sub-agent cannot be removed or hidden again for
+        the rest of the run. The sub-agent's resolved name must be a valid, unique sandbox function
+        name. If one `DynamicWorkflow` instance is shared across concurrent runs, `reveal()` reveals
+        to all in-flight runs and joins the baseline catalog for runs that start afterwards.
+        """
+        self.agents.append(agent)
 
     def get_toolset(self) -> DynamicWorkflowToolset[AgentDepsT]:
         """Provide the orchestration toolset to the agent."""

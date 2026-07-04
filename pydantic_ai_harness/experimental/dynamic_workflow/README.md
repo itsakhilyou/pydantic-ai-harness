@@ -63,7 +63,7 @@ usage shared across the tree, and a guard against nesting workflows. See
 `DynamicWorkflow` runs scripts in the [Monty](https://github.com/pydantic/monty) sandbox:
 
 ```bash
-pip install "pydantic-ai-harness[dynamic-workflow]"
+uv add "pydantic-ai-harness[dynamic-workflow]"
 ```
 
 ## Runnable example
@@ -160,8 +160,9 @@ instead of parsing a string.
 Each `WorkflowAgent` in `agents` becomes an async function in the sandbox. Its `name` is the
 function name (a valid Python identifier, unique across the workflow) and falls back to the
 agent's own `name`. The `description` is rendered as the function's docstring; set it to tell the
-model what the sub-agent does and what to pass as `task`. Omit it and the model sees only the bare
-signature:
+model what the sub-agent does and what to pass as `task`. The return annotation is rendered from
+the sub-agent's `output_type`; Pydantic model outputs include TypedDict-style field definitions.
+Omit `description` and the model sees only the signature plus any return schema:
 
 ```python
 DynamicWorkflow(
@@ -178,15 +179,15 @@ prompt-cache prefix across turns.
 
 ### Revealing sub-agents at runtime
 
-Pass `agents` as a **mutable `list`** and keep a reference to it (often via `deps`). Appending a
-`WorkflowAgent` mid-run makes it callable on the next step:
+Keep a reference to the `DynamicWorkflow` instance (often via `deps`) and call `reveal()` with a
+new `WorkflowAgent`. The revealed sub-agent becomes callable on the next step:
 
 ```python
-agents = [WorkflowAgent(agent=reviewer)]
-orchestrator = Agent('openai:gpt-5', deps_type=MyDeps, capabilities=[DynamicWorkflow(agents=agents)])
+workflow = DynamicWorkflow(agents=[WorkflowAgent(agent=reviewer)])
+orchestrator = Agent('openai:gpt-5', deps_type=MyDeps, capabilities=[workflow])
 
 # later, from the host or another tool -- e.g. once a fixer agent is provisioned:
-agents.append(WorkflowAgent(agent=fixer, description='Applies a fix for a reported issue.'))
+workflow.reveal(WorkflowAgent(agent=fixer, description='Applies a fix for a reported issue.'))
 ```
 
 The newcomer is announced to the model with a short message (its function signature) via the
@@ -194,9 +195,13 @@ auto-injected `PendingMessageDrainCapability`. The `run_workflow` description it
 at the agents present when the run started, so even a runtime reveal never moves the prompt-cache
 prefix.
 
-`agents` is a `list` precisely so this works -- you hold the reference and append. Reveal is
-**append-only**: once a sub-agent has appeared it stays for the rest of the run; there is no way to
-remove or hide it again. Plan the catalog as growing.
+If one `DynamicWorkflow` instance is shared across concurrent runs, `reveal()` reveals to all
+in-flight runs and joins the baseline catalog for runs that start afterwards.
+
+`reveal()` appends to the underlying `agents` list. Direct `agents.append(...)` still works for
+existing callers, but `reveal()` is the supported runtime API. Reveal is append-only: once a
+sub-agent has appeared it stays for the rest of the run; there is no way to remove or hide it
+again. Plan the catalog as growing.
 
 ## Return values
 
@@ -209,8 +214,9 @@ A sub-agent function returns that agent's output serialized to a JSON-compatible
 | list / scalar           | the list / scalar    |
 
 The value of the script's last expression becomes the `run_workflow` result -- do not `print()` it.
-If the script also called `print()`, the result is wrapped as `{"output": "<printed text>",
-"result": <last expression>}`; a script whose last expression is `None` returns `{}`.
+The exact shape has three cases: no print returns the value directly, or `{}` when the value is
+`None`; print plus a non-`None` value returns `{"output": "<printed text>", "result": <last
+expression>}`; print plus `None` returns `{"output": "<printed text>"}`.
 
 ## Budget and safety
 
@@ -219,20 +225,27 @@ many* run and a ceiling on *how much* they spend.
 
 **Count: `max_agent_calls`** (default `50`) is an exact, host-enforced ceiling on sub-agent runs
 per parent run. It holds even under concurrent fan-out. When exhausted, the workflow returns a
-terminal message telling the model to conclude. This is the only knob that bounds the number of
-runs exactly.
+terminal `{"error": ...}` result telling the model to conclude. The result always includes
+`last_error`, holding the displayed sandbox error; under concurrent batches, that display may come
+from an unrelated failure from the same batch. This is the only knob that bounds the number of runs
+exactly. Completed sub-agent results from the failed script are returned under `completed` so the
+model can use them when concluding.
 
 **Cost: `sub_agent_usage_limits`** is a `UsageLimits` applied to every sub-agent run. How tight a
 ceiling it gives depends on `forward_usage`:
 
 | `forward_usage` | Usage counter | Limit semantics |
 | --------------- | ------------- | --------------- |
-| `False` | each sub-agent run is independent and sequential | The limit is enforced exactly per run. A per-run `total_tokens_limit` of `T` with `max_agent_calls` of `N` gives a hard worst-case ceiling of `N * T` tokens. |
+| `False` | each sub-agent run has its own usage counter; requests inside one run happen one at a time | Request limits are enforced per run. A per-run `total_tokens_limit` of `T` with `max_agent_calls` of `N` bounds the tree to roughly `N * T` tokens; each run can overshoot by the final response, because core checks token limits after a response arrives. |
 | `True` (default) | the parent's `usage` accumulator is shared across the whole tree | The limit is checked against the shared counter -- a tree-wide cap, but best-effort under concurrent fan-out (sub-agents can pass the check before any of them increments it). |
 
 The parent's own `usage_limits` on `run()` is **not** forwarded into sub-agents (`RunContext`
 doesn't expose it); it is re-checked only at the parent's own request boundaries. For an exact
 ceiling on sub-agent *runs*, reach for `max_agent_calls`.
+
+If a non-budget runtime error aborts a script after some sub-agent calls completed, the retry
+prompt lists those completed results so the model can reuse them as literals instead of spending the
+same calls again.
 
 **Sandbox: `resource_limits`** are Monty limits on the *script's own* memory/allocations (default:
 256 MB, 50M allocations). There is deliberately **no default `max_duration_secs`**: the sandbox's
@@ -243,6 +256,7 @@ pure-CPU `while True`). Pass `'unlimited'` to remove all limits; a partial dict 
 `{'max_memory': ...}`) is merged onto the backstop, overriding only the caps it names.
 
 **Nesting: workflows do not nest.** A sub-agent that tries to start its own workflow is refused.
+The nested workflow tool call returns a terminal `{"error": ...}` result instead of retrying.
 Don't give the sub-agents in `agents` the `DynamicWorkflow` capability -- they are leaves of the
 orchestration, not orchestrators.
 
@@ -277,7 +291,7 @@ The script runs in Monty, a Python subset:
 
 ```python
 DynamicWorkflow(
-    agents,                  # list[WorkflowAgent] -- required; append mid-run to reveal sub-agents
+    agents,                  # list[WorkflowAgent] -- required; use reveal() to append mid-run
     tool_name='run_workflow',
     max_agent_calls=50,
     max_retries=3,
@@ -313,6 +327,13 @@ The Monty engine already supports this -- a suspended program dumps to ~500 byte
 forks -- but `DynamicWorkflow` does not expose it yet: today `run_workflow` runs the model's script
 straight through to completion and returns the result. The synchronous fan-out / chaining / voting /
 loop patterns shown above ship now; fork and durable resume are planned.
+
+Two smaller extensions are also planned:
+
+- **Structured sub-agent inputs** -- today the sandbox function contract is the single
+  `task: str` keyword; a `parameters` schema per `WorkflowAgent` is the planned extension.
+- **First-class progress streaming** -- today, set `event_stream_handler` on each sub-agent
+  `Agent`, or use Logfire instrumentation, to observe sub-agent runs inside the one tool call.
 
 ## Further reading
 
