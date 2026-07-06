@@ -44,13 +44,13 @@ def anyio_backend() -> str:
     return 'asyncio'
 
 
-def _sub_agent(text: str = 'ok', name: str | None = 'sub') -> Agent[object, str]:
-    return Agent(TestModel(custom_output_text=text), name=name)
+def _sub_agent(text: str = 'ok', name: str | None = 'sub', description: str | None = None) -> Agent[object, str]:
+    return Agent(TestModel(custom_output_text=text), name=name, description=description)
 
 
 def _wf_agent(text: str = 'ok', name: str | None = 'sub', description: str | None = None) -> WorkflowAgent[object]:
     """Build a `WorkflowAgent` wrapping a trivial `TestModel` sub-agent."""
-    return WorkflowAgent(agent=_sub_agent(text, name), description=description)
+    return WorkflowAgent(_sub_agent(text, name), description=description)
 
 
 class Review(BaseModel):
@@ -149,7 +149,7 @@ class _HostInternalValidated:
 
 
 def test_capability_provides_toolset_with_propagated_config() -> None:
-    reviewer = _wf_agent(name='reviewer')
+    reviewer = _sub_agent(name='reviewer')
     usage_limits = UsageLimits(request_limit=2)
     resource_limits: WorkflowResourceLimits = {'max_memory': 1024}
     cap = DynamicWorkflow[object](
@@ -163,7 +163,7 @@ def test_capability_provides_toolset_with_propagated_config() -> None:
         id='wf',
     )
     toolset = cap.get_toolset()
-    assert toolset.agents == [reviewer]
+    assert toolset.agents == [WorkflowAgent(reviewer)]
     assert toolset.tool_name == 'orchestrate'
     assert toolset.max_agent_calls == 7
     assert toolset.max_retries == 1
@@ -204,6 +204,23 @@ def test_workflow_agent_resolved_name() -> None:
     assert WorkflowAgent(agent=_sub_agent(name=None)).resolved_name is None
 
 
+def test_workflow_agent_resolved_description() -> None:
+    reviewer = _sub_agent(name='reviewer', description='Agent fallback description.')
+    assert WorkflowAgent(reviewer).resolved_description == 'Agent fallback description.'
+    assert WorkflowAgent(reviewer, description='Workflow-specific description.').resolved_description == (
+        'Workflow-specific description.'
+    )
+    assert WorkflowAgent(_sub_agent(name='plain')).resolved_description is None
+
+
+def test_workflow_agent_accepts_positional_agent() -> None:
+    reviewer = _sub_agent(name='reviewer')
+    entry = WorkflowAgent(reviewer, description='Reviews code.')
+    assert entry.agent is reviewer
+    assert entry.resolved_name == 'reviewer'
+    assert entry.resolved_description == 'Reviews code.'
+
+
 # --- Validation ------------------------------------------------------------
 
 
@@ -235,7 +252,87 @@ def test_duplicate_name_raises() -> None:
         DynamicWorkflowToolset[object](agents=[_wf_agent(name='dup'), _wf_agent(name='dup')])
 
 
+def test_dynamic_workflow_constructor_rejects_invalid_identifier() -> None:
+    with pytest.raises(UserError, match='cannot be exposed as a sandbox function'):
+        DynamicWorkflow[object](agents=[_sub_agent(name='bad-name')])
+
+
+def test_dynamic_workflow_constructor_rejects_keyword_name() -> None:
+    with pytest.raises(UserError, match='cannot be exposed as a sandbox function'):
+        DynamicWorkflow[object](agents=[_sub_agent(name='class')])
+
+
+def test_dynamic_workflow_constructor_rejects_missing_name() -> None:
+    with pytest.raises(UserError, match='has no `name`'):
+        DynamicWorkflow[object](agents=[_sub_agent(name=None)])
+
+
+def test_dynamic_workflow_constructor_rejects_duplicate_names() -> None:
+    with pytest.raises(UserError, match='must be unique'):
+        DynamicWorkflow[object](agents=[_sub_agent(name='dup'), WorkflowAgent(_sub_agent(name='dup'))])
+
+
 # --- Catalog rendering / discovery surface ---------------------------------
+
+
+async def test_raw_agents_in_dynamic_workflow_use_agent_metadata() -> None:
+    reviewer = _sub_agent(name='reviewer', description='Reviews code for bugs.')
+    cap = DynamicWorkflow[object](agents=[reviewer])
+    desc = (await cap.get_toolset().get_tools(_ctx()))['run_workflow'].tool_def.description
+    assert desc is not None
+    assert 'async def reviewer(*, task: str) -> str:' in desc
+    assert '"""Reviews code for bugs."""' in desc
+
+
+async def test_mixed_raw_agents_and_wrappers_in_dynamic_workflow_catalog() -> None:
+    reviewer = _sub_agent(name='reviewer', description='Reviews code for bugs.')
+    summarizer = _sub_agent(name='summary_agent', description='Agent-level summary description.')
+    cap = DynamicWorkflow[object](
+        agents=[
+            reviewer,
+            WorkflowAgent(summarizer, name='summarizer', description='Summarizes findings for this workflow.'),
+        ]
+    )
+    desc = (await cap.get_toolset().get_tools(_ctx()))['run_workflow'].tool_def.description
+    assert desc is not None
+    assert 'async def reviewer(*, task: str) -> str:' in desc
+    assert '"""Reviews code for bugs."""' in desc
+    assert 'async def summarizer(*, task: str) -> str:' in desc
+    assert '"""Summarizes findings for this workflow."""' in desc
+
+
+async def test_wrapper_overrides_agent_name_and_description_in_dynamic_workflow_catalog() -> None:
+    reviewer = _sub_agent(name='reviewer', description='Agent-level description.')
+    cap = DynamicWorkflow[object](
+        agents=[WorkflowAgent(reviewer, name='check', description='Workflow-specific description.')]
+    )
+    desc = (await cap.get_toolset().get_tools(_ctx()))['run_workflow'].tool_def.description
+    assert desc is not None
+    assert 'async def check(*, task: str) -> str:' in desc
+    assert 'async def reviewer' not in desc
+    assert '"""Workflow-specific description."""' in desc
+    assert 'Agent-level description.' not in desc
+
+
+async def test_resolved_description_fallback_visible_in_tool_description() -> None:
+    reviewer = _sub_agent(name='reviewer', description='Agent fallback description.')
+    ts = DynamicWorkflowToolset[object](agents=[WorkflowAgent(reviewer)])
+    desc = (await ts.get_tools(_ctx()))['run_workflow'].tool_def.description
+    assert desc is not None
+    assert '"""Agent fallback description."""' in desc
+
+
+async def test_mutating_original_agents_list_after_construction_has_no_effect() -> None:
+    agents = [_sub_agent('base-out', 'base')]
+    cap = DynamicWorkflow[object](agents=agents)
+    agents.append(_sub_agent('extra-out', 'extra'))
+
+    ts = cap.get_toolset()
+    desc = (await ts.get_tools(_ctx_with_queue()))['run_workflow'].tool_def.description
+    assert desc is not None
+    assert 'async def base(*, task: str) -> str:' in desc
+    assert 'async def extra' not in desc
+    assert await _run_script(ts, "await base(task='x')", _ctx_with_queue()) == 'base-out'
 
 
 async def test_description_lists_agents_as_functions() -> None:
@@ -395,7 +492,7 @@ async def test_via_agent_run_end_to_end() -> None:
 
     reviewer = _sub_agent('reviewed', 'reviewer')
     agent: Agent[object, str] = Agent(
-        FunctionModel(model_fn), capabilities=[DynamicWorkflow[object](agents=[WorkflowAgent(agent=reviewer)])]
+        FunctionModel(model_fn), capabilities=[DynamicWorkflow[object](agents=[reviewer])]
     )
     result = await agent.run('please review')
     # Model is shown only the orchestration tool, not the sub-agents directly.
@@ -424,7 +521,7 @@ async def test_budget_terminal_result_arrives_as_tool_return_end_to_end() -> Non
     counted = _sub_agent('counted-result', 'counted')
     agent: Agent[object, str] = Agent(
         FunctionModel(model_fn),
-        capabilities=[DynamicWorkflow[object](agents=[WorkflowAgent(agent=counted)], max_agent_calls=1)],
+        capabilities=[DynamicWorkflow[object](agents=[counted], max_agent_calls=1)],
     )
 
     result = await agent.run('run over budget')
@@ -580,7 +677,7 @@ async def test_nested_workflow_refused_end_to_end() -> None:
     inner: Agent[object, str] = Agent(
         FunctionModel(inner_fn),
         name='inner',
-        capabilities=[DynamicWorkflow[object](agents=[WorkflowAgent(agent=leaf)])],
+        capabilities=[DynamicWorkflow[object](agents=[leaf])],
     )
     ts = DynamicWorkflowToolset[object](agents=[WorkflowAgent(agent=inner)])
     out = await _run_script(ts, "await inner(task='go')")
@@ -1051,55 +1148,37 @@ async def test_for_run_resets_budget() -> None:
     assert fresh._call_count == 0  # pyright: ignore[reportPrivateUsage]
 
 
-async def test_for_run_tolerates_bad_append_from_earlier_run() -> None:
-    # An invalid append that `_reveal_pending` skipped stays in the shared `agents` list; a later
-    # run must degrade the same way (skip with a warning), not hard-fail at toolset setup.
+async def test_for_run_raises_on_invalid_direct_mutation() -> None:
     agents = [_wf_agent('b', 'base')]
     ts = DynamicWorkflowToolset[object](agents=agents)
-    ctx = _ctx_with_queue()
-    await ts.get_tools(ctx)
     agents.append(WorkflowAgent(agent=_sub_agent(name=None)))
-    with pytest.warns(UserWarning, match='could not reveal'):
-        await ts.get_tools(ctx)
-
-    with pytest.warns(UserWarning, match='has no `name`'):
-        fresh = await ts.for_run(_ctx())
-    assert set(fresh._by_name) == {'base'}  # pyright: ignore[reportPrivateUsage]
-    assert fresh._call_count == 0  # pyright: ignore[reportPrivateUsage]
-    # The skipped entry was pre-seeded as warned, so resolving tools in the new run does not
-    # re-warn (filterwarnings='error' would fail this call if it did) and `base` still works.
-    assert await _run_script(fresh, "await base(task='x')", _ctx_with_queue()) == 'b'
+    with pytest.raises(UserError, match='has no `name`'):
+        await ts.for_run(_ctx())
 
 
-async def test_for_run_tolerates_duplicate_append_from_earlier_run() -> None:
-    # Same as above for the duplicate-name case: the original keeps the name, the shadow is skipped.
+async def test_for_run_raises_on_duplicate_direct_mutation() -> None:
     agents = [_wf_agent('b', 'base')]
     ts = DynamicWorkflowToolset[object](agents=agents)
     agents.append(_wf_agent('shadow', 'base'))
-    with pytest.warns(UserWarning, match='must be unique'):
-        fresh = await ts.for_run(_ctx())
-    assert await _run_script(fresh, "await base(task='x')", _ctx_with_queue()) == 'b'
+    with pytest.raises(UserError, match='must be unique'):
+        await ts.for_run(_ctx())
 
 
-async def test_for_run_clones_isolate_reveal_state_and_budget() -> None:
-    agents = [_wf_agent('base-out', 'base')]
-    ts = DynamicWorkflowToolset[object](agents=agents, max_agent_calls=2)
+async def test_for_run_clones_share_reveals_and_isolate_budget() -> None:
+    workflow = DynamicWorkflow[object](agents=[_sub_agent('base-out', 'base')], max_agent_calls=2)
+    ts = workflow.get_toolset()
     clone_a = await ts.for_run(_ctx())
     clone_b = await ts.for_run(_ctx())
 
-    agents.append(_wf_agent('extra-out', 'extra'))
-    agents.append(WorkflowAgent(agent=_sub_agent(name=None)))
+    workflow.reveal(_sub_agent('extra-out', 'extra'))
     ctx_a = _ctx_with_queue()
     ctx_b = _ctx_with_queue()
 
-    with pytest.warns(UserWarning, match='could not reveal'):
-        await clone_a.get_tools(ctx_a)
-    with pytest.warns(UserWarning, match='could not reveal'):
-        await clone_b.get_tools(ctx_b)
+    await clone_a.get_tools(ctx_a)
+    await clone_b.get_tools(ctx_b)
 
     assert set(clone_a._by_name) == {'base', 'extra'}  # pyright: ignore[reportPrivateUsage]
     assert set(clone_b._by_name) == {'base', 'extra'}  # pyright: ignore[reportPrivateUsage]
-    assert clone_a._reveal_warned is not clone_b._reveal_warned  # pyright: ignore[reportPrivateUsage]
     assert await _run_script(clone_a, "await extra(task='x')", ctx_a) == 'extra-out'
     assert clone_a._call_count == 1  # pyright: ignore[reportPrivateUsage]
     assert clone_b._call_count == 0  # pyright: ignore[reportPrivateUsage]
@@ -1139,16 +1218,15 @@ async def test_cancellation_closes_unscheduled_coroutines() -> None:
 
 
 async def test_runtime_reveal_announces_and_makes_callable() -> None:
-    # Appending to the live `agents` list reveals a sub-agent mid-run.
-    agents = [_wf_agent('base-out', 'base')]
-    ts = DynamicWorkflowToolset[object](agents=agents)
+    workflow = DynamicWorkflow[object](agents=[_sub_agent('base-out', 'base')])
+    ts = workflow.get_toolset()
     ctx = _ctx_with_queue()
 
     await ts.get_tools(ctx)
     assert set(ts._by_name) == {'base'}  # pyright: ignore[reportPrivateUsage]
     assert _enqueued_text(ctx) == ''  # nothing revealed yet
 
-    agents.append(WorkflowAgent(agent=_review_agent({'score': 4, 'note': 'extra-out'}, name='extra')))
+    workflow.reveal(_review_agent({'score': 4, 'note': 'extra-out'}, name='extra'))
     await ts.get_tools(ctx)
     assert set(ts._by_name) == {'base', 'extra'}  # pyright: ignore[reportPrivateUsage]
     announced = _enqueued_text(ctx)
@@ -1172,8 +1250,8 @@ async def test_runtime_reveal_disambiguates_type_name_conflicts_against_catalog(
         name='extra',
         output_type=ScoreLabel,
     )
-    agents = [WorkflowAgent(agent=baseline)]
-    ts = DynamicWorkflowToolset[object](agents=agents)
+    workflow = DynamicWorkflow[object](agents=[baseline])
+    ts = workflow.get_toolset()
     ctx = _ctx_with_queue()
 
     baseline_description = (await ts.get_tools(ctx))['run_workflow'].tool_def.description
@@ -1181,7 +1259,7 @@ async def test_runtime_reveal_disambiguates_type_name_conflicts_against_catalog(
     assert 'class Score(TypedDict):' in baseline_description
     assert 'value: int' in baseline_description
 
-    agents.append(WorkflowAgent(agent=revealed))
+    workflow.reveal(revealed)
     after_reveal_description = (await ts.get_tools(ctx))['run_workflow'].tool_def.description
     announced = _enqueued_text(ctx)
 
@@ -1194,12 +1272,12 @@ async def test_runtime_reveal_disambiguates_type_name_conflicts_against_catalog(
 
 
 async def test_runtime_reveal_without_pending_queue_warns_and_remains_callable() -> None:
-    agents = [_wf_agent('base-out', 'base')]
-    ts = DynamicWorkflowToolset[object](agents=agents)
+    workflow = DynamicWorkflow[object](agents=[_sub_agent('base-out', 'base')])
+    ts = workflow.get_toolset()
     ctx = _ctx()
 
     await ts.get_tools(ctx)
-    agents.append(_wf_agent('extra-out', 'extra'))
+    workflow.reveal(_sub_agent('extra-out', 'extra'))
     with pytest.warns(UserWarning, match='could not enqueue its announcement'):
         await ts.get_tools(ctx)
 
@@ -1209,11 +1287,11 @@ async def test_runtime_reveal_without_pending_queue_warns_and_remains_callable()
 
 
 async def test_reveal_is_idempotent_across_steps() -> None:
-    agents = [_wf_agent('b', 'base')]
-    ts = DynamicWorkflowToolset[object](agents=agents)
+    workflow = DynamicWorkflow[object](agents=[_sub_agent('b', 'base')])
+    ts = workflow.get_toolset()
     ctx = _ctx_with_queue()
 
-    agents.append(_wf_agent('e', 'extra'))
+    workflow.reveal(_sub_agent('e', 'extra'))
     await ts.get_tools(ctx)
     await ts.get_tools(ctx)  # re-resolving tools must not re-announce an already-revealed agent
     assert _enqueued_text(ctx).count('async def extra') == 1
@@ -1221,49 +1299,64 @@ async def test_reveal_is_idempotent_across_steps() -> None:
 
 async def test_reveal_keeps_tool_description_frozen() -> None:
     # The cached prompt prefix must not change when an agent is revealed.
-    agents = [_wf_agent('b', 'base')]
-    ts = DynamicWorkflowToolset[object](agents=agents)
+    workflow = DynamicWorkflow[object](agents=[_sub_agent('b', 'base')])
+    ts = workflow.get_toolset()
     ctx = _ctx_with_queue()
 
     before = (await ts.get_tools(ctx))['run_workflow'].tool_def.description
-    agents.append(_wf_agent('e', 'extra'))
+    workflow.reveal(_sub_agent('e', 'extra'))
     after = (await ts.get_tools(ctx))['run_workflow'].tool_def.description
     assert before == after
     assert after is not None and 'extra' not in after  # the reveal never enters the description
 
 
-async def test_reveal_skips_invalid_and_duplicate_names() -> None:
+def test_reveal_duplicate_name_raises_immediately() -> None:
+    workflow = DynamicWorkflow[object](agents=[_sub_agent('b', 'base')])
+    with pytest.raises(UserError, match='must be unique'):
+        workflow.reveal(_sub_agent('shadow', 'base'))
+
+
+def test_reveal_invalid_identifier_raises_immediately() -> None:
+    workflow = DynamicWorkflow[object](agents=[_sub_agent('b', 'base')])
+    with pytest.raises(UserError, match='cannot be exposed as a sandbox function'):
+        workflow.reveal(_sub_agent(name='bad-name'))
+
+
+def test_reveal_keyword_name_raises_immediately() -> None:
+    workflow = DynamicWorkflow[object](agents=[_sub_agent('b', 'base')])
+    with pytest.raises(UserError, match='cannot be exposed as a sandbox function'):
+        workflow.reveal(_sub_agent(name='class'))
+
+
+def test_reveal_missing_name_raises_immediately() -> None:
+    workflow = DynamicWorkflow[object](agents=[_sub_agent('b', 'base')])
+    with pytest.raises(UserError, match='has no `name`'):
+        workflow.reveal(_sub_agent(name=None))
+
+
+async def test_direct_toolset_mutation_invalid_entry_raises_on_get_tools() -> None:
     agents = [_wf_agent('b', 'base')]
     ts = DynamicWorkflowToolset[object](agents=agents)
     ctx = _ctx_with_queue()
     await ts.get_tools(ctx)
 
-    # A nameless agent and one whose name collides with the baseline are both skipped with a
-    # warning (not silently), neither becomes callable, and the original is not shadowed.
     agents.append(WorkflowAgent(agent=_sub_agent(name=None)))
-    agents.append(_wf_agent('shadow', 'base'))
-    with pytest.warns(UserWarning, match='could not reveal'):
+    with pytest.raises(UserError, match='has no `name`'):
         await ts.get_tools(ctx)
-    assert set(ts._by_name) == {'base'}  # pyright: ignore[reportPrivateUsage]
-    assert _enqueued_text(ctx) == ''
-
-    # The original baseline agent still runs -- it was not shadowed. Re-resolving tools does not
-    # re-warn for the same bad entries (warn-once), so this call emits no warning.
-    assert await _run_script(ts, "await base(task='x')", ctx) == 'b'
 
 
 async def test_reveal_end_to_end_via_agent_run() -> None:
     base = _sub_agent('base-done', 'base')
     extra = _sub_agent('extra-done', 'extra')
     # The host keeps a reference to the capability (here a closure; in practice often via `deps`).
-    workflow = DynamicWorkflow[object](agents=[WorkflowAgent(agent=base)])
+    workflow = DynamicWorkflow[object](agents=[base])
     saw_announcement: list[bool] = []
 
     def model_fn(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
         returns = _workflow_returns(messages)
         if len(returns) == 0:
             # First step: reveal `extra`, and run `base` now to force a second step.
-            workflow.reveal(WorkflowAgent(agent=extra))
+            workflow.reveal(extra)
             return ModelResponse(parts=[ToolCallPart(tool_name='run_workflow', args={'code': "await base(task='go')"})])
         if len(returns) == 1:
             # Second step: the announcement for `extra` has arrived and it is now callable.

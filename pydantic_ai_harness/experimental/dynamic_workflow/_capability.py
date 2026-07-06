@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Literal
+from collections.abc import Sequence
+from dataclasses import dataclass, field
+from typing import Any, Literal
 
+from pydantic_ai.agent.abstract import AbstractAgent
 from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.tools import AgentDepsT
 from pydantic_ai.usage import UsageLimits
@@ -13,6 +15,8 @@ from pydantic_ai_harness.experimental.dynamic_workflow._toolset import (
     DynamicWorkflowToolset,
     WorkflowAgent,
     WorkflowResourceLimits,
+    index_workflow_agents,
+    validate_workflow_agent,
 )
 
 
@@ -27,18 +31,14 @@ class DynamicWorkflow(AbstractCapability[AgentDepsT]):
 
     ```python
     from pydantic_ai import Agent
-    from pydantic_ai_harness.experimental.dynamic_workflow import DynamicWorkflow, WorkflowAgent
+    from pydantic_ai_harness.experimental.dynamic_workflow import DynamicWorkflow
 
-    reviewer = Agent('openai:gpt-5', name='reviewer', instructions='Review code for bugs.')
-    summarizer = Agent('openai:gpt-5', name='summarizer', instructions='Summarize findings.')
+    reviewer = Agent('openai:gpt-5', name='reviewer', description='Review code for bugs.')
+    summarizer = Agent('openai:gpt-5', name='summarizer', description='Summarize findings.')
 
     orchestrator = Agent(
         'openai:gpt-5',
-        capabilities=[
-            DynamicWorkflow(
-                agents=[WorkflowAgent(agent=reviewer), WorkflowAgent(agent=summarizer)],
-            )
-        ],
+        capabilities=[DynamicWorkflow(agents=[reviewer, summarizer])],
     )
     ```
 
@@ -54,14 +54,15 @@ class DynamicWorkflow(AbstractCapability[AgentDepsT]):
     paying near-zero tokens on turns that don't need it.
     """
 
-    agents: list[WorkflowAgent[AgentDepsT]]
+    agents: Sequence[AbstractAgent[AgentDepsT, Any] | WorkflowAgent[AgentDepsT]]
     """Sub-agents the orchestration script can call as async functions.
 
-    Each `WorkflowAgent` bundles the agent with its sandbox function name (a valid
-    Python identifier, unique across the workflow) and an optional catalog description.
+    This sequence is read at construction only. A raw agent entry is shorthand for
+    `WorkflowAgent(agent)`, using the agent's own `name` and `description`. Use a
+    `WorkflowAgent` entry when this workflow needs a per-use-site override.
 
-    Use `reveal()` to add a `WorkflowAgent` mid-run. The method appends to this list, so direct
-    list append remains the underlying mechanism and keeps working for existing callers.
+    Later mutation of the passed sequence has no effect on the catalog. Use `reveal()`
+    to add a sub-agent after construction.
 
     A revealed sub-agent becomes callable on the next step, announced to the model via an enqueued
     message, while the `run_workflow` description stays frozen at the agents present when the run
@@ -70,6 +71,9 @@ class DynamicWorkflow(AbstractCapability[AgentDepsT]):
     Reveal is append-only: a revealed sub-agent cannot be removed or hidden again for the rest of
     the run -- plan the catalog as monotonically growing.
     """
+
+    _catalog: list[WorkflowAgent[AgentDepsT]] = field(init=False, repr=False)
+    """Normalized catalog passed by reference to toolsets."""
 
     tool_name: str = 'run_workflow'
     """Name of the orchestration tool exposed to the model."""
@@ -123,26 +127,45 @@ class DynamicWorkflow(AbstractCapability[AgentDepsT]):
         # Not spec-serializable: `agents` holds live Agent objects, not YAML-expressible config.
         return None
 
-    def reveal(self, agent: WorkflowAgent[AgentDepsT]) -> None:
+    def __post_init__(self) -> None:
+        catalog = [self._normalize_workflow_agent(entry) for entry in self.agents]
+        index_workflow_agents(catalog)
+        self._catalog = catalog
+
+    def _normalize_workflow_agent(
+        self, entry: AbstractAgent[AgentDepsT, Any] | WorkflowAgent[AgentDepsT]
+    ) -> WorkflowAgent[AgentDepsT]:
+        """Normalize a public catalog entry to the internal wrapper form."""
+        if isinstance(entry, WorkflowAgent):
+            return entry
+        return WorkflowAgent(agent=entry)
+
+    def reveal(self, agent: AbstractAgent[AgentDepsT, Any] | WorkflowAgent[AgentDepsT]) -> None:
         """Reveal a sub-agent on the next model step.
 
-        This is the supported runtime API for revealing sub-agents after a run has started. The
-        method appends to `agents`; direct list append still works because list mutability is the
-        underlying mechanism.
+        This is the supported runtime API for revealing sub-agents after a run has started.
 
         The revealed sub-agent is announced to the model on the next step and becomes callable
         then. The `run_workflow` tool description stays frozen at the agents present when the run
         started. Reveal is append-only: a revealed sub-agent cannot be removed or hidden again for
-        the rest of the run. The sub-agent's resolved name must be a valid, unique sandbox function
-        name. If one `DynamicWorkflow` instance is shared across concurrent runs, `reveal()` reveals
-        to all in-flight runs and joins the baseline catalog for runs that start afterwards.
+        the rest of the run. The sub-agent's resolved name must be a valid, unique sandbox
+        function name; invalid entries raise `UserError` at the call site. If one
+        `DynamicWorkflow` instance is shared across concurrent runs, `reveal()` reveals to all
+        in-flight runs and joins the baseline catalog for runs that start afterwards.
         """
-        self.agents.append(agent)
+        entry = self._normalize_workflow_agent(agent)
+        existing_names: set[str] = set()
+        for catalog_entry in self._catalog:
+            existing_names.add(validate_workflow_agent(catalog_entry, existing_names))
+        validate_workflow_agent(entry, existing_names)
+        self._catalog.append(entry)
 
     def get_toolset(self) -> DynamicWorkflowToolset[AgentDepsT]:
         """Provide the orchestration toolset to the agent."""
         return DynamicWorkflowToolset(
-            agents=self.agents,
+            # Toolsets keep this same list object; `reveal()` appends to it so in-flight
+            # toolsets can fold in the new sub-agent on the next step.
+            agents=self._catalog,
             tool_name=self.tool_name,
             max_agent_calls=self.max_agent_calls,
             max_retries=self.max_retries,

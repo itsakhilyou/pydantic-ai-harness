@@ -12,7 +12,7 @@ import copy
 import json
 import keyword
 import warnings
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Annotated, Any, Generic, Literal
 
@@ -208,7 +208,7 @@ def _render_catalog(catalog: Mapping[str, WorkflowAgent[AgentDepsT]], *, max_age
     conflicting = FunctionSignature.get_conflicting_type_names(signature_list)
     type_blocks = FunctionSignature.render_type_definitions(signature_list, conflicting)
     function_blocks = [
-        _render_agent_block(signatures[name], entry.description, conflicting_type_names=conflicting)
+        _render_agent_block(signatures[name], entry.resolved_description, conflicting_type_names=conflicting)
         for name, entry in catalog.items()
     ]
     listing = '```python\n' + '\n\n'.join([*type_blocks, *function_blocks]) + '\n```'
@@ -230,7 +230,9 @@ def _render_reveal(
     signature = signatures[name]
     conflicting = FunctionSignature.get_conflicting_type_names(list(signatures.values()))
     type_blocks = FunctionSignature.render_type_definitions([signature], conflicting)
-    function_block = _render_agent_block(signature, catalog[name].description, conflicting_type_names=conflicting)
+    function_block = _render_agent_block(
+        signature, catalog[name].resolved_description, conflicting_type_names=conflicting
+    )
     block = '\n\n'.join([*type_blocks, function_block])
     return f'A new sub-agent is now available to call from inside the `{tool_name}` script:\n\n```python\n{block}\n```'
 
@@ -311,12 +313,14 @@ def _budget_terminal_result(
     }
 
 
-@dataclass(frozen=True, kw_only=True)
+@dataclass(frozen=True)
 class WorkflowAgent(Generic[AgentDepsT]):
     """One sub-agent exposed to the orchestration script as an async function.
 
-    Bundles the agent with its sandbox function name and catalog description so the
-    three travel together -- there is no second collection to keep in sync.
+    `WorkflowAgent` is the per-use-site override for when the agent's own `name`
+    or `description` is not what this workflow should show, such as renaming the
+    sandbox function or re-describing the agent for this catalog. Passing a bare
+    agent to `DynamicWorkflow(agents=[...])` is equivalent to `WorkflowAgent(agent)`.
     """
 
     agent: AbstractAgent[AgentDepsT, Any]
@@ -328,13 +332,51 @@ class WorkflowAgent(Generic[AgentDepsT]):
 
     description: str | None = None
     """Description shown to the model in the sub-agent catalog, rendered as the sandbox
-    function's docstring. When omitted, the model sees only the bare signature -- set this
-    to tell the model what the sub-agent does and what to pass as `task`."""
+    function's docstring. An explicit value overrides the agent's own `description`.
+    When neither is set, the model sees only the bare signature."""
 
     @property
     def resolved_name(self) -> str | None:
         """The sandbox function name: the explicit `name`, else the agent's `name`."""
         return self.name or self.agent.name
+
+    @property
+    def resolved_description(self) -> str | None:
+        """The catalog description: the explicit `description`, else the agent's own `description`."""
+        return self.description or self.agent.description
+
+
+def validate_workflow_agent(entry: WorkflowAgent[AgentDepsT], existing_names: set[str]) -> str:
+    """Validate one sub-agent entry against the names already taken."""
+    name = entry.resolved_name
+    if not name:
+        raise UserError(
+            'DynamicWorkflow sub-agent has no `name` and its agent has no `name`; '
+            'set `WorkflowAgent(name=...)` so it can be exposed as a sandbox function.'
+        )
+    if not _is_valid_sandbox_name(name):
+        raise UserError(
+            f'DynamicWorkflow sub-agent name {name!r} cannot be exposed as a sandbox function: '
+            'it must be a Python identifier that is not a reserved keyword. Rename it.'
+        )
+    if name in existing_names:
+        raise UserError(f'DynamicWorkflow has two sub-agents named {name!r}; names must be unique.')
+    return name
+
+
+def index_workflow_agents(
+    agents: Sequence[WorkflowAgent[AgentDepsT]],
+) -> dict[str, WorkflowAgent[AgentDepsT]]:
+    """Index validated sub-agent entries by resolved sandbox name."""
+    if not agents:
+        raise UserError('DynamicWorkflow requires at least one sub-agent in `agents`.')
+    by_name: dict[str, WorkflowAgent[AgentDepsT]] = {}
+    existing_names: set[str] = set()
+    for entry in agents:
+        name = validate_workflow_agent(entry, existing_names)
+        existing_names.add(name)
+        by_name[name] = entry
+    return by_name
 
 
 @dataclass(kw_only=True)
@@ -344,9 +386,9 @@ class DynamicWorkflowToolset(AbstractToolset[AgentDepsT]):
     agents: list[WorkflowAgent[AgentDepsT]]
     """Sub-agents callable from the orchestration script, each as an async function.
 
-    `DynamicWorkflow.reveal()` is the public entry point for adding one mid-run. This remains a
-    mutable list because append is the underlying reveal mechanism and direct list append still
-    works for existing callers; see `DynamicWorkflow.agents` for the reveal contract."""
+    `DynamicWorkflow.reveal()` is the only supported way to add a sub-agent mid-run.
+    The toolset observes appends to this list as the reveal channel. Any entry that
+    arrives invalid is a contract violation that raises."""
 
     tool_name: str = 'run_workflow'
     """Name of the tool exposed to the model."""
@@ -384,52 +426,22 @@ class DynamicWorkflowToolset(AbstractToolset[AgentDepsT]):
     # prefix -- never changes mid-run.
     _description: str = field(init=False, repr=False)
 
-    # `id()` of reveal entries already warned about (invalid or colliding name), so a persistent
-    # bad append warns once rather than every step. Rebuilt per run by `for_run`'s shallow clone.
-    _reveal_warned: set[int] = field(default_factory=set[int], init=False, repr=False)
-
     def __post_init__(self) -> None:
-        if not self.agents:
-            raise UserError('DynamicWorkflow requires at least one sub-agent in `agents`.')
         if self.max_agent_calls < 1:
             raise UserError('DynamicWorkflow `max_agent_calls` must be at least 1.')
         _resolve_resource_limits(self.resource_limits)  # validate keys now, not at the first tool call
-        self._rebuild(strict=True)
+        self._rebuild()
 
-    def _rebuild(self, *, strict: bool) -> set[int]:
+    def _rebuild(self) -> None:
         """Rebuild the name index and the frozen tool description from the current `agents`.
 
-        With `strict=True` an unusable entry (no name, invalid name, duplicate) raises `UserError`;
-        with `strict=False` it is skipped with a warning and its `id()` is returned so the caller
-        can suppress a second warning from `_reveal_pending`. The lenient mode exists for `for_run`:
-        a mid-run append that `_reveal_pending` tolerated must not hard-fail every later run.
+        Unusable entries raise `UserError`. `DynamicWorkflow.__post_init__` and
+        `DynamicWorkflow.reveal()` validate entries eagerly, so this fails only when the
+        lower-level toolset list was mutated outside those APIs.
         """
-        by_name: dict[str, WorkflowAgent[AgentDepsT]] = {}
-        skipped: set[int] = set()
-        for entry in self.agents:
-            name = entry.resolved_name
-            if not name:
-                problem = (
-                    'DynamicWorkflow sub-agent has no `name` and its agent has no `name`; '
-                    'set `WorkflowAgent(name=...)` so it can be exposed as a sandbox function.'
-                )
-            elif not _is_valid_sandbox_name(name):
-                problem = (
-                    f'DynamicWorkflow sub-agent name {name!r} cannot be exposed as a sandbox function: '
-                    'it must be a Python identifier that is not a reserved keyword. Rename it.'
-                )
-            elif name in by_name:
-                problem = f'DynamicWorkflow has two sub-agents named {name!r}; names must be unique.'
-            else:
-                by_name[name] = entry
-                continue
-            if strict:
-                raise UserError(problem)
-            skipped.add(id(entry))
-            warnings.warn(f'{problem} It is not callable in this run.', stacklevel=3)
+        by_name = index_workflow_agents(self.agents)
         self._by_name = by_name
         self._description = _render_catalog(by_name, max_agent_calls=self.max_agent_calls)
-        return skipped
 
     @property
     def id(self) -> str | None:
@@ -438,15 +450,15 @@ class DynamicWorkflowToolset(AbstractToolset[AgentDepsT]):
     async def for_run(self, ctx: RunContext[AgentDepsT]) -> Self:
         """Fresh instance per run so the sub-agent-call budget is per-run.
 
-        `dataclasses.replace` would re-run `__post_init__`, whose strict validation raises on an
-        unusable entry that a mid-run append left in `agents` -- turning one bad reveal into a hard
-        failure of every later run. Clone shallowly instead (keeping `agents` shared, so appends
-        stay visible to this run) and rebuild the per-run state leniently.
+        Clone shallowly, keeping `agents` shared so reveals stay visible to this run,
+        reset the per-run call budget, and rebuild the per-run index. Entries are
+        validated eagerly by `DynamicWorkflow.__post_init__` and `DynamicWorkflow.reveal()`,
+        so a strict rebuild here cannot fail unless this list was mutated outside those
+        APIs. That is unsupported and fails fast.
         """
         clone = copy.copy(self)
         clone._call_count = 0
-        # Seed the warned set with the entries skipped here so `_reveal_pending` doesn't warn again.
-        clone._reveal_warned = clone._rebuild(strict=False)
+        clone._rebuild()
         return clone
 
     def _reveal_pending(self, ctx: RunContext[AgentDepsT]) -> None:
@@ -459,9 +471,8 @@ class DynamicWorkflowToolset(AbstractToolset[AgentDepsT]):
         or one revealed on an earlier step) is a no-op, identified by object identity so it is never
         mistaken for a name collision.
 
-        A newcomer whose name is invalid, or already taken by a *different* sub-agent, cannot be
-        revealed: the original stays in place (reveal never silently swaps an agent out) and a
-        warning is emitted once so the dropped reveal is not silent.
+        A newcomer whose name is missing, invalid, or already taken by a different
+        sub-agent is a contract violation and raises `UserError`.
 
         Synchronous and await-free between snapshotting `agents` and mutating `_by_name`, so a
         concurrently-running `dispatch` never observes a half-revealed agent -- the same
@@ -472,27 +483,14 @@ class DynamicWorkflowToolset(AbstractToolset[AgentDepsT]):
             existing = self._by_name.get(name) if name else None
             if existing is entry:
                 continue
-            if name and _is_valid_sandbox_name(name) and existing is None:
-                self._by_name[name] = entry
-                try:
-                    ctx.enqueue(_render_reveal(name, self._by_name, self.tool_name))
-                except UserError as exc:
-                    warnings.warn(
-                        f'DynamicWorkflow revealed sub-agent {name!r}, but could not enqueue its announcement: '
-                        f'{exc}. It is callable in this run, but the model will not see the reveal message.',
-                        stacklevel=2,
-                    )
-                continue
-            if id(entry) not in self._reveal_warned:
-                self._reveal_warned.add(id(entry))
-                reason = (
-                    'the name is already used by another sub-agent'
-                    if existing is not None
-                    else 'a sandbox function name must be a non-keyword Python identifier'
-                )
+            name = validate_workflow_agent(entry, set(self._by_name))
+            self._by_name[name] = entry
+            try:
+                ctx.enqueue(_render_reveal(name, self._by_name, self.tool_name))
+            except UserError as exc:
                 warnings.warn(
-                    f'DynamicWorkflow could not reveal a sub-agent named {name!r}: {reason}. '
-                    'It is not callable; any existing sub-agent of that name is unchanged.',
+                    f'DynamicWorkflow revealed sub-agent {name!r}, but could not enqueue its announcement: '
+                    f'{exc}. It is callable in this run, but the model will not see the reveal message.',
                     stacklevel=2,
                 )
 

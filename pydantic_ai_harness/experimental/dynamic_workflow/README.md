@@ -12,14 +12,14 @@ script runs to completion in a single tool call, and only its return value goes 
 
 ```python
 from pydantic_ai import Agent
-from pydantic_ai_harness.experimental.dynamic_workflow import DynamicWorkflow, WorkflowAgent
+from pydantic_ai_harness.experimental.dynamic_workflow import DynamicWorkflow
 
-reviewer = Agent('openai:gpt-5', name='reviewer', instructions='Review code for bugs.')
-summarizer = Agent('openai:gpt-5', name='summarizer', instructions='Summarize findings.')
+reviewer = Agent('openai:gpt-5', name='reviewer', description='Reviews code for bugs.')
+summarizer = Agent('openai:gpt-5', name='summarizer', description='Summarizes findings.')
 
 orchestrator = Agent(
     'openai:gpt-5',
-    capabilities=[DynamicWorkflow(agents=[WorkflowAgent(agent=reviewer), WorkflowAgent(agent=summarizer)])],
+    capabilities=[DynamicWorkflow(agents=[reviewer, summarizer])],
 )
 ```
 
@@ -84,7 +84,7 @@ from pydantic import BaseModel
 from pydantic_ai import Agent
 from pydantic_ai.usage import UsageLimits
 
-from pydantic_ai_harness.experimental.dynamic_workflow import DynamicWorkflow, WorkflowAgent
+from pydantic_ai_harness.experimental.dynamic_workflow import DynamicWorkflow
 
 # Instrumentation: the trace shows the orchestrator turn, the `run_workflow` tool call (its
 # `code` argument is the exact script the model wrote), and every sub-agent run nested under it.
@@ -99,9 +99,25 @@ class Score(BaseModel):
     reason: str
 
 
-drafter = Agent(MODEL, name='drafter', instructions='Write one concise candidate answer to the task.')
-critic = Agent(MODEL, name='critic', output_type=Score, instructions='Score the candidate 0-10 with a one-line reason.')
-editor = Agent(MODEL, name='editor', instructions='Improve the given answer using the critique. Return only the answer.')
+drafter = Agent(
+    MODEL,
+    name='drafter',
+    description='Writes one candidate answer to a task.',
+    instructions='Write one concise candidate answer to the task.',
+)
+critic = Agent(
+    MODEL,
+    name='critic',
+    description='Scores a candidate answer 0-10, returns {value, reason}.',
+    output_type=Score,
+    instructions='Score the candidate 0-10 with a one-line reason.',
+)
+editor = Agent(
+    MODEL,
+    name='editor',
+    description='Improves an answer given a critique.',
+    instructions='Improve the given answer using the critique. Return only the answer.',
+)
 
 orchestrator = Agent(
     MODEL,
@@ -109,15 +125,7 @@ orchestrator = Agent(
         'Use run_workflow to: draft 3 candidate answers in parallel, score each with the critic, '
         'pick the highest-scoring one, then have the editor refine it using that critique. Return the refined answer.'
     ),
-    capabilities=[
-        DynamicWorkflow(
-            agents=[
-                WorkflowAgent(agent=drafter, description='Writes one candidate answer to a task.'),
-                WorkflowAgent(agent=critic, description='Scores a candidate answer 0-10, returns {value, reason}.'),
-                WorkflowAgent(agent=editor, description='Improves an answer given a critique.'),
-            ],
-        )
-    ],
+    capabilities=[DynamicWorkflow(agents=[drafter, critic, editor])],
 )
 
 
@@ -157,38 +165,53 @@ instead of parsing a string.
 
 ## Sub-agent catalog
 
-Each `WorkflowAgent` in `agents` becomes an async function in the sandbox. Its `name` is the
-function name (a valid Python identifier, unique across the workflow) and falls back to the
-agent's own `name`. The `description` is rendered as the function's docstring; set it to tell the
-model what the sub-agent does and what to pass as `task`. The return annotation is rendered from
-the sub-agent's `output_type`; Pydantic model outputs include TypedDict-style field definitions.
-Omit `description` and the model sees only the signature plus any return schema:
+Each raw `Agent` or `WorkflowAgent` in `agents` becomes an async function in the sandbox. Its
+catalog name is a valid Python identifier, unique across the workflow. A wrapper `name` wins first,
+then the agent's own `name`. The catalog description is rendered as the function's docstring:
+wrapper `description`, then agent `description`, then no docstring, so the model sees only the
+signature plus any return schema. The return annotation is rendered from the sub-agent's
+`output_type`; Pydantic model outputs include TypedDict-style field definitions.
 
 ```python
 DynamicWorkflow(
+    agents=[reviewer, summarizer],
+)
+```
+
+Use `WorkflowAgent` when this workflow needs a different sandbox function name or description than
+the agent's own metadata:
+
+```python
+from pydantic_ai_harness.experimental.dynamic_workflow import WorkflowAgent
+
+DynamicWorkflow(
     agents=[
-        WorkflowAgent(agent=reviewer, description='Reviews a code change and returns a list of issues.'),
-        WorkflowAgent(agent=summarizer, description='Condenses findings into a short summary.'),
+        WorkflowAgent(
+            reviewer,
+            name='check',
+            description='Checks one code change and returns actionable review findings.',
+        ),
     ],
 )
 ```
 
-The agent, its sandbox name, and its description travel together on one object -- no second
-mapping to keep in sync. The catalog is fixed at the start of each run, so it stays in the
-prompt-cache prefix across turns.
+The catalog is fixed at the start of each run, so it stays in the prompt-cache prefix across turns.
 
 ### Revealing sub-agents at runtime
 
 Keep a reference to the `DynamicWorkflow` instance (often via `deps`) and call `reveal()` with a
-new `WorkflowAgent`. The revealed sub-agent becomes callable on the next step:
+raw agent or a `WorkflowAgent`. The revealed sub-agent becomes callable on the next step:
 
 ```python
-workflow = DynamicWorkflow(agents=[WorkflowAgent(agent=reviewer)])
+workflow = DynamicWorkflow(agents=[reviewer])
 orchestrator = Agent('openai:gpt-5', deps_type=MyDeps, capabilities=[workflow])
 
 # later, from the host or another tool -- e.g. once a fixer agent is provisioned:
-workflow.reveal(WorkflowAgent(agent=fixer, description='Applies a fix for a reported issue.'))
+workflow.reveal(fixer)
 ```
+
+`reveal()` validates eagerly. A missing name, invalid Python identifier, reserved keyword, or name
+collision raises `UserError` at the call site.
 
 The newcomer is announced to the model with a short message (its function signature) via the
 auto-injected `PendingMessageDrainCapability`. The `run_workflow` description itself stays frozen
@@ -198,10 +221,8 @@ prefix.
 If one `DynamicWorkflow` instance is shared across concurrent runs, `reveal()` reveals to all
 in-flight runs and joins the baseline catalog for runs that start afterwards.
 
-`reveal()` appends to the underlying `agents` list. Direct `agents.append(...)` still works for
-existing callers, but `reveal()` is the supported runtime API. Reveal is append-only: once a
-sub-agent has appeared it stays for the rest of the run; there is no way to remove or hide it
-again. Plan the catalog as growing.
+Reveal is append-only: once a sub-agent has appeared it stays for the rest of the run; there is no
+way to remove or hide it again. Plan the catalog as growing.
 
 ## Return values
 
@@ -269,7 +290,7 @@ model loads it, paying near-zero tokens on turns that don't orchestrate:
 
 ```python
 DynamicWorkflow(
-    agents=[WorkflowAgent(agent=reviewer), WorkflowAgent(agent=summarizer)],
+    agents=[reviewer, summarizer],
     id='workflow',
     defer_loading=True,
 )
@@ -291,7 +312,7 @@ The script runs in Monty, a Python subset:
 
 ```python
 DynamicWorkflow(
-    agents,                  # list[WorkflowAgent] -- required; use reveal() to append mid-run
+    agents,                  # Sequence[AbstractAgent | WorkflowAgent] -- required
     tool_name='run_workflow',
     max_agent_calls=50,
     max_retries=3,
@@ -304,10 +325,12 @@ DynamicWorkflow(
     defer_loading=False,
 )
 
+workflow.reveal(agent)       # AbstractAgent | WorkflowAgent; validates before appending
+
 WorkflowAgent(
-    agent,                   # Agent -- required
+    agent,                   # Agent -- required, positional
     name=None,               # sandbox function name; falls back to agent.name
-    description=None,        # function docstring shown to the model; omitted -> bare signature
+    description=None,        # function docstring; falls back to agent.description, then bare signature
 )
 ```
 
