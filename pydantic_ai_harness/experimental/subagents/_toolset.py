@@ -107,6 +107,7 @@ class SubAgentToolset(FunctionToolset[AgentDepsT]):
         shared_capabilities: Sequence[AgentCapability[AgentDepsT]],
         event_stream_handler: EventStreamHandler[AgentDepsT] | None,
         tool_name: str,
+        tool_retries: int | None,
         call_counts: dict[str, dict[str, int]],
     ) -> None:
         super().__init__()
@@ -119,7 +120,7 @@ class SubAgentToolset(FunctionToolset[AgentDepsT]):
         # Run-scoped delegation counts, keyed by run_id then sub-agent name.
         # Shared with the capability, which clears each run's entry in wrap_run.
         self._call_counts = call_counts
-        self.add_function(self.delegate_task, name=tool_name)
+        self.add_function(self.delegate_task, name=tool_name, retries=tool_retries)
 
     def _inherited_toolsets(self, ctx: RunContext[AgentDepsT]) -> list[AbstractToolset[AgentDepsT]] | None:
         """The parent agent's own toolsets, excluding capability-contributed ones.
@@ -196,9 +197,13 @@ class SubAgentToolset(FunctionToolset[AgentDepsT]):
             usage = ctx.usage if self._forward_usage else None
             usage_limits = None
 
+        # A sub-agent with no model of its own (e.g. one loaded from disk) inherits
+        # the parent run's model; one that brought its own keeps it.
+        model = None if sub_agent.agent.model is not None else ctx.model
         run = sub_agent.agent.run(
             task,
             deps=ctx.deps,
+            model=model,
             usage=usage,
             usage_limits=usage_limits,
             toolsets=toolsets,

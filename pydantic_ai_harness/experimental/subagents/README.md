@@ -98,7 +98,7 @@ orchestrator = Agent(
 
 A *soft outcome* returns a steering message to the parent as a normal tool result, so its model reads the message and decides what to do next (rather than immediately re-delegating, which a `ModelRetry` invites). A timeout, a reached `usage_limits` budget, and an exhausted `max_calls` budget are always soft. When `on_failure` is set, the message it carries replaces the built-in default for these outcomes.
 
-A sub-agent run that fails with a *soft model error* (`ModelRetry`, `UnexpectedModelBehavior`, e.g. it exhausted its own retries) is, by default, converted into a `ModelRetry` for the parent -- so the parent's model sees `Sub-agent '<name>' failed: ...` and can react. Set `on_failure` for that delegate to make its failures soft instead: the child error returns the `on_failure` message as a normal tool result.
+A sub-agent run that fails with a *soft model error* (`ModelRetry`, `UnexpectedModelBehavior`, e.g. it exhausted its own retries) is, by default, converted into a `ModelRetry` for the parent -- so the parent's model sees `Sub-agent '<name>' failed: ...` and can react by re-delegating. The delegate tool defaults to `tool_retries=2`, so the parent aborts only after that many consecutive delegate failures; the counter resets after any successful delegation. Raise `tool_retries` to tolerate a flakier sub-agent, or set `None` to inherit the parent agent's default tool retries. Set `on_failure` for a delegate to make its failures soft instead: the child error returns the `on_failure` message as a normal tool result.
 
 Hard errors propagate to stop the whole run. A `UsageLimitExceeded` from a child that has *no* per-delegate `usage_limits` (so it shares the parent's accounting) means the whole tree is out of budget and propagates; a child reaching its *own* `usage_limits` is soft, as above.
 
@@ -106,16 +106,91 @@ Hard errors propagate to stop the whole run. A `UsageLimitExceeded` from a child
 
 The sub-agents are listed in the system prompt via `get_instructions`, using each agent's `description` (or a `SubAgent(description=...)` override). A sub-agent with no description is listed by name alone.
 
+## Loading sub-agents from disk
+
+A repo's markdown agent definitions become delegates without writing any `Agent` code. By default every `*.md` file under the conventional folders is loaded as a sub-agent, alongside the explicitly-passed `agents`.
+
+```python
+from pydantic_ai import Agent
+from pydantic_ai_harness.experimental.subagents import SubAgents
+
+orchestrator = Agent(
+    'anthropic:claude-opus-4-7',
+    capabilities=[SubAgents(inherit_tools=True)],  # auto-loads ./.agents/agents/ and ~/.agents/agents/
+)
+```
+
+`agent_folders` controls where definitions come from. It defaults to `'agents'`, the conventional layout:
+
+- A folder-name `str` (the default `'agents'`): for the project root (cwd) then the home root, load from `<root>/.agents/<name>/`, falling back to `<root>/.claude/<name>/` when `<root>/.agents/` is absent.
+- A sequence of paths loads from exactly those folders, in order.
+- `None` disables disk loading, exposing only the explicitly-passed `agents`.
+
+### Definition format
+
+A definition is a markdown file with optional frontmatter:
+
+```markdown
+---
+name: researcher
+description: Researches a topic and reports findings
+tools: Read, Grep
+---
+You research topics. Report your findings, each with a source.
+```
+
+- `name` is the delegate name (how the parent refers to it and how it is listed). It falls back to the filename stem when absent.
+- `description` drives the prompt listing.
+- The markdown body becomes the agent's instructions.
+- `tools` (or `allowed-tools`) is a comma-separated string or a YAML block list. See "Tools" below.
+- `model` and `color` are ignored: the model is inherited from the parent (see below), and `color` has no pyai equivalent.
+
+Frontmatter is read by a small, dependency-free parser limited to those keys (`pyyaml` is not a harness dependency). Full YAML frontmatter is not supported.
+
+### Models and effort
+
+Disk agents inherit the parent run's model by default. Per agent, the caller can override the model and set a thinking/effort level via `agent_overrides`, keyed by the agent's name:
+
+```python
+from pydantic_ai_harness.experimental.subagents import AgentOverride, SubAgents
+
+SubAgents(
+    agent_folders='agents',
+    agent_overrides={'researcher': AgentOverride(model='anthropic:claude-sonnet-4-6', effort='high')},
+)
+```
+
+Every agent the capability builds runs at a minimum thinking-effort floor. `MINIMUM_EFFORT_FLOOR` and the `clamp_effort(level, floor=...)` helper are exported so an orchestrator can apply the same floor to its own agents (that orchestrator-side application is the caller's responsibility). `clamp_effort` maps `None`/`False` to the floor, leaves `True` (provider-default effort) unchanged, and raises a concrete level below the floor up to it. Effort is applied through pyai's `ModelSettings.thinking`.
+
+### Tools
+
+A disk agent gets no tools by default (`inherit_tools` is `False`); set `inherit_tools=True` to expose the parent's tools to it through the `inherit_tools` mechanism, in which case its `tools` frontmatter is ignored. To map the frontmatter tool names to specific toolsets instead, pass a `tool_resolver`: it receives each tool name (so it can honor entries like `Bash(git:*)`) and returns the toolsets that provide it, or `None` for an unknown name, which is skipped with a warning.
+
+```python
+def resolve(tool_name: str):
+    return TOOLSETS.get(tool_name)  # -> Sequence[AgentToolset[object]] | None
+
+SubAgents(agent_folders='agents', tool_resolver=resolve)
+```
+
+### Precedence
+
+When the same name appears in more than one source, the higher-precedence one wins and the others are skipped with a warning: explicitly-passed `agents` first, then the project folder, then the home folder (and, for an explicit path sequence, earlier paths before later ones). A duplicate name within the explicitly-passed `agents` list is still an error.
+
 ## Configuration
 
 ```python
 SubAgents(
     agents=(),             # Sequence[SubAgent[AgentDepsT]] -- each pairs an agent with its run controls
+    agent_folders='agents',# folder-name str (convention) | Sequence[Path] | None (disable)
+    agent_overrides={},    # Mapping[str, AgentOverride] -- per-disk-agent model/effort override
+    tool_resolver=None,    # Callable[[str], Sequence[AgentToolset[object]] | None] -- disk-agent tool mapping
     forward_usage=True,    # share the parent's usage with sub-agent runs
     inherit_tools=False,   # expose the parent's own tools to sub-agents (capability tools excluded)
     shared_capabilities=(),# capabilities applied to every sub-agent run
     event_stream_handler=None,  # forwarded to each sub-agent run to stream its events
     tool_name='delegate_task',
+    tool_retries=2,        # extra delegate-tool attempts after a sub-agent error before aborting (None inherits the agent default)
 )
 ```
 
