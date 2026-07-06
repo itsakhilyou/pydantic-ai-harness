@@ -16,7 +16,7 @@ named after the agent and documented by its `description`:
 ```python
 from pydantic import BaseModel
 from pydantic_ai import Agent
-from pydantic_ai_harness.experimental.dynamic_workflow import DynamicWorkflow, WorkflowAgent
+from pydantic_ai_harness.experimental.dynamic_workflow import DynamicWorkflow
 
 
 class MigrationReport(BaseModel):
@@ -32,26 +32,21 @@ class Review(BaseModel):
 migrator = Agent(
     'anthropic:claude-sonnet-4-6',
     name='migrator',
+    description='Rewrites one file from os.path to pathlib.',
     output_type=MigrationReport,
     instructions='Rewrite the given file from os.path to pathlib; return the path and migrated content.',
 )
 reviewer = Agent(
     'anthropic:claude-sonnet-4-6',
     name='reviewer',
+    description='Reviews one migrated file; returns approval and issues.',
     output_type=Review,
     instructions='Review migrated content; approve only if no os.path remains.',
 )
 
 orchestrator = Agent(
     'anthropic:claude-sonnet-4-6',
-    capabilities=[
-        DynamicWorkflow(
-            agents=[
-                WorkflowAgent(agent=migrator, description='Rewrites one file from os.path to pathlib.'),
-                WorkflowAgent(agent=reviewer, description='Reviews one migrated file; returns approval and issues.'),
-            ],
-        )
-    ],
+    capabilities=[DynamicWorkflow(agents=[migrator, reviewer])],
 )
 ```
 
