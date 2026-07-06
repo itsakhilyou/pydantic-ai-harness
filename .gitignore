@@ -2,6 +2,7 @@
 .mcp.json
 .DS_Store
 .agents/settings.local.json
+.agents/scheduled_tasks.lock
 .agents/skills/branch-context/
 AGENTS.local.md
 CLAUDE.local.md
