@@ -19,6 +19,7 @@ from typing import Annotated, Any, Generic, Literal
 from pydantic import Field, TypeAdapter
 from pydantic_ai import AbstractToolset, RunContext, ToolDefinition
 from pydantic_ai.agent.abstract import AbstractAgent
+from pydantic_ai.capabilities import AbstractCapability, WrapperCapability
 from pydantic_ai.exceptions import ModelRetry, UsageLimitExceeded, UserError
 from pydantic_ai.function_signature import FunctionSignature
 from pydantic_ai.tools import AgentDepsT
@@ -173,7 +174,7 @@ _SUB_AGENT_PARAMS_SCHEMA: dict[str, Any] = {
 _NO_CONFLICTING_TYPE_NAMES: frozenset[str] = frozenset()
 
 
-def _agent_signature(name: str, agent: AbstractAgent[Any, Any]) -> FunctionSignature:
+def _agent_signature(name: str, agent: AbstractAgent[AgentDepsT, object]) -> FunctionSignature:
     """Build the sandbox function signature for one sub-agent."""
     try:
         return_schema = agent.output_json_schema()
@@ -212,7 +213,10 @@ def _render_catalog(catalog: Mapping[str, WorkflowAgent[AgentDepsT]], *, max_age
         for name, entry in catalog.items()
     ]
     listing = '```python\n' + '\n\n'.join([*type_blocks, *function_blocks]) + '\n```'
-    budget = f'This run can make at most {max_agent_calls} sub-agent calls in total; plan fan-out width accordingly.'
+    budget = (
+        f'This run can make at most {max_agent_calls} sub-agent calls in total -- one budget shared across '
+        'every `run_workflow` call in the run, not per script; plan fan-out width accordingly.'
+    )
     return f'{_WORKFLOW_BASE_DESCRIPTION}\n\n{budget}\n\nAvailable sub-agents:\n\n{listing}'
 
 
@@ -323,7 +327,7 @@ class WorkflowAgent(Generic[AgentDepsT]):
     agent to `DynamicWorkflow(agents=[...])` is equivalent to `WorkflowAgent(agent)`.
     """
 
-    agent: AbstractAgent[AgentDepsT, Any]
+    agent: AbstractAgent[AgentDepsT, object]
     """The sub-agent to run when the script calls this function."""
 
     name: str | None = None
@@ -414,6 +418,15 @@ class DynamicWorkflowToolset(AbstractToolset[AgentDepsT]):
     toolset_id: str | None = None
     """Stable toolset id; defaults to the tool name."""
 
+    owning_capability: AbstractCapability[AgentDepsT] | None = None
+    """The `DynamicWorkflow` capability this toolset belongs to, when capability-provided.
+
+    Used to resolve whether the capability is visible to the model on the current step (deferred
+    and unloaded means hidden), by identity against the run's capability registry -- ids cannot be
+    used for this, because an id-less capability is registered under a run-generated key and a
+    wrapper capability is registered in place of what it wraps. `None` (a toolset used directly,
+    outside any capability) is always visible."""
+
     # Per-run count of sub-agent calls; reset on `for_run`.
     _call_count: int = field(default=0, init=False, repr=False)
 
@@ -494,8 +507,40 @@ class DynamicWorkflowToolset(AbstractToolset[AgentDepsT]):
                     stacklevel=2,
                 )
 
+    def _visible_to_model(self, ctx: RunContext[AgentDepsT]) -> bool:
+        """Whether this toolset's capability is visible to the model on this step.
+
+        A deferred capability's toolset still gets `get_tools` calls while unloaded (its tool
+        is indexed for `load_capability`/`search_tools`), but announcing a reveal then would
+        leak the sub-agent signature into the conversation while the catalog is still hidden.
+
+        The owning capability is resolved against the run's registry by identity, unwrapping
+        `WrapperCapability` chains -- a wrapper over a leaf capability is registered in place of
+        the leaf, and its `defer_loading`/registry id are what core keys loading on. Matching by
+        id instead would misfire both ways: an id-less capability is registered under a
+        run-generated key (so a lookup by tool name can hit an unrelated capability), and a
+        deferred wrapper hides a non-deferred inner capability. No registry match (a toolset used
+        directly, outside any capability) means always visible.
+        """
+        owner = self.owning_capability
+        if owner is None:
+            return True
+        for capability_id, registered in ctx.capabilities.items():
+            candidate: AbstractCapability[AgentDepsT] | None = registered
+            while candidate is not None:
+                if candidate is owner:
+                    if registered.defer_loading is not True:
+                        return True
+                    return capability_id in ctx.loaded_capability_ids
+                candidate = candidate.wrapped if isinstance(candidate, WrapperCapability) else None
+        return True
+
     async def get_tools(self, ctx: RunContext[AgentDepsT]) -> dict[str, ToolsetTool[AgentDepsT]]:
-        self._reveal_pending(ctx)
+        # Skip reveal processing while the capability is deferred and unloaded: the newcomers
+        # stay pending in `agents` and are folded in and announced on the first step after the
+        # model loads the capability.
+        if self._visible_to_model(ctx):
+            self._reveal_pending(ctx)
         return {
             self.tool_name: ToolsetTool(
                 toolset=self,

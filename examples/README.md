@@ -16,7 +16,7 @@ named after the agent and documented by its `description`:
 ```python
 from pydantic import BaseModel
 from pydantic_ai import Agent
-from pydantic_ai_harness.experimental.dynamic_workflow import DynamicWorkflow
+from pydantic_ai_harness.dynamic_workflow import DynamicWorkflow
 
 
 class MigrationReport(BaseModel):
@@ -50,7 +50,7 @@ orchestrator = Agent(
 )
 ```
 
-The [`DynamicWorkflow` README](../pydantic_ai_harness/experimental/dynamic_workflow/README.md)
+The [`DynamicWorkflow` README](../pydantic_ai_harness/dynamic_workflow/README.md)
 covers the full API: call budgets, usage forwarding, sandbox limits, and revealing sub-agents
 mid-run.
 
@@ -101,12 +101,12 @@ would then cost a model round-trip: one turn per migrate, per review, and per re
 intermediate draft flowing back through the orchestrator's context. And each of those turns would
 spend the model, a non-deterministic component, on a step that is plain control flow: compare the
 reviews, rebuild the task list, dispatch again. Written as a script, the deterministic coordination
-runs as code, the sub-agent calls inside it run concurrently, and the orchestrator spends one model
-request for the whole tree, with only the final result entering its context.
+runs as code, the sub-agent calls inside it run concurrently, and the orchestrator issues one tool
+call for the whole tree, with only the final result entering its context.
 
 ## Further reading
 
-- [`DynamicWorkflow` README](../pydantic_ai_harness/experimental/dynamic_workflow/README.md)
+- [`DynamicWorkflow` README](../pydantic_ai_harness/dynamic_workflow/README.md)
 - [Monty](https://github.com/pydantic/monty)
 - [Capabilities](https://pydantic.dev/docs/ai/core-concepts/capabilities/) ·
   [On-demand capabilities](https://pydantic.dev/docs/ai/core-concepts/capabilities/#on-demand-capabilities)

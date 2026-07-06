@@ -4,14 +4,14 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass, field
-from typing import Any, Literal
+from typing import Literal
 
 from pydantic_ai.agent.abstract import AbstractAgent
 from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.tools import AgentDepsT
 from pydantic_ai.usage import UsageLimits
 
-from pydantic_ai_harness.experimental.dynamic_workflow._toolset import (
+from pydantic_ai_harness.dynamic_workflow._toolset import (
     DynamicWorkflowToolset,
     WorkflowAgent,
     WorkflowResourceLimits,
@@ -30,7 +30,7 @@ class DynamicWorkflow(AbstractCapability[AgentDepsT]):
 
     ```python
     from pydantic_ai import Agent
-    from pydantic_ai_harness.experimental.dynamic_workflow import DynamicWorkflow
+    from pydantic_ai_harness.dynamic_workflow import DynamicWorkflow
 
     reviewer = Agent('openai:gpt-5', name='reviewer', description='Review code for bugs.')
     summarizer = Agent('openai:gpt-5', name='summarizer', description='Summarize findings.')
@@ -48,7 +48,7 @@ class DynamicWorkflow(AbstractCapability[AgentDepsT]):
     until the model loads the capability.
     """
 
-    agents: Sequence[AbstractAgent[AgentDepsT, Any] | WorkflowAgent[AgentDepsT]]
+    agents: Sequence[AbstractAgent[AgentDepsT, object] | WorkflowAgent[AgentDepsT]]
     """Sub-agents the orchestration script can call as async functions.
 
     Read at construction only; later mutation of the passed sequence is ignored. A raw agent is
@@ -110,14 +110,14 @@ class DynamicWorkflow(AbstractCapability[AgentDepsT]):
         self._catalog = catalog
 
     def _normalize_workflow_agent(
-        self, entry: AbstractAgent[AgentDepsT, Any] | WorkflowAgent[AgentDepsT]
+        self, entry: AbstractAgent[AgentDepsT, object] | WorkflowAgent[AgentDepsT]
     ) -> WorkflowAgent[AgentDepsT]:
         """Normalize a public catalog entry to the internal wrapper form."""
         if isinstance(entry, WorkflowAgent):
             return entry
         return WorkflowAgent(agent=entry)
 
-    def reveal(self, agent: AbstractAgent[AgentDepsT, Any] | WorkflowAgent[AgentDepsT]) -> None:
+    def reveal(self, agent: AbstractAgent[AgentDepsT, object] | WorkflowAgent[AgentDepsT]) -> None:
         """Reveal a sub-agent on the next model step (the supported runtime API for doing so).
 
         The sub-agent is announced to the model on the next step and becomes callable then; the
@@ -147,4 +147,5 @@ class DynamicWorkflow(AbstractCapability[AgentDepsT]):
             sub_agent_usage_limits=self.sub_agent_usage_limits,
             resource_limits=self.resource_limits,
             toolset_id=self.id,
+            owning_capability=self,
         )

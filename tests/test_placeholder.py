@@ -27,6 +27,13 @@ def test_lazy_import_shell():
     assert hasattr(Shell, 'get_toolset')
 
 
+def test_lazy_import_dynamic_workflow():
+    from pydantic_ai_harness import DynamicWorkflow
+
+    assert inspect.isclass(DynamicWorkflow)
+    assert hasattr(DynamicWorkflow, 'get_toolset')
+
+
 def test_lazy_import_llm_api_key_env_patterns():
     from pydantic_ai_harness import LLM_API_KEY_ENV_PATTERNS
 

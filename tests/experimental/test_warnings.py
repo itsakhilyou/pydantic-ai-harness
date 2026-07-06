@@ -29,7 +29,7 @@ class TestExperimentalWarning:
             warn_experimental('compaction')
             warn_experimental('some_future_capability')  # also silenced, same filter
 
-    @pytest.mark.parametrize('feature', ['compaction', 'dynamic_workflow'])
+    @pytest.mark.parametrize('feature', ['compaction', 'subagents'])
     def test_importing_a_capability_warns(self, feature: str) -> None:
         module = importlib.import_module(f'pydantic_ai_harness.experimental.{feature}')
         with pytest.warns(HarnessExperimentalWarning):

@@ -11,6 +11,7 @@ import pytest
 from inline_snapshot import snapshot
 from pydantic import BaseModel, ConfigDict, Field, GetCoreSchemaHandler
 from pydantic_ai import Agent, RunContext, capture_run_messages
+from pydantic_ai.capabilities import AbstractCapability, PrefixTools
 from pydantic_ai.exceptions import ModelRetry, UnexpectedModelBehavior, UserError
 from pydantic_ai.messages import (
     ModelMessage,
@@ -27,8 +28,8 @@ from pydantic_ai.models.test import TestModel
 from pydantic_ai.usage import RunUsage, UsageLimits
 from pydantic_core import core_schema
 
-from pydantic_ai_harness.experimental.dynamic_workflow import DynamicWorkflow, WorkflowAgent, WorkflowResourceLimits
-from pydantic_ai_harness.experimental.dynamic_workflow._toolset import (  # pyright: ignore[reportPrivateUsage]
+from pydantic_ai_harness.dynamic_workflow import DynamicWorkflow, WorkflowAgent, WorkflowResourceLimits
+from pydantic_ai_harness.dynamic_workflow._toolset import (  # pyright: ignore[reportPrivateUsage]
     DynamicWorkflowToolset,
     _default_resource_limits,
     _in_workflow,
@@ -383,7 +384,7 @@ non-`None` value returns `{"output": "<printed text>", "result": <last expressio
 `None` returns `{"output": "<printed text>"}`. If a script fails after some sub-agent calls complete,
 those completed results are reported back so a retry can reuse them.
 
-This run can make at most 7 sub-agent calls in total; plan fan-out width accordingly.
+This run can make at most 7 sub-agent calls in total -- one budget shared across every `run_workflow` call in the run, not per script; plan fan-out width accordingly.
 
 Available sub-agents:
 
@@ -622,7 +623,7 @@ async def test_budget_terminal_result_keeps_surfaced_error_detail(monkeypatch: p
                 await self.dispatch('good', {'task': 'y'})
             raise runtime_error("sub-agent 'bad' raised ValueError")
 
-    monkeypatch.setattr('pydantic_ai_harness.experimental.dynamic_workflow._toolset.MontyExecutor', FakeExecutor)
+    monkeypatch.setattr('pydantic_ai_harness.dynamic_workflow._toolset.MontyExecutor', FakeExecutor)
     ts = DynamicWorkflowToolset[object](agents=[_wf_agent('ok', 'good')], max_agent_calls=1)
     out = await _run_script(ts, '1 + 1')
     assert isinstance(out, dict)
@@ -952,7 +953,7 @@ async def test_sandbox_panic_after_budget_exhaustion_returns_terminal_result(
                 await self.dispatch('counted', {'task': 'second'})
             raise PanicException('sandbox panic')
 
-    monkeypatch.setattr('pydantic_ai_harness.experimental.dynamic_workflow._toolset.MontyExecutor', FakeExecutor)
+    monkeypatch.setattr('pydantic_ai_harness.dynamic_workflow._toolset.MontyExecutor', FakeExecutor)
     ts = DynamicWorkflowToolset[object](agents=[_wf_agent('counted-result', 'counted')], max_agent_calls=1)
     out = await _run_script(ts, '1 + 1')
     assert isinstance(out, dict)
@@ -1343,6 +1344,127 @@ async def test_direct_toolset_mutation_invalid_entry_raises_on_get_tools() -> No
     agents.append(WorkflowAgent(agent=_sub_agent(name=None)))
     with pytest.raises(UserError, match='has no `name`'):
         await ts.get_tools(ctx)
+
+
+def _registry_ctx(capabilities: dict[str, AbstractCapability[object]], *, loaded: set[str]) -> RunContext[object]:
+    """A `RunContext` with a given capability registry and loaded-capability-id set."""
+    return RunContext[object](
+        deps=None,
+        model=TestModel(),
+        usage=RunUsage(),
+        prompt=None,
+        messages=[],
+        run_step=1,
+        pending_messages=[],
+        capabilities=capabilities,
+        loaded_capability_ids=loaded,
+    )
+
+
+def _deferred_ctx(workflow: AbstractCapability[object], *, loaded: bool) -> RunContext[object]:
+    """A `RunContext` whose capability registry holds `workflow` under id `wf`, loaded or not."""
+    return _registry_ctx({'wf': workflow}, loaded={'wf'} if loaded else set())
+
+
+async def test_reveal_on_unloaded_deferred_capability_is_held_back() -> None:
+    # While a deferred capability is unloaded, its catalog is hidden from the model -- announcing
+    # a reveal then would leak the sub-agent signature into the conversation. The reveal must stay
+    # pending until the model loads the capability.
+    workflow = DynamicWorkflow[object](agents=[_sub_agent('b', 'base')], id='wf', defer_loading=True)
+    ts = workflow.get_toolset()
+
+    unloaded = _deferred_ctx(workflow, loaded=False)
+    await ts.get_tools(unloaded)
+    workflow.reveal(_sub_agent('e', 'extra'))
+    await ts.get_tools(unloaded)
+    assert set(ts._by_name) == {'base'}  # pyright: ignore[reportPrivateUsage]
+    assert _enqueued_text(unloaded) == ''
+
+    loaded = _deferred_ctx(workflow, loaded=True)
+    await ts.get_tools(loaded)
+    assert set(ts._by_name) == {'base', 'extra'}  # pyright: ignore[reportPrivateUsage]
+    assert 'async def extra(*, task: str) -> str:' in _enqueued_text(loaded)
+
+
+async def test_reveal_announces_when_capability_in_registry_is_not_deferred() -> None:
+    # A capability registered without `defer_loading` is always visible, so reveals announce
+    # immediately even though the registry holds an entry under this toolset's id.
+    workflow = DynamicWorkflow[object](agents=[_sub_agent('b', 'base')], id='wf')
+    ts = workflow.get_toolset()
+    ctx = _deferred_ctx(workflow, loaded=False)
+
+    await ts.get_tools(ctx)
+    workflow.reveal(_sub_agent('e', 'extra'))
+    await ts.get_tools(ctx)
+    assert set(ts._by_name) == {'base', 'extra'}  # pyright: ignore[reportPrivateUsage]
+    assert 'async def extra(*, task: str) -> str:' in _enqueued_text(ctx)
+
+
+async def test_reveal_ignores_unrelated_deferred_capability_with_colliding_id() -> None:
+    # An id-less workflow's toolset id falls back to the tool name (`run_workflow`). An unrelated
+    # deferred capability registered under exactly that id must not suppress this workflow's
+    # reveals -- ownership is resolved by identity, not by id.
+    workflow = DynamicWorkflow[object](agents=[_sub_agent('b', 'base')])
+    unrelated = DynamicWorkflow[object](agents=[_sub_agent('u', 'unrelated')], id='run_workflow', defer_loading=True)
+    ts = workflow.get_toolset()
+    ctx = _registry_ctx({'run_workflow': unrelated, 'dynamic_workflow': workflow}, loaded=set())
+
+    await ts.get_tools(ctx)
+    workflow.reveal(_sub_agent('e', 'extra'))
+    await ts.get_tools(ctx)
+    assert set(ts._by_name) == {'base', 'extra'}  # pyright: ignore[reportPrivateUsage]
+    assert 'async def extra(*, task: str) -> str:' in _enqueued_text(ctx)
+
+
+async def test_reveal_held_back_while_deferred_wrapper_capability_is_unloaded() -> None:
+    # A wrapper capability is registered in place of what it wraps, so a deferred wrapper hides
+    # a non-deferred inner workflow until loaded -- reveals must follow the wrapper's state.
+    workflow = DynamicWorkflow[object](agents=[_sub_agent('b', 'base')])
+    wrapper = PrefixTools[object](wrapped=workflow, prefix='team', id='wf', defer_loading=True)
+    # In a run, core resolves tools through the wrapper's prefixed toolset, which delegates to
+    # this one; the registry holds only the wrapper, never the inner workflow.
+    ts = workflow.get_toolset()
+
+    unloaded = _deferred_ctx(wrapper, loaded=False)
+    await ts.get_tools(unloaded)
+    workflow.reveal(_sub_agent('e', 'extra'))
+    await ts.get_tools(unloaded)
+    assert _enqueued_text(unloaded) == ''
+
+    loaded = _deferred_ctx(wrapper, loaded=True)
+    await ts.get_tools(loaded)
+    assert 'async def extra(*, task: str) -> str:' in _enqueued_text(loaded)
+
+
+async def test_reveal_on_deferred_capability_end_to_end_via_agent_run() -> None:
+    # Regression: a `reveal()` made while the deferred capability is still unloaded must not
+    # leak its announcement into the prompt; it arrives only after `load_capability`.
+    base = _sub_agent('base-done', 'base')
+    extra = _sub_agent('extra-done', 'extra')
+    workflow = DynamicWorkflow[object](agents=[base], id='wf', defer_loading=True)
+    announcement_seen: list[bool] = []
+
+    def model_fn(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        step = sum(1 for m in messages if isinstance(m, ModelRequest) for p in m.parts if isinstance(p, ToolReturnPart))
+        if step == 0:
+            return ModelResponse(parts=[ToolCallPart(tool_name='reveal_extra', args={})])
+        announcement_seen.append('async def extra' in _user_prompt_text(messages))
+        if step == 1:
+            return ModelResponse(parts=[ToolCallPart(tool_name='load_capability', args={'id': 'wf'})])
+        return ModelResponse(parts=[TextPart('done')])
+
+    agent: Agent[object, str] = Agent(FunctionModel(model_fn), capabilities=[workflow])
+
+    @agent.tool_plain
+    def reveal_extra() -> str:
+        workflow.reveal(extra)
+        return 'revealed'
+
+    result = await agent.run('start')
+    assert result.output == 'done'
+    # Step after the reveal (capability still unloaded): no announcement leaked.
+    # Step after load_capability: the announcement arrived.
+    assert announcement_seen == [False, True]
 
 
 async def test_reveal_end_to_end_via_agent_run() -> None:

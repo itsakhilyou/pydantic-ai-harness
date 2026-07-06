@@ -2,19 +2,6 @@
 
 Let one agent coordinate a whole team of sub-agents by writing a small Python script.
 
-> **Experimental**
->
-> Importing `pydantic_ai_harness.experimental.dynamic_workflow` emits a
-> `HarnessExperimentalWarning`. The API can change in any release. When you have accepted that,
-> silence it with:
->
-> ```python
-> import warnings
-> from pydantic_ai_harness.experimental import HarnessExperimentalWarning
->
-> warnings.filterwarnings('ignore', category=HarnessExperimentalWarning)
-> ```
-
 ## The idea
 
 Say you have a few specialist agents. One reviews code, one summarizes findings, one writes the
@@ -35,7 +22,7 @@ The choreography moves out of the conversation and into code.
 
 > **Tip**
 >
-> If you have met [Code Mode](../../code_mode/README.md), this will feel familiar. It is the same
+> If you have met [Code Mode](../code_mode/README.md), this will feel familiar. It is the same
 > sandbox and the same "write a script instead of many tool calls" idea. The difference is what the
 > script gets to call: in Code Mode it calls the agent's own tools, here it calls whole sub-agents.
 
@@ -53,7 +40,7 @@ Let's build the smallest thing that works. Two sub-agents, one orchestrator.
 
 ```python
 from pydantic_ai import Agent
-from pydantic_ai_harness.experimental.dynamic_workflow import DynamicWorkflow
+from pydantic_ai_harness.dynamic_workflow import DynamicWorkflow
 
 reviewer = Agent('openai:gpt-5', name='reviewer', description='Reviews code for bugs.')
 summarizer = Agent('openai:gpt-5', name='summarizer', description='Summarizes findings.')
@@ -133,11 +120,8 @@ result = await critic(task="Score this answer: ...")
 result["value"]   # not result.value
 ```
 
-> **Note**
->
-> Structured output arrives as a plain `dict`, so fields are `result["value"]`, not
-> `result.value`. This is the one place people trip. The type annotation the model sees in the
-> catalog spells out the fields for it, so the model usually gets this right on its own.
+The catalog the model sees renders each output type as a `TypedDict`, so it knows the fields and
+reads them by subscript on its own.
 
 ## A complete, runnable example
 
@@ -161,7 +145,7 @@ from pydantic import BaseModel
 from pydantic_ai import Agent
 from pydantic_ai.usage import UsageLimits
 
-from pydantic_ai_harness.experimental.dynamic_workflow import DynamicWorkflow
+from pydantic_ai_harness.dynamic_workflow import DynamicWorkflow
 
 # With Logfire configured, the trace shows the orchestrator turn, the run_workflow call (including
 # the exact script the model wrote), and every sub-agent run nested underneath it.
@@ -286,7 +270,8 @@ much* they spend. `DynamicWorkflow` gives you both, plus a guard against runaway
 DynamicWorkflow(agents=[...], max_agent_calls=50)  # 50 is the default
 ```
 
-This is a hard, host-enforced ceiling on the number of sub-agent runs in one parent run. It holds
+This is a hard, host-enforced ceiling on the number of sub-agent runs in one parent run -- one
+budget shared across every `run_workflow` call in that run, not a per-script allowance. It holds
 exactly, even when the script fans out with `asyncio.gather`. When the budget runs out, the workflow
 stops calling sub-agents and returns a terminal result telling the model to conclude with what it
 has. That result includes the sub-agent results that did complete, so nothing already paid for is
@@ -353,7 +338,7 @@ want a different name or a different description for one particular workflow, wi
 agent itself. Wrap it in a `WorkflowAgent`:
 
 ```python
-from pydantic_ai_harness.experimental.dynamic_workflow import WorkflowAgent
+from pydantic_ai_harness.dynamic_workflow import WorkflowAgent
 
 DynamicWorkflow(
     agents=[
@@ -438,43 +423,19 @@ worth knowing where the edges are:
 
 ## What is coming
 
-Running the script on Monty opens a door that a plain function call does not. A suspended Monty
-program is a small serializable value you can dump, reload, and fork. Two patterns are built toward
-this, and do not ship yet:
-
-- **Best-of-N from a shared prefix.** Build the expensive context once, then fork the snapshot into
-  N branches that each explore a different candidate, without re-running the setup per branch.
-- **Durable, resumable workflows.** Persist the snapshot at each sub-agent suspension. After a crash
-  or a redeploy in a fresh process, reload it and the workflow continues from exactly where it
-  paused, with every variable and partial result intact.
-
-The Monty engine already supports this. A suspended program dumps to roughly 500 bytes, reloads, and
-forks. `DynamicWorkflow` does not expose it yet: today `run_workflow` runs the script straight
-through and returns the result. Two smaller extensions are also planned: structured sub-agent inputs
-(a `parameters` schema per `WorkflowAgent`, instead of only `task: str`) and first-class progress
-streaming. Until then, set `event_stream_handler` on each sub-agent `Agent`, or use Logfire, to
-watch sub-agent runs inside the one tool call.
-
-## Recap
-
-To let one agent orchestrate a team of sub-agents:
-
-- Give `DynamicWorkflow` a catalog of named agents. It exposes one `run_workflow` tool.
-- The model writes a Python script where each sub-agent is an `async` function, called with a
-  keyword `task`. It fans out with `asyncio.gather`, chains with plain assignments, and loops with
-  ordinary control flow. Only the final value returns.
-- Each call is a real, isolated `Agent.run`, so pass full context in `task`, and read structured
-  output as a `dict`.
-- Bound the count with `max_agent_calls`, the cost with `sub_agent_usage_limits` plus
-  `forward_usage`, and the script itself with `resource_limits`.
-- Reshape the catalog with `WorkflowAgent`, grow it at runtime with `reveal()`, and hide it until
-  needed with `defer_loading`.
+A suspended Monty program is a small serializable value you can dump, reload, and fork, which
+points at two planned patterns that do not ship yet: forking one expensive shared prefix into N
+best-of-N branches, and durable workflows that resume from a persisted snapshot after a crash or
+redeploy. Two smaller extensions are also planned: structured sub-agent inputs (a `parameters`
+schema per `WorkflowAgent`, instead of only `task: str`) and first-class progress streaming. Until
+then, set `event_stream_handler` on each sub-agent `Agent`, or use Logfire, to watch sub-agent runs
+inside the one tool call.
 
 ## API
 
 ```python
-DynamicWorkflow(
-    agents,                       # Sequence[AbstractAgent | WorkflowAgent], required
+DynamicWorkflow(                  # all parameters are keyword-only
+    agents=[...],                 # Sequence[AbstractAgent | WorkflowAgent], required
     tool_name='run_workflow',
     max_agent_calls=50,
     max_retries=3,
@@ -498,7 +459,7 @@ WorkflowAgent(
 
 ## Further reading
 
-- [Code Mode](../../code_mode/README.md), the same sandbox, calling the agent's own tools instead of
+- [Code Mode](../code_mode/README.md), the same sandbox, calling the agent's own tools instead of
   sub-agents.
 - [Tool use via code](https://www.anthropic.com/engineering/code-execution-with-mcp) (Anthropic),
   the mechanism this applies to sub-agents.
@@ -507,5 +468,3 @@ WorkflowAgent(
 - [Capabilities](https://pydantic.dev/docs/ai/core-concepts/capabilities/) and
   [on-demand capabilities](https://pydantic.dev/docs/ai/core-concepts/capabilities/#on-demand-capabilities).
 - [Monty](https://github.com/pydantic/monty), the sandbox.
-</content>
-</invoke>
