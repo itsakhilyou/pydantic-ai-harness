@@ -24,10 +24,9 @@ from pydantic_ai_harness.experimental.dynamic_workflow._toolset import (
 class DynamicWorkflow(AbstractCapability[AgentDepsT]):
     """Capability that lets the model orchestrate named sub-agents from a Python script.
 
-    Instead of delegating to one sub-agent per tool call, the model writes a single
-    Python script (run in a Monty sandbox) that calls each sub-agent as an async
-    function and composes the results -- fan out in parallel with `asyncio.gather`,
-    chain one agent's output into the next, vote across several, or loop until done.
+    Instead of one sub-agent per tool call, the model writes a single Python script (run in a
+    Monty sandbox) that calls each sub-agent as an async function and composes the results: fan
+    out with `asyncio.gather`, chain one agent's output into the next, vote, or loop until done.
 
     ```python
     from pydantic_ai import Agent
@@ -42,34 +41,20 @@ class DynamicWorkflow(AbstractCapability[AgentDepsT]):
     )
     ```
 
-    Sub-agents run as isolated runs (their own message history). The parent's `deps`
-    are forwarded, and by default the parent's `usage` accumulator is shared so the whole
-    tree's token and request spend is tallied in one place. For a hard cap on sub-agent
-    runs, use the exact, host-enforced `max_agent_calls` ceiling -- a shared `usage_limits`
-    is best-effort (see `forward_usage`). Workflows do not nest -- a sub-agent invoked from
-    a workflow cannot start its own.
-
-    Set `defer_loading=True` (with a stable `id`) to keep the orchestration tool and
-    its sub-agent catalog out of the prompt until the model loads the capability --
-    paying near-zero tokens on turns that don't need it.
+    Each sub-agent runs isolated (its own message history) with the parent's `deps` forwarded;
+    by default the parent's `usage` accumulator is shared so the whole tree's spend is tallied in
+    one place. Use `max_agent_calls` for a hard, host-enforced ceiling on sub-agent runs. Workflows
+    do not nest. Set `defer_loading=True` (with a stable `id`) to keep the tool out of the prompt
+    until the model loads the capability.
     """
 
     agents: Sequence[AbstractAgent[AgentDepsT, Any] | WorkflowAgent[AgentDepsT]]
     """Sub-agents the orchestration script can call as async functions.
 
-    This sequence is read at construction only. A raw agent entry is shorthand for
-    `WorkflowAgent(agent)`, using the agent's own `name` and `description`. Use a
-    `WorkflowAgent` entry when this workflow needs a per-use-site override.
-
-    Later mutation of the passed sequence has no effect on the catalog. Use `reveal()`
-    to add a sub-agent after construction.
-
-    A revealed sub-agent becomes callable on the next step, announced to the model via an enqueued
-    message, while the `run_workflow` description stays frozen at the agents present when the run
-    started -- so the prompt-cache prefix never changes. Requires a `PendingMessageDrainCapability`
-    in the run (auto-injected by Pydantic AI) so the announcement drains into the conversation.
-    Reveal is append-only: a revealed sub-agent cannot be removed or hidden again for the rest of
-    the run -- plan the catalog as monotonically growing.
+    Read at construction only; later mutation of the passed sequence is ignored. A raw agent is
+    shorthand for `WorkflowAgent(agent)`, using the agent's own `name` and `description`; use a
+    `WorkflowAgent` entry for a per-use-site override. Use `reveal()` to add a sub-agent after
+    construction.
     """
 
     _catalog: list[WorkflowAgent[AgentDepsT]] = field(init=False, repr=False)
@@ -79,47 +64,39 @@ class DynamicWorkflow(AbstractCapability[AgentDepsT]):
     """Name of the orchestration tool exposed to the model."""
 
     max_agent_calls: int = 50
-    """Maximum total sub-agent runs per agent run (an exact, host-enforced ceiling).
-
-    Unlike a parent `usage_limits`, this holds exactly even under concurrent fan-out.
-    """
+    """Maximum total sub-agent runs per agent run: an exact, host-enforced ceiling that holds even
+    under concurrent fan-out (unlike a parent `usage_limits`)."""
 
     max_retries: int = 3
     """Maximum retries for the orchestration tool (syntax/runtime errors count as retries)."""
 
     forward_usage: bool = True
-    """Share the parent run's `usage` accumulator with sub-agents, so the whole tree's token
-    and request spend is tallied in one place.
+    """Share the parent run's `usage` accumulator with sub-agents, tallying the whole tree's
+    token and request spend in one place.
 
-    This does **not** forward the parent's configured `usage_limits` into sub-agent runs
-    (`RunContext` does not expose the limit value): set `sub_agent_usage_limits` to bound
-    sub-agents, and the parent re-checks its own `usage_limits` at its own request boundaries.
-    Use `max_agent_calls` for an exact ceiling on sub-agent runs.
+    This does **not** forward the parent's `usage_limits` into sub-agent runs (`RunContext` does
+    not expose the limit value): set `sub_agent_usage_limits` to bound sub-agents, or
+    `max_agent_calls` for an exact ceiling on the number of runs.
     """
 
     sub_agent_usage_limits: UsageLimits | None = None
     """`UsageLimits` applied to every sub-agent run, replacing pydantic-ai's default.
 
-    Requests within one sub-agent run happen one at a time, so request limits are enforced per
-    run. With `forward_usage=False`, a per-sub-agent `total_tokens_limit` of `T` together with
-    `max_agent_calls` of `N` bounds the whole agent tree to roughly `N * T` tokens; each run can
-    overshoot its token limit by the final response, because core checks token limits after a
-    response arrives. With `forward_usage=True` the limit is checked against the shared counter
-    instead, a tree-wide cap that is best-effort under concurrent fan-out. `None` keeps the
-    default (`request_limit=50`, no token limit).
+    With `forward_usage=False`, a per-run `total_tokens_limit` of `T` plus `max_agent_calls` of
+    `N` bounds the tree to roughly `N * T` tokens (each run can overshoot by its final response,
+    since core checks token limits after a response arrives). With `forward_usage=True` the limit
+    is checked against the shared counter -- a tree-wide cap, best-effort under concurrent fan-out.
+    `None` keeps the default (`request_limit=50`, no token limit).
     """
 
     resource_limits: WorkflowResourceLimits | Literal['unlimited'] | None = None
     """Sandbox limits guarding the orchestration script's own memory/allocations.
 
-    `None` applies a safe backstop (256 MB, 50M allocations) with no wall-clock cap; `'unlimited'`
-    removes all limits; a `WorkflowResourceLimits` mapping is merged onto the backstop, so a partial
-    dict overrides only the caps it names and leaves the others at their backstop value.
-
-    There is intentionally no default `max_duration_secs`: the sandbox's duration timer counts total
-    wall-clock -- including time awaiting sub-agents fanned out with `asyncio.gather` -- so a default
-    cap would abort ordinary parallel workflows, not just a runaway. Set one explicitly to bound a
-    whole orchestration's runtime (also the only guard against a pure-CPU `while True`).
+    `None` applies a safe backstop (256 MB, 50M allocations, no wall-clock cap); `'unlimited'`
+    removes all limits; a `WorkflowResourceLimits` mapping is merged onto the backstop, overriding
+    only the caps it names. There is no default `max_duration_secs` because the timer counts total
+    wall-clock -- including time awaiting `asyncio.gather` -- so a default would abort ordinary
+    parallel workflows; set one to bound runtime (and to guard a pure-CPU `while True`).
     """
 
     @classmethod
@@ -141,17 +118,14 @@ class DynamicWorkflow(AbstractCapability[AgentDepsT]):
         return WorkflowAgent(agent=entry)
 
     def reveal(self, agent: AbstractAgent[AgentDepsT, Any] | WorkflowAgent[AgentDepsT]) -> None:
-        """Reveal a sub-agent on the next model step.
+        """Reveal a sub-agent on the next model step (the supported runtime API for doing so).
 
-        This is the supported runtime API for revealing sub-agents after a run has started.
-
-        The revealed sub-agent is announced to the model on the next step and becomes callable
-        then. The `run_workflow` tool description stays frozen at the agents present when the run
-        started. Reveal is append-only: a revealed sub-agent cannot be removed or hidden again for
-        the rest of the run. The sub-agent's resolved name must be a valid, unique sandbox
-        function name; invalid entries raise `UserError` at the call site. If one
-        `DynamicWorkflow` instance is shared across concurrent runs, `reveal()` reveals to all
-        in-flight runs and joins the baseline catalog for runs that start afterwards.
+        The sub-agent is announced to the model on the next step and becomes callable then; the
+        `run_workflow` description stays frozen at the agents present when the run started. Reveal
+        is append-only: a revealed sub-agent cannot be removed for the rest of the run. Its resolved
+        name must be a valid, unique sandbox function name, or this raises `UserError` at the call
+        site. If one `DynamicWorkflow` instance is shared across concurrent runs, `reveal()` reaches
+        all in-flight runs and joins the baseline catalog for runs that start afterwards.
         """
         entry = self._normalize_workflow_agent(agent)
         existing_names: set[str] = set()
