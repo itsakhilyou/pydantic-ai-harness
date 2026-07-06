@@ -51,7 +51,7 @@ logfire = [
     "pydantic-ai-slim[spec]>=2.1.0",
 ]
 modal = [
-    "modal>=1.4.3",
+    "modal>=1.5.0",
 ]
 
 [project.urls]
