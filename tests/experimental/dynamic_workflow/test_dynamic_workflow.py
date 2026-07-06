@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 from collections.abc import Callable, Coroutine
 from typing import Any
 
@@ -43,11 +44,11 @@ def anyio_backend() -> str:
     return 'asyncio'
 
 
-def _sub_agent(text: str = 'ok', name: str | None = 'sub') -> Agent[None, str]:
+def _sub_agent(text: str = 'ok', name: str | None = 'sub') -> Agent[object, str]:
     return Agent(TestModel(custom_output_text=text), name=name)
 
 
-def _wf_agent(text: str = 'ok', name: str | None = 'sub', description: str | None = None) -> WorkflowAgent[None]:
+def _wf_agent(text: str = 'ok', name: str | None = 'sub', description: str | None = None) -> WorkflowAgent[object]:
     """Build a `WorkflowAgent` wrapping a trivial `TestModel` sub-agent."""
     return WorkflowAgent(agent=_sub_agent(text, name), description=description)
 
@@ -69,7 +70,7 @@ class ScoreLabel(BaseModel):
     label: str
 
 
-def _review_agent(text: dict[str, object] | None = None, name: str | None = 'reviewer') -> Agent[None, Review]:
+def _review_agent(text: dict[str, object] | None = None, name: str | None = 'reviewer') -> Agent[object, Review]:
     return Agent(
         TestModel(custom_output_args=text if text is not None else {'score': 9, 'note': 'great'}),
         name=name,
@@ -77,13 +78,13 @@ def _review_agent(text: dict[str, object] | None = None, name: str | None = 'rev
     )
 
 
-def _ctx() -> RunContext[None]:
-    return RunContext[None](deps=None, model=TestModel(), usage=RunUsage(), prompt=None, messages=[], run_step=1)
+def _ctx() -> RunContext[object]:
+    return RunContext[object](deps=None, model=TestModel(), usage=RunUsage(), prompt=None, messages=[], run_step=1)
 
 
-def _ctx_with_queue() -> RunContext[None]:
+def _ctx_with_queue() -> RunContext[object]:
     """A `RunContext` with a live pending-message queue, so `enqueue` (used by reveal) works."""
-    return RunContext[None](
+    return RunContext[object](
         deps=None, model=TestModel(), usage=RunUsage(), prompt=None, messages=[], run_step=1, pending_messages=[]
     )
 
@@ -110,7 +111,7 @@ def _user_prompt_text(messages: list[ModelMessage]) -> str:
     )
 
 
-def _enqueued_text(ctx: RunContext[None]) -> str:
+def _enqueued_text(ctx: RunContext[object]) -> str:
     """Join the user-prompt text of every message enqueued on `ctx` (reveal announcements)."""
     return '\n'.join(
         part.content
@@ -121,7 +122,7 @@ def _enqueued_text(ctx: RunContext[None]) -> str:
     )
 
 
-async def _run_script(ts: DynamicWorkflowToolset[None], code: str, ctx: RunContext[None] | None = None) -> Any:
+async def _run_script(ts: DynamicWorkflowToolset[object], code: str, ctx: RunContext[object] | None = None) -> Any:
     ctx = ctx or _ctx()
     tools = await ts.get_tools(ctx)
     tool = tools[ts.tool_name]
@@ -151,7 +152,7 @@ def test_capability_provides_toolset_with_propagated_config() -> None:
     reviewer = _wf_agent(name='reviewer')
     usage_limits = UsageLimits(request_limit=2)
     resource_limits: WorkflowResourceLimits = {'max_memory': 1024}
-    cap = DynamicWorkflow[None](
+    cap = DynamicWorkflow[object](
         agents=[reviewer],
         tool_name='orchestrate',
         max_agent_calls=7,
@@ -174,7 +175,7 @@ def test_capability_provides_toolset_with_propagated_config() -> None:
 
 
 def test_toolset_id_defaults_to_tool_name() -> None:
-    ts = DynamicWorkflowToolset[None](agents=[_wf_agent()])
+    ts = DynamicWorkflowToolset[object](agents=[_wf_agent()])
     assert ts.id == 'run_workflow'
 
 
@@ -187,13 +188,13 @@ def test_not_spec_serializable() -> None:
 
 
 def test_sandbox_name_falls_back_to_agent_name() -> None:
-    ts = DynamicWorkflowToolset[None](agents=[WorkflowAgent(agent=_sub_agent(name='reviewer'))])
+    ts = DynamicWorkflowToolset[object](agents=[WorkflowAgent(agent=_sub_agent(name='reviewer'))])
     assert set(ts._by_name) == {'reviewer'}  # pyright: ignore[reportPrivateUsage]
 
 
 def test_explicit_name_overrides_agent_name() -> None:
     # The sandbox handle can differ from the agent's own `name`.
-    ts = DynamicWorkflowToolset[None](agents=[WorkflowAgent(agent=_sub_agent(name='reviewer'), name='check')])
+    ts = DynamicWorkflowToolset[object](agents=[WorkflowAgent(agent=_sub_agent(name='reviewer'), name='check')])
     assert set(ts._by_name) == {'check'}  # pyright: ignore[reportPrivateUsage]
 
 
@@ -208,37 +209,37 @@ def test_workflow_agent_resolved_name() -> None:
 
 def test_invalid_identifier_name_raises() -> None:
     with pytest.raises(UserError, match='cannot be exposed as a sandbox function'):
-        DynamicWorkflowToolset[None](agents=[WorkflowAgent(agent=_sub_agent(), name='bad-name')])
+        DynamicWorkflowToolset[object](agents=[WorkflowAgent(agent=_sub_agent(), name='bad-name')])
 
 
 def test_keyword_name_raises() -> None:
     # `'class'.isidentifier()` is True, but a Python keyword can't be a sandbox function name --
     # the model could never call it (`await class(...)` is a syntax error). Reject it up front.
     with pytest.raises(UserError, match='cannot be exposed as a sandbox function'):
-        DynamicWorkflowToolset[None](agents=[WorkflowAgent(agent=_sub_agent(), name='class')])
+        DynamicWorkflowToolset[object](agents=[WorkflowAgent(agent=_sub_agent(), name='class')])
 
 
 def test_empty_agents_raises() -> None:
     with pytest.raises(UserError, match='at least one sub-agent'):
-        DynamicWorkflowToolset[None](agents=[])
+        DynamicWorkflowToolset[object](agents=[])
 
 
 def test_missing_name_raises() -> None:
     # No explicit name and the agent has no `name` either: nothing to expose as a function.
     with pytest.raises(UserError, match='has no `name`'):
-        DynamicWorkflowToolset[None](agents=[WorkflowAgent(agent=_sub_agent(name=None))])
+        DynamicWorkflowToolset[object](agents=[WorkflowAgent(agent=_sub_agent(name=None))])
 
 
 def test_duplicate_name_raises() -> None:
     with pytest.raises(UserError, match='must be unique'):
-        DynamicWorkflowToolset[None](agents=[_wf_agent(name='dup'), _wf_agent(name='dup')])
+        DynamicWorkflowToolset[object](agents=[_wf_agent(name='dup'), _wf_agent(name='dup')])
 
 
 # --- Catalog rendering / discovery surface ---------------------------------
 
 
 async def test_description_lists_agents_as_functions() -> None:
-    ts = DynamicWorkflowToolset[None](
+    ts = DynamicWorkflowToolset[object](
         agents=[
             WorkflowAgent(agent=_review_agent(name='reviewer'), description='Reviews code for bugs.'),
             _wf_agent(name='summarizer', description='Summarizes findings.'),
@@ -310,7 +311,7 @@ async def summarizer(*, task: str) -> str:
 
 
 async def test_descriptions_override() -> None:
-    ts = DynamicWorkflowToolset[None](agents=[_wf_agent(name='reviewer', description='Reviews code for bugs.')])
+    ts = DynamicWorkflowToolset[object](agents=[_wf_agent(name='reviewer', description='Reviews code for bugs.')])
     tools = await ts.get_tools(_ctx())
     desc = tools['run_workflow'].tool_def.description
     assert desc is not None
@@ -325,7 +326,7 @@ async def test_missing_output_schema_falls_back_to_any(monkeypatch: pytest.Monke
         raise RuntimeError('schema unavailable')
 
     monkeypatch.setattr(sub, 'output_json_schema', broken_output_json_schema)
-    ts = DynamicWorkflowToolset[None](agents=[WorkflowAgent(agent=sub)])
+    ts = DynamicWorkflowToolset[object](agents=[WorkflowAgent(agent=sub)])
     tools = await ts.get_tools(_ctx())
     desc = tools['run_workflow'].tool_def.description
     assert desc is not None
@@ -335,7 +336,7 @@ async def test_missing_output_schema_falls_back_to_any(monkeypatch: pytest.Monke
 async def test_tool_def_is_sequential_with_code_metadata() -> None:
     # `sequential=True` is what serializes two `run_workflow` calls in one model response;
     # dropping it would let them race the shared per-run budget counter.
-    ts = DynamicWorkflowToolset[None](agents=[_wf_agent()], max_retries=5)
+    ts = DynamicWorkflowToolset[object](agents=[_wf_agent()], max_retries=5)
     tool = (await ts.get_tools(_ctx()))['run_workflow']
     assert tool.tool_def.sequential is True
     assert tool.tool_def.metadata == {'code_arg_name': 'code', 'code_arg_language': 'python'}
@@ -344,7 +345,7 @@ async def test_tool_def_is_sequential_with_code_metadata() -> None:
 
 
 async def test_custom_tool_name() -> None:
-    ts = DynamicWorkflowToolset[None](agents=[_wf_agent()], tool_name='orchestrate')
+    ts = DynamicWorkflowToolset[object](agents=[_wf_agent()], tool_name='orchestrate')
     tools = await ts.get_tools(_ctx())
     assert set(tools) == {'orchestrate'}
 
@@ -353,20 +354,20 @@ async def test_custom_tool_name() -> None:
 
 
 async def test_single_sub_agent_call() -> None:
-    ts = DynamicWorkflowToolset[None](agents=[_wf_agent('looks good', 'reviewer')])
+    ts = DynamicWorkflowToolset[object](agents=[_wf_agent('looks good', 'reviewer')])
     out = await _run_script(ts, "await reviewer(task='check')")
     assert out == 'looks good'
 
 
 async def test_parallel_fan_out() -> None:
-    ts = DynamicWorkflowToolset[None](agents=[_wf_agent('r', 'reviewer'), _wf_agent('s', 'summarizer')])
+    ts = DynamicWorkflowToolset[object](agents=[_wf_agent('r', 'reviewer'), _wf_agent('s', 'summarizer')])
     code = "import asyncio\nawait asyncio.gather(reviewer(task='a'), reviewer(task='b'), summarizer(task='c'))"
     out = await _run_script(ts, code)
     assert out == ['r', 'r', 's']
 
 
 async def test_chaining() -> None:
-    ts = DynamicWorkflowToolset[None](agents=[_wf_agent('done', 'sub')])
+    ts = DynamicWorkflowToolset[object](agents=[_wf_agent('done', 'sub')])
     code = "a = await sub(task='one')\nb = await sub(task='two: ' + a)\n[a, b]"
     out = await _run_script(ts, code)
     assert out == ['done', 'done']
@@ -374,7 +375,7 @@ async def test_chaining() -> None:
 
 async def test_structured_output_arrives_as_dict() -> None:
     reviewer = _review_agent({'score': 9, 'note': 'great'}, name='reviewer')
-    ts = DynamicWorkflowToolset[None](agents=[WorkflowAgent(agent=reviewer)])
+    ts = DynamicWorkflowToolset[object](agents=[WorkflowAgent(agent=reviewer)])
     out = await _run_script(ts, "r = await reviewer(task='x')\nr['score']")
     assert out == 9
 
@@ -393,8 +394,8 @@ async def test_via_agent_run_end_to_end() -> None:
         return ModelResponse(parts=[ToolCallPart(tool_name='run_workflow', args={'code': code})])
 
     reviewer = _sub_agent('reviewed', 'reviewer')
-    agent: Agent[None, str] = Agent(
-        FunctionModel(model_fn), capabilities=[DynamicWorkflow[None](agents=[WorkflowAgent(agent=reviewer)])]
+    agent: Agent[object, str] = Agent(
+        FunctionModel(model_fn), capabilities=[DynamicWorkflow[object](agents=[WorkflowAgent(agent=reviewer)])]
     )
     result = await agent.run('please review')
     # Model is shown only the orchestration tool, not the sub-agents directly.
@@ -421,9 +422,9 @@ async def test_budget_terminal_result_arrives_as_tool_return_end_to_end() -> Non
         )
 
     counted = _sub_agent('counted-result', 'counted')
-    agent: Agent[None, str] = Agent(
+    agent: Agent[object, str] = Agent(
         FunctionModel(model_fn),
-        capabilities=[DynamicWorkflow[None](agents=[WorkflowAgent(agent=counted)], max_agent_calls=1)],
+        capabilities=[DynamicWorkflow[object](agents=[WorkflowAgent(agent=counted)], max_agent_calls=1)],
     )
 
     result = await agent.run('run over budget')
@@ -460,8 +461,8 @@ async def test_max_agent_calls_enforced_exactly() -> None:
         runs.append('x')
         return ModelResponse(parts=[TextPart('ok')])
 
-    counted: Agent[None, str] = Agent(FunctionModel(model_fn), name='counted')
-    ts = DynamicWorkflowToolset[None](agents=[WorkflowAgent(agent=counted)], max_agent_calls=2)
+    counted: Agent[object, str] = Agent(FunctionModel(model_fn), name='counted')
+    ts = DynamicWorkflowToolset[object](agents=[WorkflowAgent(agent=counted)], max_agent_calls=2)
     code = 'for i in range(5):\n    await counted(task=str(i))'
     # Budget exhaustion returns a terminal result (not a retry that can never succeed).
     out = await _run_script(ts, code)
@@ -479,19 +480,23 @@ async def test_max_agent_calls_exact_under_concurrent_fan_out() -> None:
         runs.append('x')
         return ModelResponse(parts=[TextPart('ok')])
 
-    counted: Agent[None, str] = Agent(FunctionModel(model_fn), name='counted')
-    ts = DynamicWorkflowToolset[None](agents=[WorkflowAgent(agent=counted)], max_agent_calls=3)
+    counted: Agent[object, str] = Agent(FunctionModel(model_fn), name='counted')
+    ts = DynamicWorkflowToolset[object](agents=[WorkflowAgent(agent=counted)], max_agent_calls=3)
     # Fan eight calls out concurrently: the await-free check-then-increment must admit exactly the
     # budget (3), not race past it. A regression inserting an `await` before the increment fails here.
     code = 'import asyncio\nawait asyncio.gather(*[counted(task=str(i)) for i in range(8)])'
     out = await _run_script(ts, code)
+    # Read `completed` before the `isinstance` narrow: it keeps the value typed rather than widening
+    # every dict subscript to an unknown element type under pyright strict.
+    completed: list[str] = out['completed']
     assert isinstance(out, dict)
     assert 'budget' in out['error']
-    assert out['completed'] == [
-        'counted(task="0") -> "ok"',
-        'counted(task="1") -> "ok"',
-        'counted(task="2") -> "ok"',
-    ]
+    # Which three of the eight concurrent calls win the budget race, and the order they finish in,
+    # are both scheduler-dependent (3.14 admits them in a different order than 3.13). The invariant
+    # under test is the count: exactly the budget ran, each exactly once, before the rest were refused.
+    assert len(completed) == 3
+    assert len(set(completed)) == 3
+    assert all(re.fullmatch(r'counted\(task="\d+"\) -> "ok"', entry) for entry in completed)
     assert len(runs) == 3
 
 
@@ -521,7 +526,7 @@ async def test_budget_terminal_result_keeps_surfaced_error_detail(monkeypatch: p
             raise runtime_error("sub-agent 'bad' raised ValueError")
 
     monkeypatch.setattr('pydantic_ai_harness.experimental.dynamic_workflow._toolset.MontyExecutor', FakeExecutor)
-    ts = DynamicWorkflowToolset[None](agents=[_wf_agent('ok', 'good')], max_agent_calls=1)
+    ts = DynamicWorkflowToolset[object](agents=[_wf_agent('ok', 'good')], max_agent_calls=1)
     out = await _run_script(ts, '1 + 1')
     assert isinstance(out, dict)
     assert out['error'] == (
@@ -535,12 +540,12 @@ async def test_budget_terminal_result_keeps_surfaced_error_detail(monkeypatch: p
 
 def test_max_agent_calls_must_be_positive() -> None:
     with pytest.raises(UserError, match='max_agent_calls'):
-        DynamicWorkflowToolset[None](agents=[_wf_agent()], max_agent_calls=0)
+        DynamicWorkflowToolset[object](agents=[_wf_agent()], max_agent_calls=0)
 
 
 async def test_nested_workflow_is_refused() -> None:
     # A workflow already in progress (the flag a sub-agent would inherit) refuses to start another.
-    ts = DynamicWorkflowToolset[None](agents=[_wf_agent()])
+    ts = DynamicWorkflowToolset[object](agents=[_wf_agent()])
     token = _in_workflow.set(True)
     try:
         out = await _run_script(ts, "await sub(task='x')")
@@ -572,12 +577,12 @@ async def test_nested_workflow_refused_end_to_end() -> None:
         assert retries == []
         return ModelResponse(parts=[ToolCallPart(tool_name='run_workflow', args={'code': "await leaf(task='x')"})])
 
-    inner: Agent[None, str] = Agent(
+    inner: Agent[object, str] = Agent(
         FunctionModel(inner_fn),
         name='inner',
-        capabilities=[DynamicWorkflow[None](agents=[WorkflowAgent(agent=leaf)])],
+        capabilities=[DynamicWorkflow[object](agents=[WorkflowAgent(agent=leaf)])],
     )
-    ts = DynamicWorkflowToolset[None](agents=[WorkflowAgent(agent=inner)])
+    ts = DynamicWorkflowToolset[object](agents=[WorkflowAgent(agent=inner)])
     out = await _run_script(ts, "await inner(task='go')")
     assert out == 'inner saw terminal'
     assert inner_returns == [
@@ -591,46 +596,46 @@ async def test_nested_workflow_refused_end_to_end() -> None:
 
 
 async def test_unknown_agent_raises_model_retry() -> None:
-    ts = DynamicWorkflowToolset[None](agents=[_wf_agent()])
+    ts = DynamicWorkflowToolset[object](agents=[_wf_agent()])
     with pytest.raises(ModelRetry, match='Unknown function'):
         await _run_script(ts, "await nonexistent(task='x')")
 
 
 async def test_missing_task_kwarg() -> None:
-    ts = DynamicWorkflowToolset[None](agents=[_wf_agent()])
+    ts = DynamicWorkflowToolset[object](agents=[_wf_agent()])
     with pytest.raises(ModelRetry, match='missing required keyword argument'):
         await _run_script(ts, 'await sub(wrong=1)')
 
 
 async def test_positional_sub_agent_call_is_rejected() -> None:
-    ts = DynamicWorkflowToolset[None](agents=[_wf_agent()])
+    ts = DynamicWorkflowToolset[object](agents=[_wf_agent()])
     with pytest.raises(ModelRetry, match='does not accept positional arguments'):
         await _run_script(ts, "await sub('x')")
 
 
 async def test_extra_kwargs_rejected() -> None:
     # An extra kwarg must not be silently dropped -- the model needs to know it was ignored.
-    ts = DynamicWorkflowToolset[None](agents=[_wf_agent()])
+    ts = DynamicWorkflowToolset[object](agents=[_wf_agent()])
     with pytest.raises(ModelRetry, match='unexpected keyword argument'):
         await _run_script(ts, "await sub(task='x', foo='y')")
 
 
 async def test_non_str_task_rejected() -> None:
     # A non-string task (a dict/list would otherwise be silently smeared into message parts).
-    ts = DynamicWorkflowToolset[None](agents=[_wf_agent()])
+    ts = DynamicWorkflowToolset[object](agents=[_wf_agent()])
     with pytest.raises(ModelRetry, match='task must be a string'):
         await _run_script(ts, "await sub(task={'k': 'v'})")
 
 
 async def test_forward_usage_true_shares_parent_usage() -> None:
-    ts = DynamicWorkflowToolset[None](agents=[_wf_agent()], forward_usage=True)
+    ts = DynamicWorkflowToolset[object](agents=[_wf_agent()], forward_usage=True)
     ctx = _ctx()
     await _run_script(ts, "await sub(task='x')", ctx)
     assert ctx.usage.requests > 0
 
 
 async def test_forward_usage_false_isolates_usage() -> None:
-    ts = DynamicWorkflowToolset[None](agents=[_wf_agent()], forward_usage=False)
+    ts = DynamicWorkflowToolset[object](agents=[_wf_agent()], forward_usage=False)
     ctx = _ctx()
     await _run_script(ts, "await sub(task='x')", ctx)
     assert ctx.usage.requests == 0
@@ -661,9 +666,9 @@ async def test_sub_agent_does_not_see_parent_messages() -> None:
         seen_texts.append(_user_prompt_text(messages))
         return ModelResponse(parts=[TextPart('ok')])
 
-    sub: Agent[None, str] = Agent(FunctionModel(spy), name='sub')
-    ts = DynamicWorkflowToolset[None](agents=[WorkflowAgent(agent=sub)])
-    ctx = RunContext[None](
+    sub: Agent[object, str] = Agent(FunctionModel(spy), name='sub')
+    ts = DynamicWorkflowToolset[object](agents=[WorkflowAgent(agent=sub)])
+    ctx = RunContext[object](
         deps=None,
         model=TestModel(),
         usage=RunUsage(),
@@ -679,8 +684,8 @@ async def test_sub_agent_usage_limits_checked_against_shared_counter() -> None:
     # With `forward_usage=True`, `sub_agent_usage_limits` is checked against the *shared* counter:
     # a parent run that already spent the request budget trips the sub-agent immediately, even
     # though the sub-agent itself has made no requests.
-    sub: Agent[None, str] = Agent(TestModel(custom_output_text='ok'), name='sub')
-    ts = DynamicWorkflowToolset[None](
+    sub: Agent[object, str] = Agent(TestModel(custom_output_text='ok'), name='sub')
+    ts = DynamicWorkflowToolset[object](
         agents=[WorkflowAgent(agent=sub)],
         forward_usage=True,
         sub_agent_usage_limits=UsageLimits(request_limit=3),
@@ -695,7 +700,7 @@ async def test_sub_agent_usage_limits_checked_against_shared_counter() -> None:
 
 
 async def test_sub_agent_usage_limits_enforced() -> None:
-    sub: Agent[None, str] = Agent(TestModel(), name='limited')
+    sub: Agent[object, str] = Agent(TestModel(), name='limited')
 
     @sub.tool_plain
     def helper() -> str:
@@ -703,7 +708,7 @@ async def test_sub_agent_usage_limits_enforced() -> None:
 
     # A tool-using TestModel agent needs two model requests (call the tool, then answer), so a
     # request_limit of 1 must trip the second -- proving the limit reaches the sub-agent run.
-    ts = DynamicWorkflowToolset[None](
+    ts = DynamicWorkflowToolset[object](
         agents=[WorkflowAgent(agent=sub)],
         forward_usage=False,
         sub_agent_usage_limits=UsageLimits(request_limit=1),
@@ -717,7 +722,7 @@ async def test_sub_agent_usage_limits_enforced() -> None:
 
 
 async def test_sub_agent_usage_limits_generous_allows_run() -> None:
-    sub: Agent[None, str] = Agent(TestModel(custom_output_text='done'), name='roomy')
+    sub: Agent[object, str] = Agent(TestModel(custom_output_text='done'), name='roomy')
 
     @sub.tool_plain
     def helper() -> str:
@@ -725,7 +730,7 @@ async def test_sub_agent_usage_limits_generous_allows_run() -> None:
 
     # The same two-request agent runs fine when the limit is high enough, so the cap is the
     # configured value rather than a blanket rejection.
-    ts = DynamicWorkflowToolset[None](
+    ts = DynamicWorkflowToolset[object](
         agents=[WorkflowAgent(agent=sub)],
         forward_usage=False,
         sub_agent_usage_limits=UsageLimits(request_limit=5),
@@ -738,7 +743,7 @@ async def test_sub_agent_usage_limits_generous_allows_run() -> None:
 
 
 async def test_syntax_error() -> None:
-    ts = DynamicWorkflowToolset[None](agents=[_wf_agent()])
+    ts = DynamicWorkflowToolset[object](agents=[_wf_agent()])
     with pytest.raises(ModelRetry, match='Syntax error'):
         await _run_script(ts, 'this is not valid python !!!')
 
@@ -753,9 +758,9 @@ async def test_retry_exhaustion_for_invalid_code_end_to_end() -> None:
             parts=[ToolCallPart(tool_name='run_workflow', args={'code': 'this is not valid python !!!'})]
         )
 
-    agent: Agent[None, str] = Agent(
+    agent: Agent[object, str] = Agent(
         FunctionModel(model_fn),
-        capabilities=[DynamicWorkflow[None](agents=[_wf_agent()], max_retries=2)],
+        capabilities=[DynamicWorkflow[object](agents=[_wf_agent()], max_retries=2)],
     )
 
     with capture_run_messages() as messages:
@@ -775,7 +780,7 @@ async def test_retry_exhaustion_for_invalid_code_end_to_end() -> None:
 
 
 async def test_runtime_error() -> None:
-    ts = DynamicWorkflowToolset[None](agents=[_wf_agent()])
+    ts = DynamicWorkflowToolset[object](agents=[_wf_agent()])
     with pytest.raises(ModelRetry) as exc_info:
         await _run_script(ts, 'x = 1 / 0')
     msg = str(exc_info.value)
@@ -787,8 +792,8 @@ async def test_runtime_error_includes_completed_sub_agent_results() -> None:
     def boom(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
         raise ValueError('kaboom')
 
-    bad: Agent[None, str] = Agent(FunctionModel(boom), name='bad')
-    ts = DynamicWorkflowToolset[None](agents=[_wf_agent('good-result', 'good'), WorkflowAgent(agent=bad)])
+    bad: Agent[object, str] = Agent(FunctionModel(boom), name='bad')
+    ts = DynamicWorkflowToolset[object](agents=[_wf_agent('good-result', 'good'), WorkflowAgent(agent=bad)])
     with pytest.raises(ModelRetry) as exc_info:
         await _run_script(ts, "await good(task='use this')\nawait bad(task='fails')")
     msg = str(exc_info.value)
@@ -805,8 +810,8 @@ async def test_completed_sub_agent_results_are_truncated_and_capped() -> None:
     def boom(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
         raise ValueError('kaboom')
 
-    bad: Agent[None, str] = Agent(FunctionModel(boom), name='bad')
-    ts = DynamicWorkflowToolset[None](agents=[_wf_agent(long_result, 'good'), WorkflowAgent(agent=bad)])
+    bad: Agent[object, str] = Agent(FunctionModel(boom), name='bad')
+    ts = DynamicWorkflowToolset[object](agents=[_wf_agent(long_result, 'good'), WorkflowAgent(agent=bad)])
     lines = [f"await good(task='{long_task}-{i}')" for i in range(21)]
     code = '\n'.join([*lines, "await bad(task='fails')"])
     with pytest.raises(ModelRetry) as exc_info:
@@ -820,7 +825,7 @@ async def test_completed_sub_agent_results_are_truncated_and_capped() -> None:
 async def test_duplicate_future_in_gather_is_retryable() -> None:
     # Awaiting the same sub-agent call twice in one gather makes the Monty VM panic; that panic
     # must surface as a retry, not tear down the whole agent run.
-    ts = DynamicWorkflowToolset[None](agents=[_wf_agent()])
+    ts = DynamicWorkflowToolset[object](agents=[_wf_agent()])
     code = 'import asyncio\nf = sub(task="x")\nawait asyncio.gather(f, f)'
     with pytest.raises(ModelRetry, match='aborted inside the sandbox') as exc_info:
         await _run_script(ts, code)
@@ -851,7 +856,7 @@ async def test_sandbox_panic_after_budget_exhaustion_returns_terminal_result(
             raise PanicException('sandbox panic')
 
     monkeypatch.setattr('pydantic_ai_harness.experimental.dynamic_workflow._toolset.MontyExecutor', FakeExecutor)
-    ts = DynamicWorkflowToolset[None](agents=[_wf_agent('counted-result', 'counted')], max_agent_calls=1)
+    ts = DynamicWorkflowToolset[object](agents=[_wf_agent('counted-result', 'counted')], max_agent_calls=1)
     out = await _run_script(ts, '1 + 1')
     assert isinstance(out, dict)
     assert out['error'] == (
@@ -873,38 +878,38 @@ async def test_non_panic_base_exception_propagates(monkeypatch: pytest.MonkeyPat
         raise _Boom('boom')
 
     monkeypatch.setattr('pydantic_ai_harness._monty_exec.MontyExecutor.run', _boom)
-    ts = DynamicWorkflowToolset[None](agents=[_wf_agent()])
+    ts = DynamicWorkflowToolset[object](agents=[_wf_agent()])
     with pytest.raises(_Boom):
         await _run_script(ts, "await sub(task='x')")
 
 
 async def test_print_only_returns_output_dict() -> None:
-    ts = DynamicWorkflowToolset[None](agents=[_wf_agent()])
+    ts = DynamicWorkflowToolset[object](agents=[_wf_agent()])
     out = await _run_script(ts, "print('hello')")
     assert out == {'output': 'hello\n'}
 
 
 async def test_print_with_result_returns_both() -> None:
-    ts = DynamicWorkflowToolset[None](agents=[_wf_agent()])
+    ts = DynamicWorkflowToolset[object](agents=[_wf_agent()])
     out = await _run_script(ts, "print('log')\n42")
     assert out == {'output': 'log\n', 'result': 42}
 
 
 async def test_no_result_returns_empty_dict() -> None:
-    ts = DynamicWorkflowToolset[None](agents=[_wf_agent()])
+    ts = DynamicWorkflowToolset[object](agents=[_wf_agent()])
     out = await _run_script(ts, 'x = 1')
     assert out == {}
 
 
 @pytest.mark.parametrize(('code', 'expected'), [('0', 0), ("''", ''), ('False', False)])
 async def test_falsy_last_expression_returns_as_is(code: str, expected: object) -> None:
-    ts = DynamicWorkflowToolset[None](agents=[_wf_agent()])
+    ts = DynamicWorkflowToolset[object](agents=[_wf_agent()])
     out = await _run_script(ts, code)
     assert out == expected
 
 
 async def test_runtime_error_includes_prints() -> None:
-    ts = DynamicWorkflowToolset[None](agents=[_wf_agent()])
+    ts = DynamicWorkflowToolset[object](agents=[_wf_agent()])
     with pytest.raises(ModelRetry, match='stdout before error'):
         await _run_script(ts, "print('before crash')\n1 / 0")
 
@@ -915,8 +920,8 @@ async def test_sub_agent_failure_inside_gather_aborts_script() -> None:
     def boom(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
         raise ValueError('kaboom')
 
-    bad: Agent[None, str] = Agent(FunctionModel(boom), name='bad')
-    ts = DynamicWorkflowToolset[None](agents=[_wf_agent('ok', 'good'), WorkflowAgent(agent=bad)])
+    bad: Agent[object, str] = Agent(FunctionModel(boom), name='bad')
+    ts = DynamicWorkflowToolset[object](agents=[_wf_agent('ok', 'good'), WorkflowAgent(agent=bad)])
     code = "import asyncio\nawait asyncio.gather(good(task='a'), bad(task='b'))"
     with pytest.raises(ModelRetry) as exc_info:
         await _run_script(ts, code)
@@ -928,8 +933,8 @@ async def test_sub_agent_failure_inside_gather_aborts_script() -> None:
 async def test_host_errors_cannot_be_caught_in_sandbox() -> None:
     # On the deferred-future path this capability uses, host-raised exceptions abort the script
     # even under a matching `except RuntimeError`. Monty's inline resume path can differ.
-    counted: Agent[None, str] = Agent(TestModel(custom_output_text='ok'), name='counted')
-    ts = DynamicWorkflowToolset[None](agents=[WorkflowAgent(agent=counted)], max_agent_calls=1)
+    counted: Agent[object, str] = Agent(TestModel(custom_output_text='ok'), name='counted')
+    ts = DynamicWorkflowToolset[object](agents=[WorkflowAgent(agent=counted)], max_agent_calls=1)
     code = "await counted(task='a')\ntry:\n    await counted(task='b')\nexcept RuntimeError:\n    pass\n1 / 0"
     out = await _run_script(ts, code)
     # The script aborted at the second call (`1 / 0` never ran) and the terminal result surfaced.
@@ -955,8 +960,8 @@ async def test_cancellation_awaits_inflight_sub_agents() -> None:
             raise
         return ModelResponse(parts=[TextPart('never')])  # pragma: no cover
 
-    slow: Agent[None, str] = Agent(FunctionModel(blocking), name='slow')
-    ts = DynamicWorkflowToolset[None](agents=[WorkflowAgent(agent=slow)])
+    slow: Agent[object, str] = Agent(FunctionModel(blocking), name='slow')
+    ts = DynamicWorkflowToolset[object](agents=[WorkflowAgent(agent=slow)])
     run = asyncio.ensure_future(_run_script(ts, "import asyncio\nawait asyncio.gather(slow(task='x'))"))
     await started.wait()
     run.cancel()
@@ -969,8 +974,8 @@ async def test_sub_agent_error_does_not_leak_host_internals() -> None:
     def boom(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
         raise ValueError('SECRET_TOKEN_sk_abc123 at /Users/victim/secret.py')
 
-    bad: Agent[None, str] = Agent(FunctionModel(boom), name='bad')
-    ts = DynamicWorkflowToolset[None](agents=[WorkflowAgent(agent=bad)])
+    bad: Agent[object, str] = Agent(FunctionModel(boom), name='bad')
+    ts = DynamicWorkflowToolset[object](agents=[WorkflowAgent(agent=bad)])
     with pytest.raises(ModelRetry) as exc_info:
         await _run_script(ts, "await bad(task='x')")
     msg = str(exc_info.value)
@@ -981,7 +986,7 @@ async def test_sub_agent_error_does_not_leak_host_internals() -> None:
 
 async def test_sub_agent_output_serialization_error_is_wrapped() -> None:
     leaky = Agent(TestModel(custom_output_args='x'), name='leaky', output_type=_HostInternalValidated)
-    ts = DynamicWorkflowToolset[None](agents=[WorkflowAgent(agent=leaky)])
+    ts = DynamicWorkflowToolset[object](agents=[WorkflowAgent(agent=leaky)])
     with pytest.raises(ModelRetry) as exc_info:
         await _run_script(ts, "await leaky(task='x')")
     msg = str(exc_info.value)
@@ -994,7 +999,7 @@ async def test_sub_agent_output_serialization_error_is_wrapped() -> None:
 
 
 async def test_runaway_loop_stopped_by_duration_cap() -> None:
-    ts = DynamicWorkflowToolset[None](agents=[_wf_agent()], resource_limits={'max_duration_secs': 0.2})
+    ts = DynamicWorkflowToolset[object](agents=[_wf_agent()], resource_limits={'max_duration_secs': 0.2})
     with pytest.raises(ModelRetry, match='Runtime error'):
         await _run_script(ts, 'while True:\n    x = 1')
 
@@ -1020,7 +1025,7 @@ def test_resolve_resource_limits_partial_merges_onto_backstop() -> None:
 
 async def test_unlimited_runs_without_a_backstop() -> None:
     # `'unlimited'` resolves to no limits; a trivial script still completes normally.
-    ts = DynamicWorkflowToolset[None](agents=[_wf_agent()], resource_limits='unlimited')
+    ts = DynamicWorkflowToolset[object](agents=[_wf_agent()], resource_limits='unlimited')
     out = await _run_script(ts, '1 + 1')
     assert out == 2
 
@@ -1029,7 +1034,7 @@ def test_unknown_resource_limit_key_raises_at_construction() -> None:
     # A typo'd key (e.g. plural `max_durations_secs`) must not be silently dropped -- that would
     # quietly disable the duration cap it was meant to set. Validated eagerly, not at the first call.
     with pytest.raises(UserError, match='Unknown `resource_limits` key'):
-        DynamicWorkflowToolset[None](
+        DynamicWorkflowToolset[object](
             agents=[_wf_agent()],
             resource_limits={'max_durations_secs': 5},  # pyright: ignore[reportArgumentType]
         )
@@ -1039,7 +1044,7 @@ def test_unknown_resource_limit_key_raises_at_construction() -> None:
 
 
 async def test_for_run_resets_budget() -> None:
-    ts = DynamicWorkflowToolset[None](agents=[_wf_agent()], max_agent_calls=1)
+    ts = DynamicWorkflowToolset[object](agents=[_wf_agent()], max_agent_calls=1)
     await _run_script(ts, "await sub(task='x')")
     assert ts._call_count == 1  # pyright: ignore[reportPrivateUsage]
     fresh = await ts.for_run(_ctx())
@@ -1050,7 +1055,7 @@ async def test_for_run_tolerates_bad_append_from_earlier_run() -> None:
     # An invalid append that `_reveal_pending` skipped stays in the shared `agents` list; a later
     # run must degrade the same way (skip with a warning), not hard-fail at toolset setup.
     agents = [_wf_agent('b', 'base')]
-    ts = DynamicWorkflowToolset[None](agents=agents)
+    ts = DynamicWorkflowToolset[object](agents=agents)
     ctx = _ctx_with_queue()
     await ts.get_tools(ctx)
     agents.append(WorkflowAgent(agent=_sub_agent(name=None)))
@@ -1069,7 +1074,7 @@ async def test_for_run_tolerates_bad_append_from_earlier_run() -> None:
 async def test_for_run_tolerates_duplicate_append_from_earlier_run() -> None:
     # Same as above for the duplicate-name case: the original keeps the name, the shadow is skipped.
     agents = [_wf_agent('b', 'base')]
-    ts = DynamicWorkflowToolset[None](agents=agents)
+    ts = DynamicWorkflowToolset[object](agents=agents)
     agents.append(_wf_agent('shadow', 'base'))
     with pytest.warns(UserWarning, match='must be unique'):
         fresh = await ts.for_run(_ctx())
@@ -1078,7 +1083,7 @@ async def test_for_run_tolerates_duplicate_append_from_earlier_run() -> None:
 
 async def test_for_run_clones_isolate_reveal_state_and_budget() -> None:
     agents = [_wf_agent('base-out', 'base')]
-    ts = DynamicWorkflowToolset[None](agents=agents, max_agent_calls=2)
+    ts = DynamicWorkflowToolset[object](agents=agents, max_agent_calls=2)
     clone_a = await ts.for_run(_ctx())
     clone_b = await ts.for_run(_ctx())
 
@@ -1136,7 +1141,7 @@ async def test_cancellation_closes_unscheduled_coroutines() -> None:
 async def test_runtime_reveal_announces_and_makes_callable() -> None:
     # Appending to the live `agents` list reveals a sub-agent mid-run.
     agents = [_wf_agent('base-out', 'base')]
-    ts = DynamicWorkflowToolset[None](agents=agents)
+    ts = DynamicWorkflowToolset[object](agents=agents)
     ctx = _ctx_with_queue()
 
     await ts.get_tools(ctx)
@@ -1157,18 +1162,18 @@ async def test_runtime_reveal_announces_and_makes_callable() -> None:
 
 
 async def test_runtime_reveal_disambiguates_type_name_conflicts_against_catalog() -> None:
-    baseline: Agent[None, ScoreValue] = Agent(
+    baseline: Agent[object, ScoreValue] = Agent(
         TestModel(custom_output_args={'value': 1}),
         name='baseline',
         output_type=ScoreValue,
     )
-    revealed: Agent[None, ScoreLabel] = Agent(
+    revealed: Agent[object, ScoreLabel] = Agent(
         TestModel(custom_output_args={'label': 'different'}),
         name='extra',
         output_type=ScoreLabel,
     )
     agents = [WorkflowAgent(agent=baseline)]
-    ts = DynamicWorkflowToolset[None](agents=agents)
+    ts = DynamicWorkflowToolset[object](agents=agents)
     ctx = _ctx_with_queue()
 
     baseline_description = (await ts.get_tools(ctx))['run_workflow'].tool_def.description
@@ -1190,7 +1195,7 @@ async def test_runtime_reveal_disambiguates_type_name_conflicts_against_catalog(
 
 async def test_runtime_reveal_without_pending_queue_warns_and_remains_callable() -> None:
     agents = [_wf_agent('base-out', 'base')]
-    ts = DynamicWorkflowToolset[None](agents=agents)
+    ts = DynamicWorkflowToolset[object](agents=agents)
     ctx = _ctx()
 
     await ts.get_tools(ctx)
@@ -1205,7 +1210,7 @@ async def test_runtime_reveal_without_pending_queue_warns_and_remains_callable()
 
 async def test_reveal_is_idempotent_across_steps() -> None:
     agents = [_wf_agent('b', 'base')]
-    ts = DynamicWorkflowToolset[None](agents=agents)
+    ts = DynamicWorkflowToolset[object](agents=agents)
     ctx = _ctx_with_queue()
 
     agents.append(_wf_agent('e', 'extra'))
@@ -1217,7 +1222,7 @@ async def test_reveal_is_idempotent_across_steps() -> None:
 async def test_reveal_keeps_tool_description_frozen() -> None:
     # The cached prompt prefix must not change when an agent is revealed.
     agents = [_wf_agent('b', 'base')]
-    ts = DynamicWorkflowToolset[None](agents=agents)
+    ts = DynamicWorkflowToolset[object](agents=agents)
     ctx = _ctx_with_queue()
 
     before = (await ts.get_tools(ctx))['run_workflow'].tool_def.description
@@ -1229,7 +1234,7 @@ async def test_reveal_keeps_tool_description_frozen() -> None:
 
 async def test_reveal_skips_invalid_and_duplicate_names() -> None:
     agents = [_wf_agent('b', 'base')]
-    ts = DynamicWorkflowToolset[None](agents=agents)
+    ts = DynamicWorkflowToolset[object](agents=agents)
     ctx = _ctx_with_queue()
     await ts.get_tools(ctx)
 
@@ -1251,7 +1256,7 @@ async def test_reveal_end_to_end_via_agent_run() -> None:
     base = _sub_agent('base-done', 'base')
     extra = _sub_agent('extra-done', 'extra')
     # The host keeps a reference to the capability (here a closure; in practice often via `deps`).
-    workflow = DynamicWorkflow[None](agents=[WorkflowAgent(agent=base)])
+    workflow = DynamicWorkflow[object](agents=[WorkflowAgent(agent=base)])
     saw_announcement: list[bool] = []
 
     def model_fn(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
@@ -1268,7 +1273,7 @@ async def test_reveal_end_to_end_via_agent_run() -> None:
             )
         return ModelResponse(parts=[TextPart(f'final: {returns[-1].content}')])
 
-    agent: Agent[None, str] = Agent(FunctionModel(model_fn), capabilities=[workflow])
+    agent: Agent[object, str] = Agent(FunctionModel(model_fn), capabilities=[workflow])
     result = await agent.run('start')
     assert saw_announcement == [True]  # the model saw the reveal announcement, mid-run
     assert result.output == 'final: extra-done'  # and the revealed sub-agent actually ran
