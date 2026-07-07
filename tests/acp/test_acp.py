@@ -1438,6 +1438,48 @@ class TestCancellation:
 
 
 class TestMultiTurn:
+    async def test_session_history_returns_committed_history_only(self) -> None:
+        adapter: PydanticAIACPAgent[None, str] = PydanticAIACPAgent(Agent(TestModel()))
+        client = FakeClient()
+        session_id = await _start(adapter, client)
+
+        assert adapter.session_history(session_id) == []
+        assert adapter.session_history('no-such-session') is None
+
+        await adapter.prompt(prompt=[acp.text_block('first')], session_id=session_id)
+        first_history = adapter.session_history(session_id)
+        assert first_history is not None
+        assert _user_texts(first_history) == ['first']
+
+        await adapter.prompt(prompt=[acp.text_block('second')], session_id=session_id)
+        second_history = adapter.session_history(session_id)
+        assert second_history is not None
+        assert len(second_history) > len(first_history)
+        assert _user_texts(second_history) == ['first', 'second']
+
+        started = asyncio.Event()
+        release = asyncio.Event()
+        cancel_agent = Agent(TestModel())
+
+        @cancel_agent.tool_plain
+        async def slow_tool() -> str:
+            started.set()
+            await release.wait()
+            return 'done'  # pragma: no cover - cancelled before returning
+
+        cancel_adapter: PydanticAIACPAgent[None, str] = PydanticAIACPAgent(cancel_agent)
+        cancel_session_id = await _start(cancel_adapter, FakeClient())
+        before_cancel = cancel_adapter.session_history(cancel_session_id)
+        turn = asyncio.ensure_future(
+            cancel_adapter.prompt(prompt=[acp.text_block('cancel me')], session_id=cancel_session_id)
+        )
+        await asyncio.wait_for(started.wait(), timeout=5)
+        await cancel_adapter.cancel(session_id=cancel_session_id)
+        response = await asyncio.wait_for(turn, timeout=5)
+
+        assert response.stop_reason == 'cancelled'
+        assert cancel_adapter.session_history(cancel_session_id) == before_cancel
+
     async def test_history_persists_across_turns(self) -> None:
         adapter: PydanticAIACPAgent[None, str] = PydanticAIACPAgent(Agent(TestModel()))
         client = FakeClient()

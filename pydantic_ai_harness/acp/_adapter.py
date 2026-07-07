@@ -30,6 +30,7 @@ from pydantic_ai.messages import (
     FinishReason,
     FunctionToolCallEvent,
     FunctionToolResultEvent,
+    ModelMessage,
     PartDeltaEvent,
     PartStartEvent,
     RetryPromptPart,
@@ -388,6 +389,16 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
             available_models=[schema.ModelInfo(model_id=model, name=model) for model in self._models],
             current_model_id=current_model_id,
         )
+
+    def session_history(self, session_id: str) -> list[ModelMessage] | None:
+        """A snapshot of a resident session's committed model history (what the next turn will send).
+
+        Returns a shallow copy: the list is the caller's to keep, but the `ModelMessage` objects are
+        shared with the live session -- treat them as read-only. `None` when the session is not
+        resident in this adapter.
+        """
+        state = self._sessions.get(session_id)
+        return list(state.history) if state is not None else None
 
     def session_model_state(self, session_id: str) -> schema.SessionModelState | None:
         """The model surface for a resident session -- its advertised set + current selection.
