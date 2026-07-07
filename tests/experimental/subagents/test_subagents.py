@@ -10,7 +10,7 @@ from typing import Any
 import pytest
 from pydantic_ai import Agent
 from pydantic_ai.capabilities import AbstractCapability
-from pydantic_ai.exceptions import UnexpectedModelBehavior, UsageLimitExceeded
+from pydantic_ai.exceptions import ModelAPIError, UnexpectedModelBehavior, UsageLimitExceeded, UserError
 from pydantic_ai.messages import (
     AgentStreamEvent,
     ModelMessage,
@@ -25,7 +25,7 @@ from pydantic_ai.models.test import TestModel
 from pydantic_ai.tools import AgentDepsT, RunContext
 from pydantic_ai.usage import UsageLimits
 
-from pydantic_ai_harness.experimental.subagents import SubAgentLimits, SubAgents, SubAgentToolset
+from pydantic_ai_harness.experimental.subagents import SubAgent, SubAgents, SubAgentToolset
 
 
 @dataclass
@@ -97,6 +97,25 @@ def _delegate_n_then_finish(agent_name: str, n: int) -> FunctionModel:
     return FunctionModel(model_fn)
 
 
+def _delegate_two_then_finish(first: str, second: str) -> FunctionModel:
+    """A parent model that delegates to `first`, then `second`, then replies with text."""
+    calls = {'n': 0}
+
+    def model_fn(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        calls['n'] += 1
+        if calls['n'] == 1:
+            return ModelResponse(
+                parts=[ToolCallPart('delegate_task', {'agent_name': first, 'task': 't'}, tool_call_id='c1')]
+            )
+        if calls['n'] == 2:
+            return ModelResponse(
+                parts=[ToolCallPart('delegate_task', {'agent_name': second, 'task': 't'}, tool_call_id='c2')]
+            )
+        return ModelResponse(parts=[TextPart('all done')])
+
+    return FunctionModel(model_fn)
+
+
 def _delegate_returns(result: Any) -> list[str]:
     """The `delegate_task` tool-return contents from a run result, in order."""
     return [
@@ -112,39 +131,44 @@ class TestConstruction:
         assert SubAgents.get_serialization_name() is None
 
     def test_empty_agents_no_instructions(self) -> None:
-        assert SubAgents[None]().get_instructions() is None
+        assert SubAgents[object]().get_instructions() is None
 
     def test_empty_agents_no_toolset(self) -> None:
-        assert SubAgents[None]().get_toolset() is None
+        assert SubAgents[object]().get_toolset() is None
 
 
 class TestInstructions:
     def test_lists_agent_with_description(self) -> None:
         agent = Agent(TestModel(), name='researcher', description='Researches topics')
-        instructions = SubAgents(agents={'researcher': agent}).get_instructions()
+        instructions = SubAgents(agents=[SubAgent(agent)]).get_instructions()
         assert isinstance(instructions, str)
         assert '- researcher: Researches topics' in instructions
         assert 'delegate_task' in instructions
 
     def test_description_override_wins(self) -> None:
         agent = Agent(TestModel(), name='researcher', description='original')
-        instructions = SubAgents(
-            agents={'researcher': agent}, descriptions={'researcher': 'overridden'}
-        ).get_instructions()
+        instructions = SubAgents(agents=[SubAgent(agent, description='overridden')]).get_instructions()
         assert isinstance(instructions, str)
         assert '- researcher: overridden' in instructions
         assert 'original' not in instructions
 
     def test_name_only_when_no_description(self) -> None:
         agent = Agent(TestModel(), name='plain')
-        instructions = SubAgents(agents={'plain': agent}).get_instructions()
+        instructions = SubAgents(agents=[SubAgent(agent)]).get_instructions()
         assert isinstance(instructions, str)
         assert '- plain' in instructions
         assert '- plain:' not in instructions
 
+    def test_name_override_wins(self) -> None:
+        agent = Agent(TestModel(), name='internal')
+        instructions = SubAgents(agents=[SubAgent(agent, name='public')]).get_instructions()
+        assert isinstance(instructions, str)
+        assert '- public' in instructions
+        assert 'internal' not in instructions
+
     def test_custom_tool_name_in_instructions(self) -> None:
         agent = Agent(TestModel(), name='x')
-        instructions = SubAgents(agents={'x': agent}, tool_name='run_agent').get_instructions()
+        instructions = SubAgents(agents=[SubAgent(agent)], tool_name='run_agent').get_instructions()
         assert isinstance(instructions, str)
         assert 'run_agent' in instructions
 
@@ -152,22 +176,40 @@ class TestInstructions:
 class TestToolset:
     def test_get_toolset_exposes_delegate_tool(self) -> None:
         agent = Agent(TestModel(), name='x')
-        toolset = SubAgents(agents={'x': agent}).get_toolset()
+        toolset = SubAgents(agents=[SubAgent(agent)]).get_toolset()
         assert isinstance(toolset, SubAgentToolset)
         assert 'delegate_task' in toolset.tools
 
     def test_custom_tool_name(self) -> None:
         agent = Agent(TestModel(), name='x')
-        toolset = SubAgents(agents={'x': agent}, tool_name='run_agent').get_toolset()
+        toolset = SubAgents(agents=[SubAgent(agent)], tool_name='run_agent').get_toolset()
         assert isinstance(toolset, SubAgentToolset)
         assert 'run_agent' in toolset.tools
+
+    def test_tool_retries_default_is_resilient(self) -> None:
+        agent = Agent(TestModel(), name='x')
+        toolset = SubAgents(agents=[SubAgent(agent)]).get_toolset()
+        assert isinstance(toolset, SubAgentToolset)
+        assert toolset.tools['delegate_task'].max_retries == 2
+
+    def test_tool_retries_none_inherits_agent_default(self) -> None:
+        agent = Agent(TestModel(), name='x')
+        toolset = SubAgents(agents=[SubAgent(agent)], tool_retries=None).get_toolset()
+        assert isinstance(toolset, SubAgentToolset)
+        assert toolset.tools['delegate_task'].max_retries is None
+
+    def test_tool_retries_configures_delegate_tool(self) -> None:
+        agent = Agent(TestModel(), name='x')
+        toolset = SubAgents(agents=[SubAgent(agent)], tool_retries=3).get_toolset()
+        assert isinstance(toolset, SubAgentToolset)
+        assert toolset.tools['delegate_task'].max_retries == 3
 
 
 class TestDelegation:
     async def test_delegates_and_returns_output(self) -> None:
         worker = Agent(TestModel(custom_output_text='WORKER RESULT'), name='worker')
-        parent: Agent[None, str] = Agent(
-            _delegate_then_finish('worker'), capabilities=[SubAgents(agents={'worker': worker})]
+        parent: Agent[object, str] = Agent(
+            _delegate_then_finish('worker'), capabilities=[SubAgents(agents=[SubAgent(worker)])]
         )
         result = await parent.run('go')
         assert result.output == 'all done'
@@ -179,12 +221,22 @@ class TestDelegation:
         ]
         assert returns == ['WORKER RESULT']
 
+    async def test_delegates_via_name_override(self) -> None:
+        worker = Agent(TestModel(custom_output_text='WORKER RESULT'), name='internal')
+        parent: Agent[object, str] = Agent(
+            _delegate_then_finish('public'),
+            capabilities=[SubAgents(agents=[SubAgent(worker, name='public')])],
+        )
+        result = await parent.run('go')
+        assert result.output == 'all done'
+        assert _delegate_returns(result) == ['WORKER RESULT']
+
     async def test_unknown_agent_triggers_retry_then_succeeds(self) -> None:
         worker = Agent(TestModel(custom_output_text='OK'), name='worker')
         helper = Agent(TestModel(custom_output_text='OK'), name='helper')
-        parent: Agent[None, str] = Agent(
+        parent: Agent[object, str] = Agent(
             _delegate_then_finish('worker', retries_before=1),
-            capabilities=[SubAgents(agents={'worker': worker, 'helper': helper})],
+            capabilities=[SubAgents(agents=[SubAgent(worker), SubAgent(helper)])],
         )
         result = await parent.run('go')
         assert result.output == 'all done'
@@ -215,7 +267,7 @@ class TestDelegation:
         parent: Agent[str, str] = Agent(
             _delegate_then_finish('worker'),
             deps_type=str,
-            capabilities=[SubAgents(agents={'worker': worker})],
+            capabilities=[SubAgents(agents=[SubAgent(worker)])],
         )
 
         @parent.instructions
@@ -239,9 +291,9 @@ class TestDelegation:
             return ModelResponse(parts=[TextPart('sub done')])
 
         worker = Agent(FunctionModel(worker_fn), name='worker')
-        parent: Agent[None, str] = Agent(
+        parent: Agent[object, str] = Agent(
             _delegate_then_finish('worker'),
-            capabilities=[SubAgents(agents={'worker': worker}, inherit_tools=True)],
+            capabilities=[SubAgents(agents=[SubAgent(worker)], inherit_tools=True)],
         )
 
         @parent.tool_plain
@@ -253,12 +305,85 @@ class TestDelegation:
         assert 'parent_tool' in offered  # the parent's tool is inherited by the sub-agent
         assert 'delegate_task' not in offered  # the delegate tool is filtered out, so no recursion
 
-    async def test_shared_capabilities_applied_to_subagent(self) -> None:
-        cap: _RecordingCapability[None] = _RecordingCapability()
-        worker = Agent(TestModel(custom_output_text='W'), name='worker')
-        parent: Agent[None, str] = Agent(
+    async def test_directly_registered_toolset_still_filters_delegate_tool(self) -> None:
+        """`SubAgentToolset` used without the `SubAgents` capability must not recurse.
+
+        Registered directly in `Agent(toolsets=[...])` it is not wrapped in
+        `CapabilityOwnedToolset`, so only the name filter keeps `delegate_task`
+        out of inherited toolsets.
+        """
+        offered: list[str] = []
+
+        def worker_fn(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            offered.extend(tool.name for tool in info.function_tools)
+            return ModelResponse(parts=[TextPart('sub done')])
+
+        worker = Agent(FunctionModel(worker_fn), name='worker')
+        toolset: SubAgentToolset[object] = SubAgentToolset(
+            agents={'worker': SubAgent(worker)},
+            forward_usage=True,
+            inherit_tools=True,
+            shared_capabilities=[],
+            event_stream_handler=None,
+            tool_name='delegate_task',
+            tool_retries=1,
+            contain_errors=False,
+            call_counts={},
+        )
+        parent: Agent[object, str] = Agent(_delegate_then_finish('worker'), toolsets=[toolset])
+
+        @parent.tool_plain
+        def parent_tool() -> str:  # pyright: ignore[reportUnusedFunction]
+            return 'PT'  # pragma: no cover - listed but not called in this test
+
+        result = await parent.run('go')
+        assert result.output == 'all done'
+        assert 'parent_tool' in offered  # the parent's own tool is still inherited
+        assert 'delegate_task' not in offered  # the delegate tool is filtered by name
+
+    async def test_inherit_tools_excludes_capability_contributed_tools(self) -> None:
+        """Tools contributed by the parent's capabilities stay out of sub-agent runs.
+
+        They are bound to capability instances registered in the parent run; sharing
+        them is `shared_capabilities`' job (see the `_inherited_toolsets` docstring).
+        """
+        from pydantic_ai.toolsets import FunctionToolset
+
+        @dataclass
+        class _ToolCapability(AbstractCapability[object]):
+            def get_toolset(self) -> Any:
+                def cap_tool() -> str:
+                    return 'CT'  # pragma: no cover - never offered to the sub-agent
+
+                return FunctionToolset[object](tools=[cap_tool])
+
+        offered: list[str] = []
+
+        def worker_fn(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            offered.extend(tool.name for tool in info.function_tools)
+            return ModelResponse(parts=[TextPart('sub done')])
+
+        worker = Agent(FunctionModel(worker_fn), name='worker')
+        parent: Agent[object, str] = Agent(
             _delegate_then_finish('worker'),
-            capabilities=[SubAgents(agents={'worker': worker}, shared_capabilities=[cap])],
+            capabilities=[SubAgents(agents=[SubAgent(worker)], inherit_tools=True), _ToolCapability()],
+        )
+
+        @parent.tool_plain
+        def parent_tool() -> str:  # pyright: ignore[reportUnusedFunction]
+            return 'PT'  # pragma: no cover - listed but not called in this test
+
+        result = await parent.run('go')
+        assert result.output == 'all done'
+        assert 'parent_tool' in offered
+        assert 'cap_tool' not in offered
+
+    async def test_shared_capabilities_applied_to_subagent(self) -> None:
+        cap: _RecordingCapability[object] = _RecordingCapability()
+        worker = Agent(TestModel(custom_output_text='W'), name='worker')
+        parent: Agent[object, str] = Agent(
+            _delegate_then_finish('worker'),
+            capabilities=[SubAgents(agents=[SubAgent(worker)], shared_capabilities=[cap])],
         )
         result = await parent.run('go')
         assert result.output == 'all done'
@@ -267,14 +392,14 @@ class TestDelegation:
     async def test_event_stream_handler_forwarded_to_subagent(self) -> None:
         events: list[str] = []
 
-        async def handler(ctx: RunContext[None], stream: AsyncIterable[AgentStreamEvent]) -> None:
+        async def handler(ctx: RunContext[object], stream: AsyncIterable[AgentStreamEvent]) -> None:
             async for event in stream:
                 events.append(type(event).__name__)
 
         worker = Agent(TestModel(custom_output_text='W'), name='worker')
-        parent: Agent[None, str] = Agent(
+        parent: Agent[object, str] = Agent(
             _delegate_then_finish('worker'),
-            capabilities=[SubAgents(agents={'worker': worker}, event_stream_handler=handler)],
+            capabilities=[SubAgents(agents=[SubAgent(worker)], event_stream_handler=handler)],
         )
         result = await parent.run('go')
         assert result.output == 'all done'
@@ -285,9 +410,9 @@ class TestDelegation:
             raise UsageLimitExceeded('limit hit')
 
         limited = Agent(FunctionModel(boom), name='limited')
-        parent: Agent[None, str] = Agent(
+        parent: Agent[object, str] = Agent(
             _delegate_then_finish('limited'),
-            capabilities=[SubAgents(agents={'limited': limited})],
+            capabilities=[SubAgents(agents=[SubAgent(limited)])],
         )
         # Hard limits are not converted to a retry -- they propagate to stop the run.
         with pytest.raises(UsageLimitExceeded):
@@ -314,9 +439,9 @@ class TestDelegation:
                 )
             return ModelResponse(parts=[TextPart('all done')])
 
-        parent: Agent[None, str] = Agent(
+        parent: Agent[object, str] = Agent(
             FunctionModel(parent_fn),
-            capabilities=[SubAgents(agents={'boomer': boomer, 'worker': worker})],
+            capabilities=[SubAgents(agents=[SubAgent(boomer), SubAgent(worker)])],
         )
         result = await parent.run('go')
         assert result.output == 'all done'
@@ -343,7 +468,7 @@ class TestDelegation:
         parent: Agent[str, str] = Agent(
             _delegate_then_finish('worker'),
             deps_type=str,
-            capabilities=[SubAgents(agents={'worker': worker}, forward_usage=False)],
+            capabilities=[SubAgents(agents=[SubAgent(worker)], forward_usage=False)],
         )
 
         @parent.instructions
@@ -365,22 +490,17 @@ class TestRunControls:
         worker = Agent(TestModel(custom_output_text='W'), name='worker')
 
         @worker.instructions
-        def _capture(ctx: RunContext[None]) -> str:  # pyright: ignore[reportUnusedFunction]
+        def _capture(ctx: RunContext[object]) -> str:  # pyright: ignore[reportUnusedFunction]
             captured['usage_is_parent'] = ctx.usage is parent_usage.get('usage')
             return ''
 
-        parent: Agent[None, str] = Agent(
+        parent: Agent[object, str] = Agent(
             _delegate_then_finish('worker'),
-            capabilities=[
-                SubAgents(
-                    agents={'worker': worker},
-                    limits={'worker': SubAgentLimits(usage_limits=UsageLimits(request_limit=5))},
-                )
-            ],
+            capabilities=[SubAgents(agents=[SubAgent(worker, usage_limits=UsageLimits(request_limit=5))])],
         )
 
         @parent.instructions
-        def _remember_usage(ctx: RunContext[None]) -> str:  # pyright: ignore[reportUnusedFunction]
+        def _remember_usage(ctx: RunContext[object]) -> str:  # pyright: ignore[reportUnusedFunction]
             parent_usage['usage'] = ctx.usage
             return ''
 
@@ -404,14 +524,9 @@ class TestRunControls:
         def noop() -> str:  # pyright: ignore[reportUnusedFunction]
             return 'x'
 
-        parent: Agent[None, str] = Agent(
+        parent: Agent[object, str] = Agent(
             _delegate_then_finish('worker'),
-            capabilities=[
-                SubAgents(
-                    agents={'worker': worker},
-                    limits={'worker': SubAgentLimits(usage_limits=UsageLimits(request_limit=1))},
-                )
-            ],
+            capabilities=[SubAgents(agents=[SubAgent(worker, usage_limits=UsageLimits(request_limit=1))])],
         )
         result = await parent.run('go')
         assert result.output == 'all done'
@@ -424,9 +539,9 @@ class TestRunControls:
         # No per-child limit -> the child shares accounting and a parent-level usage
         # limit remains a hard stop for the whole tree.
         worker = Agent(TestModel(custom_output_text='W'), name='worker')
-        parent: Agent[None, str] = Agent(
+        parent: Agent[object, str] = Agent(
             _delegate_then_finish('worker'),
-            capabilities=[SubAgents(agents={'worker': worker})],
+            capabilities=[SubAgents(agents=[SubAgent(worker)])],
         )
         with pytest.raises(UsageLimitExceeded):
             await parent.run('go', usage_limits=UsageLimits(request_limit=1))
@@ -437,14 +552,9 @@ class TestRunControls:
             return ModelResponse(parts=[TextPart('late')])  # pragma: no cover - cancelled by the timeout
 
         worker = Agent(FunctionModel(slow_fn), name='worker')
-        parent: Agent[None, str] = Agent(
+        parent: Agent[object, str] = Agent(
             _delegate_then_finish('worker'),
-            capabilities=[
-                SubAgents(
-                    agents={'worker': worker},
-                    limits={'worker': SubAgentLimits(timeout_seconds=0.01)},
-                )
-            ],
+            capabilities=[SubAgents(agents=[SubAgent(worker, timeout_seconds=0.01)])],
         )
         result = await parent.run('go')
         assert result.output == 'all done'
@@ -460,9 +570,9 @@ class TestRunControls:
             return ModelResponse(parts=[TextPart('W')])
 
         worker = Agent(FunctionModel(worker_fn), name='worker')
-        parent: Agent[None, str] = Agent(
+        parent: Agent[object, str] = Agent(
             _delegate_n_then_finish('worker', 2),
-            capabilities=[SubAgents(agents={'worker': worker}, limits={'worker': SubAgentLimits(max_calls=1)})],
+            capabilities=[SubAgents(agents=[SubAgent(worker, max_calls=1)])],
         )
         result = await parent.run('go')
         assert result.output == 'all done'
@@ -474,7 +584,7 @@ class TestRunControls:
 
     async def test_call_counts_reset_between_runs(self) -> None:
         worker = Agent(TestModel(custom_output_text='W'), name='worker')
-        capability = SubAgents(agents={'worker': worker}, limits={'worker': SubAgentLimits(max_calls=1)})
+        capability = SubAgents(agents=[SubAgent(worker, max_calls=1)])
         # Two parents share the one capability (and its run-scoped count store); each
         # gets a fresh delegate-once model so the second run actually delegates again.
         first = await Agent(_delegate_then_finish('worker'), capabilities=[capability]).run('go')
@@ -490,14 +600,9 @@ class TestRunControls:
             raise UnexpectedModelBehavior('kaboom')
 
         boomer = Agent(FunctionModel(boom), name='boomer')
-        parent: Agent[None, str] = Agent(
+        parent: Agent[object, str] = Agent(
             _delegate_then_finish('boomer'),
-            capabilities=[
-                SubAgents(
-                    agents={'boomer': boomer},
-                    limits={'boomer': SubAgentLimits(on_failure='steer: use existing evidence')},
-                )
-            ],
+            capabilities=[SubAgents(agents=[SubAgent(boomer, on_failure='steer: use existing evidence')])],
         )
         result = await parent.run('go')
         assert result.output == 'all done'
@@ -513,14 +618,9 @@ class TestRunControls:
 
     async def test_on_failure_overrides_default_steering(self) -> None:
         worker = Agent(TestModel(custom_output_text='W'), name='worker')
-        parent: Agent[None, str] = Agent(
+        parent: Agent[object, str] = Agent(
             _delegate_n_then_finish('worker', 2),
-            capabilities=[
-                SubAgents(
-                    agents={'worker': worker},
-                    limits={'worker': SubAgentLimits(max_calls=1, on_failure='custom budget note')},
-                )
-            ],
+            capabilities=[SubAgents(agents=[SubAgent(worker, max_calls=1, on_failure='custom budget note')])],
         )
         result = await parent.run('go')
         assert result.output == 'all done'
@@ -528,11 +628,11 @@ class TestRunControls:
         assert returns[1] == 'custom budget note'
 
     async def test_limits_without_budget_run_normally(self) -> None:
-        # A limits entry with only an unrelated field set must not alter the happy path.
+        # A SubAgent with only an unrelated control set must not alter the happy path.
         worker = Agent(TestModel(custom_output_text='W'), name='worker')
-        parent: Agent[None, str] = Agent(
+        parent: Agent[object, str] = Agent(
             _delegate_then_finish('worker'),
-            capabilities=[SubAgents(agents={'worker': worker}, limits={'worker': SubAgentLimits(timeout_seconds=30)})],
+            capabilities=[SubAgents(agents=[SubAgent(worker, timeout_seconds=30)])],
         )
         result = await parent.run('go')
         assert _delegate_returns(result) == ['W']
@@ -561,9 +661,9 @@ class TestRunControls:
                 )
             return ModelResponse(parts=[TextPart('all done')])
 
-        parent: Agent[None, str] = Agent(
+        parent: Agent[object, str] = Agent(
             FunctionModel(parent_fn),
-            capabilities=[SubAgents(agents={'worker': worker}, limits={'worker': SubAgentLimits(max_calls=1)})],
+            capabilities=[SubAgents(agents=[SubAgent(worker, max_calls=1)])],
         )
         result = await parent.run('go')
         assert result.output == 'all done'
@@ -575,13 +675,116 @@ class TestRunControls:
         assert any("Delegate budget for 'worker' is exhausted" in r for r in returns)
 
 
-class TestLimitsValidation:
-    def test_limits_key_not_in_agents_raises(self) -> None:
-        worker = Agent(TestModel(), name='worker')
-        with pytest.raises(ValueError, match='names sub-agents not in `agents`: ghost'):
-            SubAgents(agents={'worker': worker}, limits={'ghost': SubAgentLimits(max_calls=1)})
+def _crash(message: str = 'provider down') -> FunctionModel:
+    """A sub-agent model that raises a `ModelAPIError` (an unexpected crash, not a soft failure)."""
 
-    def test_limits_subset_of_agents_is_accepted(self) -> None:
-        worker = Agent(TestModel(), name='worker')
-        capability = SubAgents(agents={'worker': worker}, limits={'worker': SubAgentLimits(max_calls=1)})
-        assert 'worker' in capability.limits
+    def boom(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        raise ModelAPIError('m', message)
+
+    return FunctionModel(boom)
+
+
+def _delegate_retries(result: Any) -> list[str]:
+    """The `delegate_task` retry-prompt contents from a run result, in order."""
+    return [
+        str(part.content)
+        for message in result.all_messages()
+        for part in message.parts
+        if isinstance(part, RetryPromptPart) and part.tool_name == 'delegate_task'
+    ]
+
+
+class TestContainErrors:
+    """`contain_errors`: an unexpected sub-agent crash becomes a bounded retry instead of aborting the parent."""
+
+    async def test_crash_propagates_by_default(self) -> None:
+        boomer = Agent(_crash(), name='boomer')
+        parent: Agent[object, str] = Agent(
+            _delegate_then_finish('boomer'),
+            capabilities=[SubAgents(agents=[SubAgent(boomer)])],
+        )
+        with pytest.raises(ModelAPIError):
+            await parent.run('go')
+
+    async def test_contained_crash_becomes_model_retry(self) -> None:
+        boomer = Agent(_crash(), name='boomer')
+        worker = Agent(TestModel(custom_output_text='OK'), name='worker')
+        parent: Agent[object, str] = Agent(
+            _delegate_two_then_finish('boomer', 'worker'),
+            capabilities=[SubAgents(agents=[SubAgent(boomer, contain_errors=True), SubAgent(worker)])],
+        )
+        result = await parent.run('go')
+        assert result.output == 'all done'
+        retries = _delegate_retries(result)
+        assert any('crashed: ModelAPIError' in r and 'provider down' in r for r in retries)
+
+    async def test_capability_default_contains_unset_delegate(self) -> None:
+        boomer = Agent(_crash(), name='boomer')
+        worker = Agent(TestModel(custom_output_text='OK'), name='worker')
+        parent: Agent[object, str] = Agent(
+            _delegate_two_then_finish('boomer', 'worker'),
+            capabilities=[SubAgents(agents=[SubAgent(boomer), SubAgent(worker)], contain_errors=True)],
+        )
+        result = await parent.run('go')
+        assert result.output == 'all done'
+        assert any('crashed' in r for r in _delegate_retries(result))
+
+    async def test_delegate_override_beats_capability_default(self) -> None:
+        boomer = Agent(_crash(), name='boomer')
+        parent: Agent[object, str] = Agent(
+            _delegate_then_finish('boomer'),
+            capabilities=[SubAgents(agents=[SubAgent(boomer, contain_errors=False)], contain_errors=True)],
+        )
+        with pytest.raises(ModelAPIError):
+            await parent.run('go')
+
+    async def test_user_error_always_propagates(self) -> None:
+        def boom(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            raise UserError('bad setup')
+
+        boomer = Agent(FunctionModel(boom), name='boomer')
+        parent: Agent[object, str] = Agent(
+            _delegate_then_finish('boomer'),
+            capabilities=[SubAgents(agents=[SubAgent(boomer, contain_errors=True)])],
+        )
+        # A setup bug must reach the developer even under containment, not become a retry.
+        with pytest.raises(UserError):
+            await parent.run('go')
+
+    async def test_on_failure_does_not_soften_contained_crash(self) -> None:
+        boomer = Agent(_crash(), name='boomer')
+        worker = Agent(TestModel(custom_output_text='OK'), name='worker')
+        parent: Agent[object, str] = Agent(
+            _delegate_two_then_finish('boomer', 'worker'),
+            capabilities=[
+                SubAgents(agents=[SubAgent(boomer, contain_errors=True, on_failure='soft note'), SubAgent(worker)])
+            ],
+        )
+        result = await parent.run('go')
+        # A crash stays loud: it is a retry, and on_failure's soft message never becomes a delegate return.
+        assert any('crashed' in r for r in _delegate_retries(result))
+        assert 'soft note' not in _delegate_returns(result)
+
+
+class TestNameValidation:
+    def test_duplicate_name_raises(self) -> None:
+        first = Agent(TestModel(), name='dup')
+        second = Agent(TestModel(), name='dup')
+        with pytest.raises(ValueError, match="Duplicate sub-agent name 'dup'"):
+            SubAgents(agents=[SubAgent(first), SubAgent(second)])
+
+    def test_duplicate_via_name_override_raises(self) -> None:
+        first = Agent(TestModel(), name='a')
+        second = Agent(TestModel(), name='b')
+        with pytest.raises(ValueError, match="Duplicate sub-agent name 'a'"):
+            SubAgents(agents=[SubAgent(first), SubAgent(second, name='a')])
+
+    def test_missing_name_raises(self) -> None:
+        nameless = Agent(TestModel())
+        with pytest.raises(ValueError, match='Sub-agent has no name'):
+            SubAgents(agents=[SubAgent(nameless)])
+
+    def test_name_override_satisfies_missing_agent_name(self) -> None:
+        nameless = Agent(TestModel())
+        capability = SubAgents(agents=[SubAgent(nameless, name='worker')])
+        assert 'worker' in capability._by_name

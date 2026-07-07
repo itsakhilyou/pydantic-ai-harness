@@ -31,6 +31,7 @@ provider rejects an orphaned pair. The zero-LLM strategies never call a model.
 
 | Capability | Cost | What it does | Reach for it when |
 |---|---|---|---|
+| `ClampOversizedMessages` | zero-LLM | Head/tail-truncates a single oversized part (response text, tool-call args) | One runaway generation blew past the context cap and no other strategy can reach it |
 | `SlidingWindow` | zero-LLM | Drops the oldest whole messages down to a tail | You only need the recent turns and can discard old context entirely |
 | `ClearToolResults` | zero-LLM | Blanks the content of old tool *results* in place, keeping the last `keep_pairs` | Tool outputs dominate context and can be re-fetched on demand (the cheap first tier) |
 | `DeduplicateFileReads` | zero-LLM | Blanks every file read superseded by a newer read of the same file | The agent re-reads files and only the latest version matters |
@@ -44,6 +45,64 @@ Every size-based strategy triggers on `max_messages` and/or `max_tokens` (estima
 use a ~4-chars-per-token heuristic by default; pass a `tokenizer` callable (e.g. `tiktoken`) for
 accuracy. `DeduplicateFileReads` runs on every request when no trigger is set (it is cheap and
 near-lossless). `TieredCompaction` triggers and stops on a single `target_tokens` budget.
+`ClampOversizedMessages` triggers per *part* (`max_part_tokens` / `max_part_chars`), not on the
+whole history -- the failure it targets is one oversized part, not a large total.
+
+## `ClampOversizedMessages`: surviving a runaway generation
+
+A single model response of repeated whitespace, or a single tool call with a giant payload, can
+produce one part so large the *next* request exceeds the provider's context cap. None of the other
+strategies can reach it: `SlidingWindow` drops the oldest messages but the offender is the newest;
+`ClearToolResults` only touches tool *results*; `LimitWarner` never edits history; and feeding the
+history to `SummarizingCompaction` hits the same cap.
+
+`ClampOversizedMessages` truncates the offending part in place, keeping a head slice and a tail slice
+with a `[clamped: removed N of M characters]` marker between them. Degenerate generations are
+low-entropy repetition, so a head/tail slice loses little.
+
+```python
+from pydantic_ai import Agent
+from pydantic_ai_harness.experimental.compaction import ClampOversizedMessages
+
+agent = Agent(
+    'openai:gpt-4o',
+    capabilities=[ClampOversizedMessages(max_part_tokens=50_000, keep_head_chars=2_000, keep_tail_chars=2_000)],
+)
+```
+
+A part is clamped only when it is oversized *and* the clamp actually shrinks it, so keep
+`keep_head_chars + keep_tail_chars` well below your per-part threshold.
+
+It clamps two kinds of part inside each `ModelResponse`:
+
+- **Response text** (`TextPart`) -- the critical case, a runaway model-response text part.
+- **Tool-call args** (`ToolCallPart`), when `clamp_tool_call_args=True` (default) -- the same failure
+  shape for a giant payload (e.g. a runaway `write_plan`). The args are replaced with a small JSON
+  object `{"_clamped": "<head>...<tail>"}` so they stay valid function arguments; the original call
+  already executed, so this only shrinks the history copy. Set `clamp_tool_call_args=False` to clamp
+  response text only.
+
+Request-side parts (user prompts, tool *returns*, system prompts) are deliberately out of scope:
+user input should not be silently rewritten, and oversized tool returns are the job of
+`ClearToolResults`.
+
+Use it as the first tier of `TieredCompaction`, before `ClearToolResults`:
+
+```python
+from pydantic_ai_harness.experimental.compaction import (
+    ClampOversizedMessages,
+    ClearToolResults,
+    TieredCompaction,
+)
+
+TieredCompaction(
+    tiers=[
+        ClampOversizedMessages(max_part_tokens=50_000),
+        ClearToolResults(max_tokens=1, keep_pairs=3),
+    ],
+    target_tokens=120_000,
+)
+```
 
 ## Cost: why summarization is the last resort
 
@@ -116,6 +175,32 @@ def my_file_key(call: ToolCallPart) -> str | None:
     args = call.args
     return args.get('path') if isinstance(args, dict) else None
 ```
+
+## Tracing
+
+When core instrumentation is active (the `Instrumentation` capability, `agent.instrument`, or
+`Agent.instrument_all()`), each strategy emits a `compact_messages` span on the run's tracer the
+moment it actually compacts -- that is, in `before_model_request`, once the strategy's threshold is
+exceeded (`ClampOversizedMessages` emits only when a part is actually clamped). `TieredCompaction`
+emits a single span for the whole escalation rather than one per tier, because it drives each tier's
+`compact` directly. Without instrumentation the tracer is a no-op, so the span adds no overhead.
+
+The span name is the static `compact_messages`; the strategy is an attribute, not part of the name,
+to keep span cardinality low. Attributes:
+
+| Attribute | Type | Meaning |
+|---|---|---|
+| `gen_ai.conversation.compacted` | bool | Always `true`; the OpenTelemetry GenAI convention's flag for a compacted context |
+| `compaction.strategy` | str | Strategy class name (e.g. `SlidingWindow`, `SummarizingCompaction`) |
+| `compaction.messages_before` | int | Message count before compaction |
+| `compaction.messages_after` | int | Message count after compaction |
+| `compaction.tokens_before` | int | Estimated token count before compaction |
+| `compaction.tokens_after` | int | Estimated token count after compaction |
+
+`gen_ai.conversation.compacted` is the GenAI semantic convention's flag; the rest is
+harness-specific. Token counts use the strategy's `tokenizer` when set, otherwise the
+~4-chars-per-token heuristic.
+Raw message content is not recorded.
 
 ## Out of scope
 

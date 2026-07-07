@@ -8,6 +8,7 @@ loaded by the project (no extra dev dependency needed).
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any, TypeVar
 
 import pytest
@@ -19,11 +20,14 @@ from pydantic_ai import (
     ToolDefinition,
 )
 from pydantic_ai.exceptions import ModelRetry
+from pydantic_ai.messages import ToolCallPart
 from pydantic_ai.models.test import TestModel
+from pydantic_ai.tool_manager import ParallelExecutionMode
 from pydantic_ai.toolsets.abstract import ToolsetTool
 from pydantic_ai.toolsets.function import FunctionToolset
 from pydantic_ai.usage import RunUsage
 from pydantic_core import SchemaValidator, core_schema
+from pydantic_monty import NOT_HANDLED, MountDir, OSAccess, OsFunction
 from typing_extensions import TypedDict
 
 from pydantic_ai_harness import CodeMode
@@ -31,6 +35,7 @@ from pydantic_ai_harness.code_mode import CodeModeToolset
 from pydantic_ai_harness.code_mode._toolset import (  # pyright: ignore[reportPrivateUsage]
     _SEARCH_TOOLS_MODIFIER,
     _TOOL_SEARCH_ADDENDUM,
+    _global_mode_is_sequential,
     _PrintCapture,
     _sanitize_tool_name,
 )
@@ -58,6 +63,8 @@ def build_run_context(deps: T, run_step: int = 0) -> RunContext[T]:
         prompt=None,
         messages=[],
         run_step=run_step,
+        # A live queue so `ctx.enqueue` works in tests; a real run wires this to the run's queue.
+        pending_messages=[],
     )
 
 
@@ -149,7 +156,7 @@ def _make_address_tool_def(name: str, description: str, addr_field: str) -> Tool
     )
 
 
-class _StaticToolset(AbstractToolset[None]):
+class _StaticToolset(AbstractToolset[object]):
     """A minimal `AbstractToolset` that returns a fixed set of `ToolDefinition`s.
 
     Mirrors the `MockToolsetWithInstructions` pattern from `pydantic_ai/tests/test_toolsets.py`.
@@ -165,7 +172,7 @@ class _StaticToolset(AbstractToolset[None]):
     def id(self) -> str | None:
         return None  # pragma: no cover - required by AbstractToolset, never read in tests
 
-    async def get_tools(self, ctx: RunContext[None]) -> dict[str, ToolsetTool[None]]:
+    async def get_tools(self, ctx: RunContext[object]) -> dict[str, ToolsetTool[object]]:
         return {
             td.name: ToolsetTool(
                 toolset=self,
@@ -180,8 +187,8 @@ class _StaticToolset(AbstractToolset[None]):
         self,
         name: str,
         tool_args: dict[str, Any],
-        ctx: RunContext[None],
-        tool: ToolsetTool[None],
+        ctx: RunContext[object],
+        tool: ToolsetTool[object],
     ) -> Any:
         # Tests always set up `_results` for every tool name they invoke; the
         # fallback exists only to keep the abstract contract satisfied.
@@ -191,8 +198,8 @@ class _StaticToolset(AbstractToolset[None]):
 _ANY_VALIDATOR = SchemaValidator(schema=core_schema.any_schema())
 
 
-def _build_function_toolset(*tools: Any) -> FunctionToolset[None]:
-    return FunctionToolset[None](tools=[Tool(t) for t in tools])
+def _build_function_toolset(*tools: Any) -> FunctionToolset[object]:
+    return FunctionToolset[object](tools=[Tool(t) for t in tools])
 
 
 # ---------------------------------------------------------------------------
@@ -215,7 +222,7 @@ class TestCodeMode:
     async def test_default_wraps_all_tools_behind_run_code(self) -> None:
         """`CodeMode()` exposes only `run_code` and renders every tool as an `async def`."""
         toolset = _build_function_toolset(add, greet)
-        wrapper = CodeMode[None]().get_wrapper_toolset(toolset)
+        wrapper = CodeMode[object]().get_wrapper_toolset(toolset)
         assert isinstance(wrapper, CodeModeToolset)
 
         tools = await wrapper.get_tools(build_run_context(None))
@@ -232,7 +239,7 @@ class TestCodeMode:
     async def test_run_code_executes_call_through_monty(self) -> None:
         """End-to-end: `run_code` runs Python in Monty and dispatches to a sync wrapped tool."""
         toolset = _build_function_toolset(add)
-        wrapper = CodeMode[None]().get_wrapper_toolset(toolset)
+        wrapper = CodeMode[object]().get_wrapper_toolset(toolset)
         assert isinstance(wrapper, CodeModeToolset)
 
         ctx = await build_ctx(None, wrapper)
@@ -261,7 +268,7 @@ class TestCodeMode:
         Exercises (a) string return values flowing back through the await/dispatch loop,
         (b) default-argument handling -- the LLM-side code only passes `name`, not `greeting`.
         """
-        wrapper = CodeMode[None]().get_wrapper_toolset(_build_function_toolset(greet))
+        wrapper = CodeMode[object]().get_wrapper_toolset(_build_function_toolset(greet))
         assert isinstance(wrapper, CodeModeToolset)
         ctx = await build_ctx(None, wrapper)
         tools = await wrapper.get_tools(ctx)
@@ -275,7 +282,7 @@ class TestCodeMode:
 
     async def test_run_code_can_chain_multiple_tool_calls_in_one_snippet(self) -> None:
         """A realistic LLM snippet that calls two tools in one `run_code` invocation."""
-        wrapper = CodeMode[None]().get_wrapper_toolset(_build_function_toolset(add, greet))
+        wrapper = CodeMode[object]().get_wrapper_toolset(_build_function_toolset(add, greet))
         assert isinstance(wrapper, CodeModeToolset)
         ctx = await build_ctx(None, wrapper)
         tools = await wrapper.get_tools(ctx)
@@ -285,7 +292,7 @@ class TestCodeMode:
 
     async def test_run_code_parallel_tool_calls_via_gather(self) -> None:
         """Concurrent tool calls via asyncio.gather work and record all nested metadata."""
-        wrapper = CodeMode[None]().get_wrapper_toolset(_build_function_toolset(add))
+        wrapper = CodeMode[object]().get_wrapper_toolset(_build_function_toolset(add))
         assert isinstance(wrapper, CodeModeToolset)
         ctx = await build_ctx(None, wrapper)
         tools = await wrapper.get_tools(ctx)
@@ -306,7 +313,7 @@ class TestCodeMode:
             """Always fails."""
             raise ModelRetry('not allowed')
 
-        wrapper = CodeMode[None]().get_wrapper_toolset(_build_function_toolset(add, flaky))
+        wrapper = CodeMode[object]().get_wrapper_toolset(_build_function_toolset(add, flaky))
         assert isinstance(wrapper, CodeModeToolset)
         ctx = await build_ctx(None, wrapper)
         tools = await wrapper.get_tools(ctx)
@@ -325,7 +332,7 @@ class TestCodeMode:
             """Return a fake fixed timestamp."""
             return '2026-04-08T12:00:00Z'
 
-        wrapper = CodeMode[None]().get_wrapper_toolset(_build_function_toolset(now_iso))
+        wrapper = CodeMode[object]().get_wrapper_toolset(_build_function_toolset(now_iso))
         assert isinstance(wrapper, CodeModeToolset)
         ctx = await build_ctx(None, wrapper)
         tools = await wrapper.get_tools(ctx)
@@ -346,7 +353,7 @@ class TestCodeMode:
 
     async def test_run_code_state_persists_between_calls(self) -> None:
         """REPL state must survive across consecutive `run_code` calls within a run."""
-        wrapper = CodeMode[None]().get_wrapper_toolset(_build_function_toolset(add))
+        wrapper = CodeMode[object]().get_wrapper_toolset(_build_function_toolset(add))
         assert isinstance(wrapper, CodeModeToolset)
 
         ctx = await build_ctx(None, wrapper)
@@ -360,7 +367,7 @@ class TestCodeMode:
 
     async def test_run_code_restart_resets_repl_state(self) -> None:
         """Passing `restart=True` clears any previously-set names in the sandbox."""
-        wrapper = CodeMode[None]().get_wrapper_toolset(_build_function_toolset(add))
+        wrapper = CodeMode[object]().get_wrapper_toolset(_build_function_toolset(add))
         assert isinstance(wrapper, CodeModeToolset)
 
         ctx = await build_ctx(None, wrapper)
@@ -375,7 +382,7 @@ class TestCodeMode:
 
     async def test_run_code_returns_last_expression_value(self) -> None:
         """When the last statement is an expression, its value is returned in `result`."""
-        wrapper = CodeMode[None]().get_wrapper_toolset(_build_function_toolset(add))
+        wrapper = CodeMode[object]().get_wrapper_toolset(_build_function_toolset(add))
         assert isinstance(wrapper, CodeModeToolset)
         ctx = await build_ctx(None, wrapper)
         tools = await wrapper.get_tools(ctx)
@@ -385,7 +392,7 @@ class TestCodeMode:
 
     async def test_run_code_syntax_error_becomes_model_retry(self) -> None:
         """A Python syntax error is surfaced as `ModelRetry` so the model can fix it."""
-        wrapper = CodeMode[None]().get_wrapper_toolset(_build_function_toolset(add))
+        wrapper = CodeMode[object]().get_wrapper_toolset(_build_function_toolset(add))
         assert isinstance(wrapper, CodeModeToolset)
         ctx = await build_ctx(None, wrapper)
         tools = await wrapper.get_tools(ctx)
@@ -409,7 +416,7 @@ class TestCodeMode:
         On a fresh REPL (first call or after restart), the code is type-checked
         before execution using Monty's stateless type checker.
         """
-        wrapper = CodeMode[None]().get_wrapper_toolset(_build_function_toolset(add))
+        wrapper = CodeMode[object]().get_wrapper_toolset(_build_function_toolset(add))
         assert isinstance(wrapper, CodeModeToolset)
         ctx = await build_ctx(None, wrapper)
         tools = await wrapper.get_tools(ctx)
@@ -428,7 +435,7 @@ class TestCodeMode:
 
     async def test_for_run_returns_fresh_instance_with_cleared_repl(self) -> None:
         """`for_run` must hand back a new toolset instance -- concurrent runs cannot share REPL state."""
-        wrapper = CodeMode[None]().get_wrapper_toolset(_build_function_toolset(add))
+        wrapper = CodeMode[object]().get_wrapper_toolset(_build_function_toolset(add))
         assert isinstance(wrapper, CodeModeToolset)
         ctx = await build_ctx(None, wrapper)
 
@@ -444,7 +451,7 @@ class TestCodeMode:
 
     async def test_for_run_step_short_circuits_when_wrapped_unchanged(self) -> None:
         """If the inner toolset doesn't change between steps, `for_run_step` returns `self` unchanged."""
-        wrapper = CodeMode[None]().get_wrapper_toolset(_build_function_toolset(add))
+        wrapper = CodeMode[object]().get_wrapper_toolset(_build_function_toolset(add))
         assert isinstance(wrapper, CodeModeToolset)
         ctx = build_run_context(None)
         same = await wrapper.for_run_step(ctx)
@@ -453,7 +460,7 @@ class TestCodeMode:
     async def test_for_run_step_preserves_repl_when_wrapped_changes(self) -> None:
         """When the wrapped toolset changes between steps, REPL state must carry over to the new instance."""
 
-        class _SwappingToolset(AbstractToolset[None]):
+        class _SwappingToolset(AbstractToolset[object]):
             """Returns a *different* underlying toolset on each `for_run_step` call."""
 
             def __init__(self) -> None:
@@ -464,19 +471,19 @@ class TestCodeMode:
             def id(self) -> str | None:
                 return None  # pragma: no cover - required by AbstractToolset, never read
 
-            async def get_tools(self, ctx: RunContext[None]) -> dict[str, ToolsetTool[None]]:
+            async def get_tools(self, ctx: RunContext[object]) -> dict[str, ToolsetTool[object]]:
                 return await self._inner.get_tools(ctx)
 
             async def call_tool(  # pragma: no cover - test only exercises lifecycle methods, not call_tool
                 self,
                 name: str,
                 tool_args: dict[str, Any],
-                ctx: RunContext[None],
-                tool: ToolsetTool[None],
+                ctx: RunContext[object],
+                tool: ToolsetTool[object],
             ) -> Any:
                 return await self._inner.call_tool(name, tool_args, ctx, tool)
 
-            async def for_run_step(self, ctx: RunContext[None]) -> AbstractToolset[None]:
+            async def for_run_step(self, ctx: RunContext[object]) -> AbstractToolset[object]:
                 # Return a brand-new toolset on every step so `is` comparison fails in
                 # `CodeModeToolset.for_run_step`, forcing the rebuild branch.
                 self._step += 1
@@ -484,7 +491,7 @@ class TestCodeMode:
                 new_self._step = self._step
                 return new_self
 
-        wrapper = CodeMode[None]().get_wrapper_toolset(_SwappingToolset())
+        wrapper = CodeMode[object]().get_wrapper_toolset(_SwappingToolset())
         assert isinstance(wrapper, CodeModeToolset)
         ctx = await build_ctx(None, wrapper)
 
@@ -506,7 +513,7 @@ class TestCodeMode:
 
     async def test_filter_keeps_rejected_tools_native(self) -> None:
         """A callable filter sandboxes accepted tools and leaves the rest visible to the model."""
-        capability = CodeMode[None](tools=lambda ctx, td: td.name == 'add')
+        capability = CodeMode[object](tools=lambda ctx, td: td.name == 'add')
         wrapper = capability.get_wrapper_toolset(_build_function_toolset(add, greet))
         assert isinstance(wrapper, CodeModeToolset)
 
@@ -521,7 +528,7 @@ class TestCodeMode:
 
     async def test_native_tool_call_passes_through(self) -> None:
         """Calling a native (non-sandboxed) tool passes through to the wrapped toolset."""
-        capability = CodeMode[None](tools=lambda ctx, td: td.name == 'add')
+        capability = CodeMode[object](tools=lambda ctx, td: td.name == 'add')
         wrapper = capability.get_wrapper_toolset(_build_function_toolset(add, greet))
         assert isinstance(wrapper, CodeModeToolset)
 
@@ -538,7 +545,7 @@ class TestCodeMode:
             """A tool that collides with the reserved name."""
             return 'oops'  # pragma: no cover
 
-        capability = CodeMode[None](tools=lambda ctx, td: td.name != 'run_code')
+        capability = CodeMode[object](tools=lambda ctx, td: td.name != 'run_code')
         wrapper = capability.get_wrapper_toolset(_build_function_toolset(run_code, add))
         assert isinstance(wrapper, CodeModeToolset)
 
@@ -553,7 +560,7 @@ class TestCodeMode:
             """A tool that collides with the meta-tool name."""
             return 'oops'  # pragma: no cover
 
-        wrapper = CodeMode[None]().get_wrapper_toolset(_build_function_toolset(run_code, add))
+        wrapper = CodeMode[object]().get_wrapper_toolset(_build_function_toolset(run_code, add))
         assert isinstance(wrapper, CodeModeToolset)
 
         with pytest.raises(UserError, match='conflicts with the code mode'):
@@ -561,7 +568,7 @@ class TestCodeMode:
 
     async def test_filter_excluding_everything_yields_run_code_with_no_functions(self) -> None:
         """A filter that rejects every tool produces a `run_code` with no functions block."""
-        capability = CodeMode[None](tools=lambda ctx, td: False)
+        capability = CodeMode[object](tools=lambda ctx, td: False)
         wrapper = capability.get_wrapper_toolset(_build_function_toolset(add, greet))
         assert isinstance(wrapper, CodeModeToolset)
 
@@ -576,11 +583,11 @@ class TestCodeMode:
         """The filter receives the live `RunContext` so it can vary per run/step."""
         seen_steps: list[int] = []
 
-        def filter_func(ctx: RunContext[None], td: Any) -> bool:
+        def filter_func(ctx: RunContext[object], td: Any) -> bool:
             seen_steps.append(ctx.run_step)
             return td.name == 'add'
 
-        wrapper = CodeMode[None](tools=filter_func).get_wrapper_toolset(_build_function_toolset(add, greet))
+        wrapper = CodeMode[object](tools=filter_func).get_wrapper_toolset(_build_function_toolset(add, greet))
         assert isinstance(wrapper, CodeModeToolset)
         await wrapper.get_tools(build_run_context(None, run_step=7))
         assert 7 in seen_steps
@@ -591,7 +598,7 @@ class TestCodeMode:
 
     async def test_typed_dict_arguments_render_as_prelude(self) -> None:
         """Tools with structured (TypedDict) parameters render their types in the prelude."""
-        wrapper = CodeMode[None]().get_wrapper_toolset(_build_function_toolset(lookup_person))
+        wrapper = CodeMode[object]().get_wrapper_toolset(_build_function_toolset(lookup_person))
         assert isinstance(wrapper, CodeModeToolset)
 
         description = (await wrapper.get_tools(build_run_context(None)))['run_code'].tool_def.description
@@ -611,7 +618,7 @@ class TestCodeMode:
         that static type checking (which only runs on the first snippet) doesn't
         reject the dict-to-TypedDict coercion that Monty handles at runtime.
         """
-        wrapper = CodeMode[None]().get_wrapper_toolset(_build_function_toolset(lookup_person))
+        wrapper = CodeMode[object]().get_wrapper_toolset(_build_function_toolset(lookup_person))
         assert isinstance(wrapper, CodeModeToolset)
 
         ctx = await build_ctx(None, wrapper)
@@ -634,7 +641,7 @@ class TestCodeMode:
             results={'get_user': 'user-result', 'get_company': 'company-result'},
         )
 
-        wrapper = CodeMode[None]().get_wrapper_toolset(static)
+        wrapper = CodeMode[object]().get_wrapper_toolset(static)
         assert isinstance(wrapper, CodeModeToolset)
 
         ctx = await build_ctx(None, wrapper)
@@ -673,8 +680,8 @@ class TestCodeMode:
             """A deferred-loading tool."""
             return str(x)  # pragma: no cover - tool body is not invoked in this test
 
-        toolset = FunctionToolset[None](tools=[Tool(add), Tool(later, defer_loading=True)])
-        wrapper = CodeMode[None]().get_wrapper_toolset(toolset)
+        toolset = FunctionToolset[object](tools=[Tool(add), Tool(later, defer_loading=True)])
+        wrapper = CodeMode[object]().get_wrapper_toolset(toolset)
         assert isinstance(wrapper, CodeModeToolset)
 
         ctx = build_run_context(None)
@@ -699,8 +706,8 @@ class TestCodeMode:
             return str(x)  # pragma: no cover - tool body is not invoked in this test
 
         # `defer_loading=False` mimics the post-discovery state ToolSearchToolset hands back.
-        toolset = FunctionToolset[None](tools=[Tool(add), Tool(later, defer_loading=False)])
-        wrapper = CodeMode[None]().get_wrapper_toolset(toolset)
+        toolset = FunctionToolset[object](tools=[Tool(add), Tool(later, defer_loading=False)])
+        wrapper = CodeMode[object]().get_wrapper_toolset(toolset)
         assert isinstance(wrapper, CodeModeToolset)
 
         ctx = build_run_context(None)
@@ -712,6 +719,32 @@ class TestCodeMode:
         assert 'async def later' in description
         assert 'later' not in tools
 
+    async def test_framework_tool_kind_tool_not_sandboxed(self) -> None:
+        """Framework control tools with `tool_kind` stay native even when CodeMode wraps all user tools."""
+        td_loader = ToolDefinition(
+            name='load_capability',
+            description='Load a deferred capability.',
+            parameters_json_schema={
+                'type': 'object',
+                'properties': {'capability_id': {'type': 'string'}},
+                'required': ['capability_id'],
+            },
+            return_schema={'type': 'string'},
+            tool_kind='capability-load',
+        )
+        static = _StaticToolset([_make_address_tool_def('get_user', 'Get a user.', 'street'), td_loader])
+        wrapper = CodeMode[object]().get_wrapper_toolset(static)
+        assert isinstance(wrapper, CodeModeToolset)
+
+        tools = await wrapper.get_tools(build_run_context(None))
+
+        description = tools['run_code'].tool_def.description
+        assert description is not None
+        assert 'async def get_user' in description
+        assert 'load_capability' not in description
+        assert 'load_capability' in tools
+        assert tools['load_capability'].tool_def.tool_kind == 'capability-load'
+
     async def test_unless_native_tool_not_sandboxed(self) -> None:
         """Tools annotated with `unless_native` stay native so `Model.prepare_request` can filter them."""
         td_fallback = ToolDefinition(
@@ -722,7 +755,7 @@ class TestCodeMode:
             unless_native='web_search',
         )
         static = _StaticToolset([_make_address_tool_def('get_user', 'Get a user.', 'street'), td_fallback])
-        wrapper = CodeMode[None]().get_wrapper_toolset(static)
+        wrapper = CodeMode[object]().get_wrapper_toolset(static)
         assert isinstance(wrapper, CodeModeToolset)
 
         ctx = build_run_context(None)
@@ -745,7 +778,7 @@ class TestCodeMode:
             unless_native='web_search',
         )
         static = _StaticToolset([td_fallback])
-        wrapper = CodeMode[None]().get_wrapper_toolset(static)
+        wrapper = CodeMode[object]().get_wrapper_toolset(static)
         assert isinstance(wrapper, CodeModeToolset)
 
         ctx = build_run_context(None)
@@ -765,7 +798,7 @@ class TestCodeMode:
             return_schema={'type': 'string'},
         )
         static = _StaticToolset([td_plain])
-        wrapper = CodeMode[None]().get_wrapper_toolset(static)
+        wrapper = CodeMode[object]().get_wrapper_toolset(static)
         assert isinstance(wrapper, CodeModeToolset)
 
         ctx = build_run_context(None)
@@ -787,7 +820,7 @@ class TestCodeMode:
             kind='external',
         )
         static = _StaticToolset([_make_address_tool_def('get_user', 'Get a user.', 'street'), td_external])
-        wrapper = CodeMode[None]().get_wrapper_toolset(static)
+        wrapper = CodeMode[object]().get_wrapper_toolset(static)
         assert isinstance(wrapper, CodeModeToolset)
 
         ctx = build_run_context(None)
@@ -809,7 +842,7 @@ class TestCodeMode:
             # No return_schema -- simulates an MCP tool without outputSchema.
         )
         static = _StaticToolset([td], results={'search': 'found it'})
-        wrapper = CodeMode[None]().get_wrapper_toolset(static)
+        wrapper = CodeMode[object]().get_wrapper_toolset(static)
         assert isinstance(wrapper, CodeModeToolset)
 
         ctx = build_run_context(None)
@@ -839,7 +872,7 @@ class TestCodeMode:
             return_schema={'type': 'object', 'properties': {'name': {'type': 'string'}}},
         )
         static = _StaticToolset([td], results={'get_user': {'name': 'Alice'}})
-        wrapper = CodeMode[None]().get_wrapper_toolset(static)
+        wrapper = CodeMode[object]().get_wrapper_toolset(static)
         assert isinstance(wrapper, CodeModeToolset)
 
         with _warnings.catch_warnings():
@@ -891,7 +924,7 @@ class TestCodeMode:
             observed_tool_returns.append(run_code_return.content)
             return ModelResponse(parts=[TextPart(f'sum is {observed_tool_returns[-1]["result"]}')])
 
-        agent: Agent[None, str] = Agent(FunctionModel(model_fn), capabilities=[CodeMode[None]()])
+        agent: Agent[object, str] = Agent(FunctionModel(model_fn), capabilities=[CodeMode[object]()])
 
         @agent.tool_plain
         def add(a: int, b: int) -> int:  # pyright: ignore[reportUnusedFunction]
@@ -913,13 +946,61 @@ class TestCodeMode:
         # The agent's final output reflects the value flowing through the sandbox.
         assert result.output == 'sum is 10'
 
+    async def test_deferred_capability_loader_stays_native_with_tools_all(self) -> None:
+        """Regression for the deferred-capability bootstrap (issue #276).
+
+        With `CodeMode(tools='all')` and a deferred capability configured, the
+        framework-managed `load_capability` tool must reach the model as a native call
+        (alongside `run_code`) so the model can reveal the capability. The deferred
+        member tool stays hidden -- it is neither folded into `run_code` nor surfaced as
+        a plain tool until loaded.
+
+        (The native-vs-sandbox split per tool kind is covered directly at the toolset
+        level by `test_framework_tool_kind_tool_not_sandboxed` and
+        `test_tool_search_toolset_deferred_tool_not_in_run_code`; this exercises the
+        end-to-end path through `Agent`.)
+        """
+        from pydantic_ai.capabilities import Capability
+
+        capability = Capability[object](
+            id='demo',
+            description='Demo deferred capability.',
+            instructions='Use demo_tool.',
+            defer_loading=True,
+        )
+
+        @capability.tool_plain
+        def demo_tool() -> str:  # pyright: ignore[reportUnusedFunction]
+            return 'ok'  # pragma: no cover - deferred tool stays hidden, body is not invoked
+
+        model = TestModel(call_tools=[])
+        agent: Agent[object, str] = Agent(
+            model,
+            capabilities=[capability, CodeMode[object](tools='all')],
+        )
+        await agent.run('inspect tools')
+
+        assert model.last_model_request_parameters is not None
+        by_name = {td.name: td for td in model.last_model_request_parameters.function_tools}
+
+        # The bootstrap tool is a native call alongside `run_code`, not buried in the sandbox.
+        assert 'load_capability' in by_name
+        assert 'run_code' in by_name
+
+        # The deferred member tool stays hidden until loaded: not folded into `run_code`
+        # and not surfaced as a plain native tool.
+        assert 'demo_tool' not in by_name
+        run_code_desc = by_name['run_code'].description or ''
+        assert 'demo_tool' not in run_code_desc
+        assert 'load_capability' not in run_code_desc
+
     # ---------------------------------------------------------------------------
     # Capability registration
     # ---------------------------------------------------------------------------
 
     async def test_code_mode_can_be_registered_as_agent_capability(self) -> None:
         """`CodeMode` can be passed via `Agent(capabilities=[...])` without raising."""
-        Agent(TestModel(), capabilities=[CodeMode[None]()])
+        Agent(TestModel(), capabilities=[CodeMode[object]()])
 
     # ---------------------------------------------------------------------------
     # Tool name sanitization
@@ -955,7 +1036,7 @@ class TestCodeMode:
             return_schema={'type': 'string'},
         )
         static = _StaticToolset([td], results={'get-weather': 'sunny'})
-        wrapper = CodeMode[None]().get_wrapper_toolset(static)
+        wrapper = CodeMode[object]().get_wrapper_toolset(static)
         assert isinstance(wrapper, CodeModeToolset)
 
         ctx = await build_ctx(None, wrapper)
@@ -989,7 +1070,7 @@ class TestCodeMode:
             return_schema={'type': 'string'},
         )
         static = _StaticToolset([td], results={'api.lookup': 'found'})
-        wrapper = CodeMode[None]().get_wrapper_toolset(static)
+        wrapper = CodeMode[object]().get_wrapper_toolset(static)
         assert isinstance(wrapper, CodeModeToolset)
 
         ctx = await build_ctx(None, wrapper)
@@ -1017,7 +1098,7 @@ class TestCodeMode:
             return_schema={'type': 'string'},
         )
         static = _StaticToolset([td1, td2], results={'get-weather': 'rain'})
-        wrapper = CodeMode[None]().get_wrapper_toolset(static)
+        wrapper = CodeMode[object]().get_wrapper_toolset(static)
         assert isinstance(wrapper, CodeModeToolset)
 
         ctx = build_run_context(None)
@@ -1045,7 +1126,7 @@ class TestCodeMode:
             return_schema={'type': 'string'},
         )
         static = _StaticToolset([td_native, td_hyphen], results={'get_weather': 'ok'})
-        wrapper = CodeMode[None]().get_wrapper_toolset(static)
+        wrapper = CodeMode[object]().get_wrapper_toolset(static)
         assert isinstance(wrapper, CodeModeToolset)
 
         ctx = build_run_context(None)
@@ -1063,7 +1144,7 @@ class TestCodeMode:
 
     async def test_run_code_tool_has_code_metadata(self) -> None:
         """The `run_code` ToolDefinition carries metadata for Logfire code rendering."""
-        wrapper = CodeMode[None]().get_wrapper_toolset(_build_function_toolset(add))
+        wrapper = CodeMode[object]().get_wrapper_toolset(_build_function_toolset(add))
         assert isinstance(wrapper, CodeModeToolset)
 
         tools = await wrapper.get_tools(build_run_context(None))
@@ -1080,7 +1161,7 @@ class TestCodeMode:
             """Return a ToolReturn with metadata."""
             return ToolReturnMsg(return_value=42, metadata={'source': 'test'})
 
-        wrapper = CodeMode[None]().get_wrapper_toolset(_build_function_toolset(fancy))
+        wrapper = CodeMode[object]().get_wrapper_toolset(_build_function_toolset(fancy))
         assert isinstance(wrapper, CodeModeToolset)
         ctx = await build_ctx(None, wrapper)
         tools = await wrapper.get_tools(ctx)
@@ -1102,7 +1183,7 @@ class TestCodeMode:
             """A tool that requires approval."""
             raise _ApprovalRequired()
 
-        wrapper = CodeMode[None]().get_wrapper_toolset(_build_function_toolset(needs_approval))
+        wrapper = CodeMode[object]().get_wrapper_toolset(_build_function_toolset(needs_approval))
         assert isinstance(wrapper, CodeModeToolset)
         ctx = await build_ctx(None, wrapper)
         tools = await wrapper.get_tools(ctx)
@@ -1130,12 +1211,12 @@ class TestCodeMode:
             """A tool that requires approval."""
             raise _ApprovalRequired()
 
-        async def handler(ctx: RunContext[None], requests: DeferredToolRequests) -> DeferredToolResults:
+        async def handler(ctx: RunContext[object], requests: DeferredToolRequests) -> DeferredToolResults:
             return DeferredToolResults(
                 approvals={call.tool_call_id: ToolDenied(message='nope') for call in requests.approvals}
             )
 
-        wrapper = CodeMode[None]().get_wrapper_toolset(_build_function_toolset(needs_approval))
+        wrapper = CodeMode[object]().get_wrapper_toolset(_build_function_toolset(needs_approval))
         assert isinstance(wrapper, CodeModeToolset)
         ctx = await build_ctx(None, wrapper, root_capability=HandleDeferredToolCalls(handler=handler))
         tools = await wrapper.get_tools(ctx)
@@ -1158,14 +1239,14 @@ class TestCodeMode:
         from pydantic_ai.exceptions import ApprovalRequired as _ApprovalRequired
         from pydantic_ai.tools import DeferredToolRequests, DeferredToolResults, ToolApproved
 
-        def always_needs_approval(ctx: RunContext[None]) -> str:
+        def always_needs_approval(ctx: RunContext[object]) -> str:
             """Raises `ApprovalRequired` every time, even after being approved."""
             raise _ApprovalRequired()
 
-        async def handler(ctx: RunContext[None], requests: DeferredToolRequests) -> DeferredToolResults:
+        async def handler(ctx: RunContext[object], requests: DeferredToolRequests) -> DeferredToolResults:
             return DeferredToolResults(approvals={call.tool_call_id: ToolApproved() for call in requests.approvals})
 
-        wrapper = CodeMode[None]().get_wrapper_toolset(_build_function_toolset(always_needs_approval))
+        wrapper = CodeMode[object]().get_wrapper_toolset(_build_function_toolset(always_needs_approval))
         assert isinstance(wrapper, CodeModeToolset)
         ctx = await build_ctx(None, wrapper, root_capability=HandleDeferredToolCalls(handler=handler))
         tools = await wrapper.get_tools(ctx)
@@ -1184,7 +1265,7 @@ class TestCodeMode:
             """A tool that always retries."""
             raise ModelRetry('try again please')
 
-        wrapper = CodeMode[None]().get_wrapper_toolset(_build_function_toolset(flaky))
+        wrapper = CodeMode[object]().get_wrapper_toolset(_build_function_toolset(flaky))
         assert isinstance(wrapper, CodeModeToolset)
         ctx = await build_ctx(None, wrapper)
         tools = await wrapper.get_tools(ctx)
@@ -1197,7 +1278,7 @@ class TestCodeMode:
 
         On a fresh REPL, the static type checker catches this before execution.
         """
-        wrapper = CodeMode[None]().get_wrapper_toolset(_build_function_toolset(add))
+        wrapper = CodeMode[object]().get_wrapper_toolset(_build_function_toolset(add))
         assert isinstance(wrapper, CodeModeToolset)
         ctx = await build_ctx(None, wrapper)
         tools = await wrapper.get_tools(ctx)
@@ -1226,7 +1307,7 @@ class TestCodeMode:
             """Generate an image."""
             return BinaryContent(data=image_bytes, media_type='image/png')
 
-        wrapper = CodeMode[None]().get_wrapper_toolset(_build_function_toolset(gen_image))
+        wrapper = CodeMode[object]().get_wrapper_toolset(_build_function_toolset(gen_image))
         assert isinstance(wrapper, CodeModeToolset)
         ctx = await build_ctx(None, wrapper)
         tools = await wrapper.get_tools(ctx)
@@ -1249,7 +1330,7 @@ class TestCodeMode:
             """Generate an image."""
             return BinaryContent(data=image_bytes, media_type='image/png')
 
-        wrapper = CodeMode[None]().get_wrapper_toolset(_build_function_toolset(gen_image))
+        wrapper = CodeMode[object]().get_wrapper_toolset(_build_function_toolset(gen_image))
         assert isinstance(wrapper, CodeModeToolset)
         ctx = await build_ctx(None, wrapper)
         tools = await wrapper.get_tools(ctx)
@@ -1278,7 +1359,7 @@ class TestCodeMode:
             """Generate a list with an image."""
             return [BinaryContent(data=image_bytes, media_type='image/png'), 'caption']
 
-        wrapper = CodeMode[None]().get_wrapper_toolset(_build_function_toolset(gen_images))
+        wrapper = CodeMode[object]().get_wrapper_toolset(_build_function_toolset(gen_images))
         assert isinstance(wrapper, CodeModeToolset)
         ctx = await build_ctx(None, wrapper)
         tools = await wrapper.get_tools(ctx)
@@ -1311,7 +1392,7 @@ class TestCodeMode:
                 return_value=BinaryContent(data=image_bytes, media_type='image/png'), metadata={'src': 'test'}
             )
 
-        wrapper = CodeMode[None]().get_wrapper_toolset(_build_function_toolset(gen_image))
+        wrapper = CodeMode[object]().get_wrapper_toolset(_build_function_toolset(gen_image))
         assert isinstance(wrapper, CodeModeToolset)
         ctx = await build_ctx(None, wrapper)
         tools = await wrapper.get_tools(ctx)
@@ -1350,9 +1431,9 @@ class TestCodeMode:
                 return ModelResponse(parts=[ToolCallPart(tool_name='run_code', args={'code': 'await add(a=1, b=2)'})])
             return ModelResponse(parts=[TextPart('done')])
 
-        agent: Agent[None, str] = Agent(
+        agent: Agent[object, str] = Agent(
             FunctionModel(model_fn),
-            capabilities=[CodeMode[None](), Instrumentation(settings=InstrumentationSettings(include_content=True))],
+            capabilities=[CodeMode[object](), Instrumentation(settings=InstrumentationSettings(include_content=True))],
         )
 
         @agent.tool_plain
@@ -1388,7 +1469,7 @@ class TestCodeMode:
         On a fresh REPL, the type checker catches this; on subsequent calls,
         it becomes a runtime NameError.
         """
-        wrapper = CodeMode[None]().get_wrapper_toolset(_build_function_toolset(add))
+        wrapper = CodeMode[object]().get_wrapper_toolset(_build_function_toolset(add))
         assert isinstance(wrapper, CodeModeToolset)
         ctx = await build_ctx(None, wrapper)
         tools = await wrapper.get_tools(ctx)
@@ -1409,7 +1490,7 @@ class TestCodeMode:
         On a fresh REPL the type checker catches it; on subsequent calls
         the runtime positional-args guard catches it.
         """
-        wrapper = CodeMode[None]().get_wrapper_toolset(_build_function_toolset(add))
+        wrapper = CodeMode[object]().get_wrapper_toolset(_build_function_toolset(add))
         assert isinstance(wrapper, CodeModeToolset)
         ctx = await build_ctx(None, wrapper)
         tools = await wrapper.get_tools(ctx)
@@ -1436,7 +1517,7 @@ class TestCodeMode:
     async def test_print_output_preserved_in_runtime_error(self) -> None:
         """When sandbox code prints before crashing, the print output is included
         in the ModelRetry error message so the model can use it for debugging."""
-        wrapper = CodeMode[None]().get_wrapper_toolset(_build_function_toolset(add))
+        wrapper = CodeMode[object]().get_wrapper_toolset(_build_function_toolset(add))
         assert isinstance(wrapper, CodeModeToolset)
         ctx = await build_ctx(None, wrapper)
         tools = await wrapper.get_tools(ctx)
@@ -1461,7 +1542,7 @@ class TestCodeMode:
         resolved inline at FunctionSnapshot via `resume({'return_value': ...})`."""
         from dataclasses import replace as dc_replace
 
-        class _SeqToolset(AbstractToolset[None]):
+        class _SeqToolset(AbstractToolset[object]):
             """Marks add as sequential; greet stays parallel."""
 
             def __init__(self) -> None:
@@ -1471,7 +1552,7 @@ class TestCodeMode:
             def id(self) -> str | None:
                 return None  # pragma: no cover
 
-            async def get_tools(self, ctx: RunContext[None]) -> dict[str, ToolsetTool[None]]:
+            async def get_tools(self, ctx: RunContext[object]) -> dict[str, ToolsetTool[object]]:
                 tools = await self._inner.get_tools(ctx)
                 return {
                     n: dc_replace(t, tool_def=dc_replace(t.tool_def, sequential=True)) if n == 'add' else t
@@ -1479,11 +1560,11 @@ class TestCodeMode:
                 }
 
             async def call_tool(
-                self, name: str, tool_args: dict[str, Any], ctx: RunContext[None], tool: ToolsetTool[None]
+                self, name: str, tool_args: dict[str, Any], ctx: RunContext[object], tool: ToolsetTool[object]
             ) -> Any:
                 return await self._inner.call_tool(name, tool_args, ctx, tool)
 
-        seq_wrapper = CodeModeToolset[None](wrapped=_SeqToolset(), tool_selector='all')
+        seq_wrapper = CodeModeToolset[object](wrapped=_SeqToolset(), tool_selector='all')
         ctx = await build_ctx(None, seq_wrapper)
         tools = await seq_wrapper.get_tools(ctx)
         run_code = tools['run_code']
@@ -1522,7 +1603,7 @@ class TestCodeMode:
         the pending tasks are awaited first (barrier) before dispatching."""
         from dataclasses import replace as dc_replace
 
-        class _SeqToolset(AbstractToolset[None]):
+        class _SeqToolset(AbstractToolset[object]):
             def __init__(self) -> None:
                 self._inner = _build_function_toolset(add, greet)
 
@@ -1530,7 +1611,7 @@ class TestCodeMode:
             def id(self) -> str | None:
                 return None  # pragma: no cover
 
-            async def get_tools(self, ctx: RunContext[None]) -> dict[str, ToolsetTool[None]]:
+            async def get_tools(self, ctx: RunContext[object]) -> dict[str, ToolsetTool[object]]:
                 tools = await self._inner.get_tools(ctx)
                 return {
                     n: dc_replace(t, tool_def=dc_replace(t.tool_def, sequential=True)) if n == 'add' else t
@@ -1538,11 +1619,11 @@ class TestCodeMode:
                 }
 
             async def call_tool(
-                self, name: str, tool_args: dict[str, Any], ctx: RunContext[None], tool: ToolsetTool[None]
+                self, name: str, tool_args: dict[str, Any], ctx: RunContext[object], tool: ToolsetTool[object]
             ) -> Any:
                 return await self._inner.call_tool(name, tool_args, ctx, tool)
 
-        seq_wrapper = CodeModeToolset[None](wrapped=_SeqToolset(), tool_selector='all')
+        seq_wrapper = CodeModeToolset[object](wrapped=_SeqToolset(), tool_selector='all')
         ctx = await build_ctx(None, seq_wrapper)
         tools = await seq_wrapper.get_tools(ctx)
 
@@ -1580,7 +1661,7 @@ class TestCodeMode:
         """An error from a sequential tool (resolved inline) surfaces as ModelRetry."""
         from dataclasses import replace as dc_replace
 
-        class _SeqToolset(AbstractToolset[None]):
+        class _SeqToolset(AbstractToolset[object]):
             def __init__(self) -> None:
                 self._inner = _build_function_toolset(add)
 
@@ -1588,16 +1669,16 @@ class TestCodeMode:
             def id(self) -> str | None:
                 return None  # pragma: no cover
 
-            async def get_tools(self, ctx: RunContext[None]) -> dict[str, ToolsetTool[None]]:
+            async def get_tools(self, ctx: RunContext[object]) -> dict[str, ToolsetTool[object]]:
                 tools = await self._inner.get_tools(ctx)
                 return {n: dc_replace(t, tool_def=dc_replace(t.tool_def, sequential=True)) for n, t in tools.items()}
 
             async def call_tool(
-                self, name: str, tool_args: dict[str, Any], ctx: RunContext[None], tool: ToolsetTool[None]
+                self, name: str, tool_args: dict[str, Any], ctx: RunContext[object], tool: ToolsetTool[object]
             ) -> Any:
                 return await self._inner.call_tool(name, tool_args, ctx, tool)
 
-        seq_wrapper = CodeModeToolset[None](wrapped=_SeqToolset(), tool_selector='all')
+        seq_wrapper = CodeModeToolset[object](wrapped=_SeqToolset(), tool_selector='all')
         ctx = await build_ctx(None, seq_wrapper)
         tools = await seq_wrapper.get_tools(ctx)
         run_code = tools['run_code']
@@ -1612,7 +1693,7 @@ class TestCodeMode:
         sandbox are resolved sequentially via FutureSnapshot. Signatures stay `async def`."""
         from pydantic_ai.tool_manager import ToolManager
 
-        wrapper = CodeMode[None]().get_wrapper_toolset(_build_function_toolset(add))
+        wrapper = CodeMode[object]().get_wrapper_toolset(_build_function_toolset(add))
         assert isinstance(wrapper, CodeModeToolset)
         ctx = await build_ctx(None, wrapper)
 
@@ -1640,7 +1721,7 @@ class TestCodeMode:
 
         from pydantic_ai.tool_manager import ToolManager
 
-        class _SeqToolset(AbstractToolset[None]):
+        class _SeqToolset(AbstractToolset[object]):
             def __init__(self) -> None:
                 self._inner = _build_function_toolset(add)
 
@@ -1648,16 +1729,16 @@ class TestCodeMode:
             def id(self) -> str | None:
                 return None  # pragma: no cover
 
-            async def get_tools(self, ctx: RunContext[None]) -> dict[str, ToolsetTool[None]]:
+            async def get_tools(self, ctx: RunContext[object]) -> dict[str, ToolsetTool[object]]:
                 tools = await self._inner.get_tools(ctx)
                 return {n: dc_replace(t, tool_def=dc_replace(t.tool_def, sequential=True)) for n, t in tools.items()}
 
             async def call_tool(
-                self, name: str, tool_args: dict[str, Any], ctx: RunContext[None], tool: ToolsetTool[None]
+                self, name: str, tool_args: dict[str, Any], ctx: RunContext[object], tool: ToolsetTool[object]
             ) -> Any:
                 return await self._inner.call_tool(name, tool_args, ctx, tool)
 
-        seq_wrapper = CodeModeToolset[None](wrapped=_SeqToolset(), tool_selector='all')
+        seq_wrapper = CodeModeToolset[object](wrapped=_SeqToolset(), tool_selector='all')
         ctx = await build_ctx(None, seq_wrapper)
 
         with ToolManager.parallel_execution_mode('sequential'):
@@ -1676,7 +1757,7 @@ class TestCodeMode:
     async def test_restart_with_invalid_code_clears_repl_for_retry(self) -> None:
         """When `restart=True` and type checking fails, the REPL is cleared so
         the next retry still gets type-checked on a fresh REPL."""
-        wrapper = CodeMode[None]().get_wrapper_toolset(_build_function_toolset(add))
+        wrapper = CodeMode[object]().get_wrapper_toolset(_build_function_toolset(add))
         assert isinstance(wrapper, CodeModeToolset)
         ctx = await build_ctx(None, wrapper)
         tools = await wrapper.get_tools(ctx)
@@ -1787,7 +1868,7 @@ class TestToolSearchIntegration:
             """A deferred-loading tool."""
             return str(x)  # pragma: no cover - tool body is not invoked in this test
 
-        base = FunctionToolset[None](tools=[Tool(add), Tool(later, defer_loading=True)])
+        base = FunctionToolset[object](tools=[Tool(add), Tool(later, defer_loading=True)])
         code_mode = CodeModeToolset(wrapped=ToolSearchToolset(wrapped=base), tool_selector='all')
         tools = await code_mode.get_tools(build_run_context(None))
 
@@ -1805,33 +1886,35 @@ class TestToolSearchIntegration:
 
     async def test_tool_search_toolset_discovered_tool_in_run_code(self) -> None:
         """End-to-end: once `search_tools` has discovered the deferred tool, it folds into `run_code`."""
-        from pydantic_ai.messages import ModelRequest, ToolSearchReturnPart
-        from pydantic_ai.toolsets._tool_search import ToolSearchToolset
+        from pydantic_ai.messages import ModelMessage, ModelRequest, ToolSearchReturnPart
+        from pydantic_ai.toolsets._tool_search import ToolSearchToolset, parse_discovered_tools
 
         def later(x: int) -> str:
             """A deferred-loading tool."""
             return str(x)  # pragma: no cover - tool body is not invoked in this test
 
-        base = FunctionToolset[None](tools=[Tool(add), Tool(later, defer_loading=True)])
+        base = FunctionToolset[object](tools=[Tool(add), Tool(later, defer_loading=True)])
         code_mode = CodeModeToolset(wrapped=ToolSearchToolset(wrapped=base), tool_selector='all')
 
-        ctx = RunContext[None](
+        messages: list[ModelMessage] = [
+            ModelRequest(
+                parts=[
+                    ToolSearchReturnPart(
+                        content={'discovered_tools': [{'name': 'later', 'description': 'A deferred-loading tool.'}]},
+                        tool_call_id='search-1',
+                    )
+                ]
+            )
+        ]
+        ctx = RunContext[object](
             deps=None,
             model=TestModel(),
             usage=RunUsage(),
             prompt=None,
-            messages=[
-                ModelRequest(
-                    parts=[
-                        ToolSearchReturnPart(
-                            content={
-                                'discovered_tools': [{'name': 'later', 'description': 'A deferred-loading tool.'}]
-                            },
-                            tool_call_id='search-1',
-                        )
-                    ]
-                )
-            ],
+            messages=messages,
+            # The agent graph reconstructs `discovered_tool_names` from history each step;
+            # mirror that here since the test drives `get_tools` without a real run.
+            discovered_tool_names=parse_discovered_tools(messages),
             run_step=1,
         )
         tools = await code_mode.get_tools(ctx)
@@ -1854,12 +1937,666 @@ class TestToolSearchIntegration:
         assert ToolSearch in ordering.wraps
 
 
+class TestDynamicCatalog:
+    """`CodeMode(dynamic_catalog=True)`: move the catalog to instructions + announce discoveries.
+
+    Two surfaces:
+
+    1. **Catalog placement** — `CodeModeToolset` strips signatures from `run_code.description`
+       and re-exposes them as a dynamic `InstructionPart` via `get_instructions`.
+    2. **Discovery announcements** — `CodeMode.after_tool_execute` (local search) and
+       `after_model_request` (native search) enqueue a `SystemPromptPart` so the model
+       learns that freshly-discovered tools are callable.
+    """
+
+    # -- catalog placement -------------------------------------------------
+
+    async def test_description_drops_signatures_keeps_base_prose(self) -> None:
+        toolset = CodeModeToolset(wrapped=_build_function_toolset(add), tool_selector='all', dynamic_catalog=True)
+        tools = await toolset.get_tools(build_run_context(None))
+
+        description = tools['run_code'].tool_def.description
+        assert description is not None
+        # The signature is gone from the description...
+        assert 'async def add' not in description
+        # ...but the static base prose remains.
+        assert 'sandboxed environment' in description
+
+    async def test_catalog_surfaces_as_dynamic_instruction_part(self) -> None:
+        toolset = CodeModeToolset(wrapped=_build_function_toolset(add), tool_selector='all', dynamic_catalog=True)
+        ctx = build_run_context(None)
+        await toolset.get_tools(ctx)
+        instructions = await toolset.get_instructions(ctx)
+
+        from pydantic_ai.messages import InstructionPart
+
+        # No upstream instructions → the catalog is the only InstructionPart returned.
+        assert isinstance(instructions, InstructionPart)
+        assert 'async def add' in instructions.content
+        # `dynamic=True` so Anthropic/Bedrock place the cache breakpoint before this block.
+        assert instructions.dynamic is True
+
+    async def test_get_instructions_appends_to_upstream_string(self) -> None:
+        from pydantic_ai.messages import InstructionPart
+
+        class _UpstreamToolset(FunctionToolset[object]):
+            async def get_instructions(self, ctx: RunContext[object]) -> str:  # pyright: ignore[reportIncompatibleMethodOverride]
+                return 'wrapped instructions'
+
+        toolset = CodeModeToolset(
+            wrapped=_UpstreamToolset(tools=[Tool(add)]), tool_selector='all', dynamic_catalog=True
+        )
+        ctx = build_run_context(None)
+        await toolset.get_tools(ctx)
+        instructions = await toolset.get_instructions(ctx)
+
+        assert isinstance(instructions, list)
+        assert instructions[0] == 'wrapped instructions'
+        assert isinstance(instructions[1], InstructionPart)
+        assert 'async def add' in instructions[1].content
+
+    async def test_get_instructions_appends_to_upstream_sequence(self) -> None:
+        from pydantic_ai.messages import InstructionPart
+
+        class _UpstreamToolset(FunctionToolset[object]):
+            async def get_instructions(  # pyright: ignore[reportIncompatibleMethodOverride]
+                self, ctx: RunContext[object]
+            ) -> list[str | InstructionPart]:
+                return ['a', InstructionPart(content='b')]
+
+        toolset = CodeModeToolset(
+            wrapped=_UpstreamToolset(tools=[Tool(add)]), tool_selector='all', dynamic_catalog=True
+        )
+        ctx = build_run_context(None)
+        await toolset.get_tools(ctx)
+        instructions = await toolset.get_instructions(ctx)
+
+        assert isinstance(instructions, list)
+        assert instructions[0] == 'a'
+        assert isinstance(instructions[1], InstructionPart) and instructions[1].content == 'b'
+        # The catalog is appended at the end.
+        assert isinstance(instructions[2], InstructionPart) and 'async def add' in instructions[2].content
+
+    async def test_default_keeps_catalog_in_description_and_no_instructions(self) -> None:
+        """With `dynamic_catalog=False` (default) the catalog stays in the description."""
+        toolset = CodeModeToolset(wrapped=_build_function_toolset(add), tool_selector='all')
+        ctx = build_run_context(None)
+        tools = await toolset.get_tools(ctx)
+
+        description = tools['run_code'].tool_def.description
+        assert description is not None
+        assert 'async def add' in description
+        # Nothing stashed → defer to upstream (None for FunctionToolset).
+        assert await toolset.get_instructions(ctx) is None
+
+    async def test_empty_catalog_emits_no_instruction(self) -> None:
+        """No sandboxed tools → empty catalog → defer to upstream instructions."""
+        toolset = CodeModeToolset(wrapped=_build_function_toolset(), tool_selector='all', dynamic_catalog=True)
+        ctx = build_run_context(None)
+        tools = await toolset.get_tools(ctx)
+
+        description = tools['run_code'].tool_def.description
+        assert description is not None
+        assert 'sandboxed environment' in description
+        assert await toolset.get_instructions(ctx) is None
+
+    async def test_search_addendum_stays_in_description(self) -> None:
+        """The (cache-stable) search addendum stays in `run_code.description` even in dynamic mode."""
+        toolset = CodeModeToolset(
+            wrapped=_StaticToolset([_search_tool_def()]), tool_selector='all', dynamic_catalog=True
+        )
+        ctx = build_run_context(None)
+        tools = await toolset.get_tools(ctx)
+
+        description = tools['run_code'].tool_def.description
+        assert description is not None
+        assert _TOOL_SEARCH_ADDENDUM.strip() in description
+
+    async def test_for_run_step_preserves_catalog_stash(self) -> None:
+        """A per-step rebuild must carry `_last_catalog` so instructions stay populated."""
+
+        class _ChangingToolset(FunctionToolset[object]):
+            async def for_run_step(self, ctx: RunContext[object]) -> AbstractToolset[object]:
+                # Force `CodeModeToolset.for_run_step` down the `new_wrapped is not self.wrapped`
+                # branch by returning a distinct (but equivalent) wrapped instance.
+                return type(self)(tools=list(self.tools.values()))
+
+        toolset = CodeModeToolset(
+            wrapped=_ChangingToolset(tools=[Tool(add)]), tool_selector='all', dynamic_catalog=True
+        )
+        ctx = build_run_context(None)
+        await toolset.get_tools(ctx)
+        stashed = toolset._last_catalog  # pyright: ignore[reportPrivateUsage]
+        assert stashed  # populated
+
+        new_toolset = await toolset.for_run_step(ctx)
+        assert isinstance(new_toolset, CodeModeToolset)
+        assert new_toolset is not toolset
+        assert new_toolset._last_catalog == stashed  # pyright: ignore[reportPrivateUsage]
+
+    # -- capability per-run state -----------------------------------------
+
+    async def test_for_run_returns_fresh_state_when_enabled(self) -> None:
+        cap = CodeMode[object](dynamic_catalog=True)
+        cap._announced_tools.add('foo')  # pyright: ignore[reportPrivateUsage]
+        fresh = await cap.for_run(build_run_context(None))
+        assert fresh is not cap
+        assert fresh._announced_tools == set()  # pyright: ignore[reportPrivateUsage]
+
+    async def test_for_run_returns_self_when_disabled(self) -> None:
+        cap = CodeMode[object]()
+        assert await cap.for_run(build_run_context(None)) is cap
+
+    # -- discovery announcement: local search path ------------------------
+
+    async def test_announce_on_local_search_return(self) -> None:
+        from pydantic_ai.messages import ModelRequest, SystemPromptPart, ToolCallPart
+
+        cap = CodeMode[object](dynamic_catalog=True)
+        ctx = build_run_context(None)
+        await cap.after_tool_execute(
+            ctx,
+            call=ToolCallPart(tool_name='search_tools', args={}, tool_call_id='c1'),
+            tool_def=_search_tool_def(),
+            args={},
+            result={'discovered_tools': [{'name': 'weather', 'description': '...'}]},
+        )
+
+        assert ctx.pending_messages is not None
+        assert len(ctx.pending_messages) == 1
+        [request] = ctx.pending_messages[0].messages
+        assert isinstance(request, ModelRequest)
+        [part] = request.parts
+        assert isinstance(part, SystemPromptPart)
+        assert '`weather`' in part.content
+
+    async def test_no_announce_when_disabled(self) -> None:
+        """With `dynamic_catalog=False`, the hooks are inert even on a real search return."""
+        from pydantic_ai.messages import ToolCallPart
+
+        cap = CodeMode[object]()
+        ctx = build_run_context(None)
+        await cap.after_tool_execute(
+            ctx,
+            call=ToolCallPart(tool_name='search_tools', args={}, tool_call_id='c1'),
+            tool_def=_search_tool_def(),
+            args={},
+            result={'discovered_tools': [{'name': 'weather'}]},
+        )
+        assert ctx.pending_messages == []
+
+    async def test_announce_skipped_when_no_discoveries(self) -> None:
+        from pydantic_ai.messages import ToolCallPart
+
+        cap = CodeMode[object](dynamic_catalog=True)
+        ctx = build_run_context(None)
+        await cap.after_tool_execute(
+            ctx,
+            call=ToolCallPart(tool_name='search_tools', args={}, tool_call_id='c1'),
+            tool_def=_search_tool_def(),
+            args={},
+            result={'discovered_tools': []},
+        )
+        assert ctx.pending_messages == []
+
+    async def test_no_announce_for_non_search_tool(self) -> None:
+        """`tool_kind != 'tool-search'` short-circuits before reading the result."""
+        from pydantic_ai.messages import ToolCallPart
+
+        cap = CodeMode[object](dynamic_catalog=True)
+        ctx = build_run_context(None)
+        await cap.after_tool_execute(
+            ctx,
+            call=ToolCallPart(tool_name='add', args={}, tool_call_id='c1'),
+            tool_def=ToolDefinition(name='add', description='', parameters_json_schema={}),
+            args={},
+            # Even a `discovered_tools`-shaped result doesn't trigger an announcement:
+            # the `tool_kind` guard is the source of truth.
+            result={'discovered_tools': [{'name': 'spurious'}]},
+        )
+        assert ctx.pending_messages == []
+
+    async def test_no_duplicate_announcement_for_same_tool(self) -> None:
+        from pydantic_ai.messages import ToolCallPart
+
+        cap = CodeMode[object](dynamic_catalog=True)
+        ctx = build_run_context(None)
+        result = {'discovered_tools': [{'name': 'weather'}]}
+        for cid in ('c1', 'c2'):
+            await cap.after_tool_execute(
+                ctx,
+                call=ToolCallPart(tool_name='search_tools', args={}, tool_call_id=cid),
+                tool_def=_search_tool_def(),
+                args={},
+                result=result,
+            )
+        # Only the first discovery of `weather` announces.
+        assert ctx.pending_messages is not None
+        assert len(ctx.pending_messages) == 1
+
+    # -- discovery announcement: native search path -----------------------
+
+    async def test_announce_on_native_search_return_part(self) -> None:
+        from pydantic_ai.messages import ModelRequest, ModelResponse, NativeToolSearchReturnPart, SystemPromptPart
+        from pydantic_ai.usage import RequestUsage
+
+        cap = CodeMode[object](dynamic_catalog=True)
+        ctx = build_run_context(None)
+        response = ModelResponse(
+            parts=[
+                NativeToolSearchReturnPart(
+                    tool_name='tool_search',
+                    content={'discovered_tools': [{'name': 'weather', 'description': 'Get the weather.'}]},
+                    tool_call_id='c1',
+                )
+            ],
+            usage=RequestUsage(input_tokens=1, output_tokens=1),
+        )
+        await cap.after_model_request(ctx, request_context=None, response=response)  # pyright: ignore[reportArgumentType]
+
+        assert ctx.pending_messages is not None
+        assert len(ctx.pending_messages) == 1
+        [request] = ctx.pending_messages[0].messages
+        assert isinstance(request, ModelRequest)
+        [part] = request.parts
+        assert isinstance(part, SystemPromptPart) and '`weather`' in part.content
+
+    async def test_no_announce_for_unrelated_response_parts(self) -> None:
+        from pydantic_ai.messages import ModelResponse, NativeToolReturnPart, TextPart
+        from pydantic_ai.usage import RequestUsage
+
+        cap = CodeMode[object](dynamic_catalog=True)
+        ctx = build_run_context(None)
+        response = ModelResponse(
+            parts=[
+                TextPart('hi'),
+                NativeToolReturnPart(tool_name='whatever', content='ignored', tool_call_id='c1'),
+            ],
+            usage=RequestUsage(input_tokens=1, output_tokens=1),
+        )
+        await cap.after_model_request(ctx, request_context=None, response=response)  # pyright: ignore[reportArgumentType]
+        assert ctx.pending_messages == []
+
+    # -- `_extract_discovered_names` edge cases ---------------------------
+
+    @pytest.mark.parametrize(
+        ('content', 'expected'),
+        [
+            ('not a dict', []),
+            ({}, []),
+            ({'discovered_tools': 'not a list'}, []),
+            ({'discovered_tools': [{'name': 'a'}, 'not a dict', {'no_name': 1}, {'name': 42}]}, ['a']),
+        ],
+    )
+    def test_extract_discovered_names_handles_malformed(self, content: Any, expected: list[str]) -> None:
+        from pydantic_ai_harness.code_mode._capability import (
+            _extract_discovered_names,  # pyright: ignore[reportPrivateUsage]
+        )
+
+        assert _extract_discovered_names(content) == expected
+
+    # -- end-to-end via `Agent.run` ---------------------------------------
+
+    async def test_agent_run_announces_discovery_and_lists_catalog_in_instructions(self) -> None:
+        """`Agent.run` end-to-end: catalog in instructions, discovery enqueues an announcement.
+
+        Two-step run:
+          1. Model calls `search_tools(['weather'])` (the discovery surface).
+          2. After the local tool-search returns, `CodeMode.after_tool_execute` enqueues a
+             `SystemPromptPart`; the pending-message queue drains it into the next request.
+             On the wire it renders as an (XML-wrapped) `UserPromptPart` — mid-conversation
+             system content is no longer hoisted (pydantic/pydantic-ai#5509) — so the model
+             sees the announcement inline and replies.
+        """
+        from pydantic_ai.capabilities import ToolSearch
+        from pydantic_ai.messages import (
+            ModelMessage,
+            ModelRequest,
+            ModelResponse,
+            SystemPromptPart,
+            TextPart,
+            ToolCallPart,
+            ToolReturnPart,
+            ToolSearchReturnPart,
+            UserPromptPart,
+        )
+        from pydantic_ai.models.function import AgentInfo, FunctionModel
+        from pydantic_ai.usage import RequestUsage
+
+        captured_prompt_texts: list[list[str]] = []
+        captured_descriptions: list[str] = []
+
+        def model_fn(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            run_code_def = next(td for td in info.function_tools if td.name == 'run_code')
+            assert run_code_def.description is not None
+            captured_descriptions.append(run_code_def.description)
+
+            last_request = messages[-1]
+            assert isinstance(last_request, ModelRequest)
+            # The announcement may arrive as a `SystemPromptPart` or, after wire-rendering of
+            # mid-conversation system content, an (XML-wrapped) `UserPromptPart` — capture both.
+            captured_prompt_texts.append(
+                [
+                    p.content
+                    for p in last_request.parts
+                    if isinstance(p, (SystemPromptPart, UserPromptPart)) and isinstance(p.content, str)
+                ]
+            )
+
+            if len(captured_descriptions) == 1:
+                return ModelResponse(
+                    parts=[ToolCallPart(tool_name='search_tools', args={'queries': ['weather']}, tool_call_id='c1')],
+                    usage=RequestUsage(input_tokens=1, output_tokens=1),
+                )
+            return ModelResponse(parts=[TextPart('done')], usage=RequestUsage(input_tokens=1, output_tokens=1))
+
+        def weather(city: str) -> str:
+            """Get the weather."""
+            return f'sunny in {city}'  # pragma: no cover — only the signature matters.
+
+        agent: Agent[object, str] = Agent(
+            FunctionModel(model_fn),
+            tools=[Tool(weather, defer_loading=True)],
+            capabilities=[ToolSearch[object](), CodeMode[object](dynamic_catalog=True)],
+        )
+        result = await agent.run('please find a weather tool')
+
+        # `run_code.description` stayed static across both turns — no signature in the tool-defs block.
+        assert all('async def' not in d for d in captured_descriptions)
+        # The discovery announcement landed in turn 2's request (system- or user-framed).
+        assert len(captured_prompt_texts) >= 2
+        assert 'weather' in '\n'.join(captured_prompt_texts[1])
+        # The local `ToolSearchReturnPart` is in history.
+        history = result.all_messages()
+        assert any(
+            isinstance(p, ToolSearchReturnPart) for msg in history if isinstance(msg, ModelRequest) for p in msg.parts
+        )
+        assert any(
+            isinstance(p, ToolReturnPart) and p.tool_name == 'search_tools'
+            for msg in history
+            if isinstance(msg, ModelRequest)
+            for p in msg.parts
+        )
+        assert result.output == 'done'
+
+    async def test_run_code_calls_eager_tool_with_catalog_in_instructions(self) -> None:
+        """An eager tool whose signature lives in instructions is still callable via `run_code`."""
+        from pydantic_ai.messages import (
+            ModelMessage,
+            ModelRequest,
+            ModelResponse,
+            TextPart,
+            ToolCallPart,
+            ToolReturnPart,
+        )
+        from pydantic_ai.models.function import AgentInfo, FunctionModel
+        from pydantic_ai.usage import RequestUsage
+
+        def model_fn(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            run_code_def = next(td for td in info.function_tools if td.name == 'run_code')
+            assert run_code_def.description is not None
+            assert 'async def add' not in run_code_def.description
+            if not any(isinstance(msg, ModelResponse) for msg in messages):
+                return ModelResponse(
+                    parts=[
+                        ToolCallPart(
+                            tool_name='run_code',
+                            # CodeMode renders all tools as `async def` by default — use `await`.
+                            args={'code': 'result = await add(a=3, b=4)\nresult'},
+                            tool_call_id='c1',
+                        )
+                    ],
+                    usage=RequestUsage(input_tokens=1, output_tokens=1),
+                )
+            last_request = messages[-1]
+            assert isinstance(last_request, ModelRequest)
+            run_code_return = next(p for p in last_request.parts if isinstance(p, ToolReturnPart))
+            return ModelResponse(
+                parts=[TextPart(f'got {run_code_return.content}')],
+                usage=RequestUsage(input_tokens=1, output_tokens=1),
+            )
+
+        agent: Agent[object, str] = Agent(
+            FunctionModel(model_fn),
+            tools=[Tool(add)],
+            capabilities=[CodeMode[object](dynamic_catalog=True)],
+        )
+        result = await agent.run('add 3 and 4 via run_code')
+        assert result.output == 'got 7'
+
+
+def _unused_os_callback(fn: OsFunction, args: tuple[Any, ...], kwargs: dict[str, Any]) -> Any:
+    """An `os` callback for tests that only assert description/forwarding, never run code."""
+    return NOT_HANDLED  # pragma: no cover - never invoked by these tests
+
+
+class TestCodeModeOSAccess:
+    """`CodeMode(os_access=...)` / `mount=...` give sandboxed code host-backed OS access."""
+
+    async def test_description_default_notes_no_fs_env_or_clock(self) -> None:
+        """Without `os`/`mount`, the description states filesystem, env, and clock calls are
+        unavailable, so the model does not waste retries calling `pathlib`/`os` I/O."""
+        wrapper = CodeMode[object]().get_wrapper_toolset(_build_function_toolset(add))
+        assert isinstance(wrapper, CodeModeToolset)
+        description = (await wrapper.get_tools(build_run_context(None)))['run_code'].tool_def.description
+        assert description is not None
+        assert 'No filesystem, environment, or timing primitives' in description
+        assert 'their I/O operations are not supported in this configuration' in description
+
+    async def test_description_with_os_callback_notes_host_access(self) -> None:
+        """An `os` callback swaps the restriction line for the host-access note."""
+        wrapper = CodeMode[object](os_access=_unused_os_callback).get_wrapper_toolset(_build_function_toolset(add))
+        assert isinstance(wrapper, CodeModeToolset)
+        description = (await wrapper.get_tools(build_run_context(None)))['run_code'].tool_def.description
+        assert description is not None
+        assert 'Host-backed OS access' in description
+
+    async def test_description_mount_only_advertises_filesystem_not_env_or_clock(self, tmp_path: Path) -> None:
+        """A `mount` without `os` advertises filesystem access only -- it must not tell the model
+        that env/clock are host-backed, since a mount cannot route `os.getenv`/`datetime.now()`."""
+        wrapper = CodeMode[object](mount=MountDir('/work', str(tmp_path))).get_wrapper_toolset(
+            _build_function_toolset(add)
+        )
+        assert isinstance(wrapper, CodeModeToolset)
+        description = (await wrapper.get_tools(build_run_context(None)))['run_code'].tool_def.description
+        assert description is not None
+        # The regression guard: a mount must select the filesystem note, not the OS note that would
+        # (wrongly) advertise env/clock as host-routed -- this assert fails if the OS note is picked.
+        assert 'Mounted filesystem access' in description
+
+    async def test_description_host_access_note_shows_with_no_sandboxed_tools(self) -> None:
+        """The host-access note appears even when no tools are sandboxed (base description)."""
+        # `tools=[]` sandboxes nothing, so `run_code` renders the base description path.
+        wrapper = CodeMode[object](os_access=_unused_os_callback, tools=[]).get_wrapper_toolset(
+            _build_function_toolset(add)
+        )
+        assert isinstance(wrapper, CodeModeToolset)
+        description = (await wrapper.get_tools(build_run_context(None)))['run_code'].tool_def.description
+        assert description is not None
+        assert 'Host-backed OS access' in description
+
+    async def test_os_callback_dispatches_inside_run_code(self) -> None:
+        """An `os` callback is threaded through `feed_start` and every `resume`, so OS calls
+        keep dispatching even after a tool call suspends and resumes the sandbox."""
+
+        def os_cb(fn: OsFunction, args: tuple[Any, ...], kwargs: dict[str, Any]) -> Any:
+            if fn == 'os.getenv':
+                return 'envval'
+            return NOT_HANDLED  # pragma: no cover - sandbox only calls os.getenv here
+
+        wrapper = CodeMode[object](os_access=os_cb).get_wrapper_toolset(_build_function_toolset(add))
+        assert isinstance(wrapper, CodeModeToolset)
+        ctx = await build_ctx(None, wrapper)
+        tools = await wrapper.get_tools(ctx)
+        # The tool call forces a FunctionSnapshot -> FutureSnapshot round-trip; the os.getenv
+        # afterwards only resolves if `os` survived those resumes.
+        code = "import os\nx = await add(a=2, b=3)\nhome = os.getenv('THING')\n{'sum': x, 'home': home}"
+        result = await wrapper.call_tool('run_code', {'code': code}, ctx, tools['run_code'])
+        assert result.return_value == {'sum': 5, 'home': 'envval'}
+
+    async def test_os_access_persists_across_run_code_calls(self) -> None:
+        """`os` is supplied on every `feed_start`, so OS access still works on a later
+        `run_code` call that reuses the persisted (non-fresh) REPL."""
+
+        def os_cb(fn: OsFunction, args: tuple[Any, ...], kwargs: dict[str, Any]) -> Any:
+            if fn == 'os.getenv':
+                return 'persisted'
+            return NOT_HANDLED  # pragma: no cover - sandbox only calls os.getenv here
+
+        wrapper = CodeMode[object](os_access=os_cb).get_wrapper_toolset(_build_function_toolset(add))
+        assert isinstance(wrapper, CodeModeToolset)
+        ctx = await build_ctx(None, wrapper)
+        tools = await wrapper.get_tools(ctx)
+        first = await wrapper.call_tool('run_code', {'code': "import os\nos.getenv('A')"}, ctx, tools['run_code'])
+        assert first.return_value == 'persisted'
+        # Second call reuses the REPL (so `import os` carries over) and must still dispatch.
+        second = await wrapper.call_tool('run_code', {'code': "os.getenv('B')"}, ctx, tools['run_code'])
+        assert second.return_value == 'persisted'
+
+    async def test_abstract_os_instance_dispatches_inside_run_code(self) -> None:
+        """An `AbstractOS` instance is accepted as the `os` value and dispatches OS calls."""
+        wrapper = CodeMode[object](os_access=OSAccess(environ={'THING': 'fromabs'})).get_wrapper_toolset(
+            _build_function_toolset(add)
+        )
+        assert isinstance(wrapper, CodeModeToolset)
+        ctx = await build_ctx(None, wrapper)
+        tools = await wrapper.get_tools(ctx)
+        result = await wrapper.call_tool('run_code', {'code': "import os\nos.getenv('THING')"}, ctx, tools['run_code'])
+        assert result.return_value == 'fromabs'
+
+    async def test_os_callback_exception_becomes_model_retry(self) -> None:
+        """A raising `os` callback surfaces as a `ModelRetry`, like any other sandbox runtime
+        error -- it must not crash the agent loop."""
+
+        def os_cb(fn: OsFunction, args: tuple[Any, ...], kwargs: dict[str, Any]) -> Any:
+            raise ValueError('boom from os')
+
+        wrapper = CodeMode[object](os_access=os_cb).get_wrapper_toolset(_build_function_toolset(add))
+        assert isinstance(wrapper, CodeModeToolset)
+        ctx = await build_ctx(None, wrapper)
+        tools = await wrapper.get_tools(ctx)
+        with pytest.raises(ModelRetry, match='boom from os'):
+            await wrapper.call_tool('run_code', {'code': "import os\nos.getenv('X')"}, ctx, tools['run_code'])
+
+    async def test_os_callback_returning_value_answers_call_including_none(self) -> None:
+        """Returning a value from the `os` callback -- even `None` -- *answers* the call.
+
+        Allow-listed keys resolve; every other key reads back as `None`, exactly like a real
+        unset env var, so the sandbox keeps running with no retry. This is how a callback hides
+        a secret: by answering with an empty value, not by refusing the call.
+        """
+        allowed = {'API_KEY': 'sk-xxx'}
+
+        def os_cb(fn: OsFunction, args: tuple[Any, ...], kwargs: dict[str, Any]) -> Any:
+            if fn == 'os.getenv':
+                return allowed.get(args[0])
+            return NOT_HANDLED  # pragma: no cover - sandbox only calls os.getenv here
+
+        wrapper = CodeMode[object](os_access=os_cb).get_wrapper_toolset(_build_function_toolset(add))
+        assert isinstance(wrapper, CodeModeToolset)
+        ctx = await build_ctx(None, wrapper)
+        tools = await wrapper.get_tools(ctx)
+        code = "import os\n{'allowed': os.getenv('API_KEY'), 'hidden': os.getenv('SECRET')}"
+        result = await wrapper.call_tool('run_code', {'code': code}, ctx, tools['run_code'])
+        assert result.return_value == {'allowed': 'sk-xxx', 'hidden': None}
+
+    async def test_os_callback_not_handled_refuses_call_as_model_retry(self) -> None:
+        """Returning `NOT_HANDLED` *refuses* the call rather than answering it.
+
+        The OS function is treated as unsupported, so it raises in the sandbox and surfaces as
+        `ModelRetry`. This is the counterpart to returning a value: refusing is not the same as
+        answering `None`, and using it for a key the model expects will burn retries.
+        """
+
+        def os_cb(fn: OsFunction, args: tuple[Any, ...], kwargs: dict[str, Any]) -> Any:
+            return NOT_HANDLED
+
+        wrapper = CodeMode[object](os_access=os_cb).get_wrapper_toolset(_build_function_toolset(add))
+        assert isinstance(wrapper, CodeModeToolset)
+        ctx = await build_ctx(None, wrapper)
+        tools = await wrapper.get_tools(ctx)
+        with pytest.raises(ModelRetry, match='not supported in this environment'):
+            await wrapper.call_tool('run_code', {'code': "import os\nos.getenv('X')"}, ctx, tools['run_code'])
+
+    async def test_mount_exposes_host_directory(self, tmp_path: Path) -> None:
+        """A `mount` exposes a host directory inside the sandbox, threaded through resumes."""
+        (tmp_path / 'data.txt').write_text('hello-from-host')
+        wrapper = CodeMode[object](mount=MountDir('/work', str(tmp_path))).get_wrapper_toolset(
+            _build_function_toolset(add)
+        )
+        assert isinstance(wrapper, CodeModeToolset)
+        ctx = await build_ctx(None, wrapper)
+        tools = await wrapper.get_tools(ctx)
+        code = "from pathlib import Path\nawait add(a=1, b=1)\nPath('/work/data.txt').read_text()"
+        result = await wrapper.call_tool('run_code', {'code': code}, ctx, tools['run_code'])
+        assert result.return_value == 'hello-from-host'
+
+    async def test_mount_accepts_list_of_directories(self, tmp_path: Path) -> None:
+        """`mount` accepts a `list[MountDir]`; each directory is exposed at its virtual path."""
+        (tmp_path / 'a').mkdir()
+        (tmp_path / 'b').mkdir()
+        (tmp_path / 'a' / 'f.txt').write_text('AA')
+        (tmp_path / 'b' / 'f.txt').write_text('BB')
+        mounts = [MountDir('/a', str(tmp_path / 'a')), MountDir('/b', str(tmp_path / 'b'))]
+        wrapper = CodeMode[object](mount=mounts).get_wrapper_toolset(_build_function_toolset(add))
+        assert isinstance(wrapper, CodeModeToolset)
+        ctx = await build_ctx(None, wrapper)
+        tools = await wrapper.get_tools(ctx)
+        code = "from pathlib import Path\nPath('/a/f.txt').read_text() + Path('/b/f.txt').read_text()"
+        result = await wrapper.call_tool('run_code', {'code': code}, ctx, tools['run_code'])
+        assert result.return_value == 'AABB'
+
+    def test_capability_forwards_os_and_mount_to_toolset(self, tmp_path: Path) -> None:
+        """`CodeMode` forwards `os_access`/`mount` onto the `CodeModeToolset` it builds."""
+        mount = MountDir('/work', str(tmp_path))
+        wrapper = CodeMode[object](os_access=_unused_os_callback, mount=mount).get_wrapper_toolset(
+            _build_function_toolset(add)
+        )
+        assert isinstance(wrapper, CodeModeToolset)
+        assert wrapper.os_access is _unused_os_callback
+        assert wrapper.mount is mount
+
+
 def _search_tool_def(description: str = 'Search for tools.') -> ToolDefinition:
-    """Create a ToolDefinition mimicking the search_tools tool from ToolSearchToolset."""
+    """Create a ToolDefinition mimicking the search_tools tool from ToolSearchToolset.
+
+    Carries `tool_kind='tool-search'`, matching what pydantic-ai emits (since 1.95.0);
+    CodeMode routes it native off `tool_kind`, not its name.
+    """
     from pydantic_ai.toolsets._tool_search import _SEARCH_TOOLS_NAME
 
     return ToolDefinition(
         name=_SEARCH_TOOLS_NAME,
         description=description,
         parameters_json_schema={'type': 'object', 'properties': {'keywords': {'type': 'string'}}},
+        tool_kind='tool-search',
     )
+
+
+class TestGlobalModeIsSequential:
+    """`_global_mode_is_sequential` dispatches across pydantic-ai v1 and v2.
+
+    v1's `get_parallel_execution_mode` takes the pending calls list; v2 dropped
+    the argument. The helper inspects arity and calls the matching shape, so
+    both code paths are exercised here regardless of which major is installed.
+    """
+
+    def test_v1_signature_with_calls_argument(self) -> None:
+        def parallel(calls: list[ToolCallPart]) -> ParallelExecutionMode:
+            return 'parallel'
+
+        def sequential(calls: list[ToolCallPart]) -> ParallelExecutionMode:
+            return 'sequential'
+
+        assert _global_mode_is_sequential(parallel) is False
+        assert _global_mode_is_sequential(sequential) is True
+
+    def test_v2_signature_without_arguments(self) -> None:
+        def parallel() -> ParallelExecutionMode:
+            return 'parallel'
+
+        def sequential() -> ParallelExecutionMode:
+            return 'sequential'
+
+        assert _global_mode_is_sequential(parallel) is False
+        assert _global_mode_is_sequential(sequential) is True
