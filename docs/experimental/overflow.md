@@ -106,6 +106,9 @@ The default band, when you pass no `bands`, is `Spill(then=Truncate())` at a 10,
 threshold: lossless when a store accepts the write, a bounded truncation otherwise -- zero LLM
 cost and no silent drop.
 
+`Passthrough()` is an explicit no-op action for `bands` or `per_tool` lists, leaving matching
+returns untouched.
+
 ### Fallbacks with `then`
 
 Every action takes an optional `then`, applied when the action cannot run: a `Spill` whose
@@ -158,7 +161,8 @@ a `warnings.warn`, since it cannot be safely truncated.
 Thresholds are measured in characters by default. Set `over_tokens=True` to measure in
 estimated tokens (the same ~4-chars-per-token heuristic as [compaction](compaction.md)); pass a
 `tokenizer` callable for accuracy. `Truncate.max_chars` is always characters -- truncation is a
-character operation regardless of the threshold unit.
+character operation regardless of the threshold unit. Set `strip_ansi=True` to strip ANSI
+escape sequences from text returns before measuring and reducing.
 
 ## Spill store
 

@@ -122,3 +122,7 @@ RepoContext(
 ## API reference
 
 ::: pydantic_ai_harness.experimental.context.RepoContext
+
+::: pydantic_ai_harness.experimental.context.AgentContextInventory
+
+::: pydantic_ai_harness.experimental.context.AssetRoot

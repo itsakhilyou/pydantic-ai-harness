@@ -50,13 +50,16 @@ which all land at the end -- survive truncation.
 | `allowed_commands` | If non-empty, only these executables may run (allowlist). |
 | `denied_commands` | These executables are always rejected (denylist). |
 | `denied_operators` | Shell operators (e.g. `>`, `>>`, `|`) that are rejected when present. |
-| `allow_interactive` | If `False` (default), commands that expect a TTY (`vi`, `sudo`, `ssh`, …) are blocked. |
+| `allow_interactive` | If `False` (default), commands that expect a TTY (`vi`, `sudo`, `ssh`, ...) are blocked. |
 
 `allowed_commands` and `denied_commands` are mutually exclusive -- set one, not
 both. `denied_commands` defaults to a list of destructive commands (`rm`,
-`rmdir`, `mkfs`, `dd`, `shutdown`, `reboot`, …); pass an empty list to disable.
-The executable name is extracted with `shlex`, so arguments don't bypass the
-check.
+`rmdir`, `mkfs`, `dd`, `format`, `shutdown`, `reboot`, `halt`, `poweroff`,
+`init`); pass an empty list to disable. The executable name is extracted with
+`shlex`, so arguments don't bypass the check.
+
+A denied or blocked command surfaces to the model as a `ModelRetry` (the model
+can retry with an allowed command) rather than aborting the run.
 
 > **These checks are best-effort, not a security boundary.** A sufficiently
 > motivated agent can defeat them (e.g. `bash -c '...'`, env-var indirection).
@@ -115,8 +118,8 @@ explicitly when you replace the environment.
 ## Background processes
 
 `start_command` writes stdout/stderr to temp files and returns a short ID. Use
-`check_command(id)` to poll and `stop_command(id)` to terminate and collect
-final output. Processes are launched in their own session (`start_new_session`)
+`check_command(command_id)` to poll and `stop_command(command_id)` to terminate
+and collect final output. Processes are launched in their own session (`start_new_session`)
 so the whole process group can be signalled -- `SIGTERM`, escalating to
 `SIGKILL` after a grace period.
 
@@ -128,10 +131,11 @@ agent that forgets to call `stop_command` won't leak processes.
 ## Working directory
 
 By default each command runs in `cwd` and `cd` has no lasting effect. Set
-`persist_cwd=True` to make `cd` sticky: the toolset appends a `pwd` sentinel to
-successful commands, parses the result, and carries the new directory into
-subsequent calls. Commands containing `;` skip the sentinel injection so the
-`&&`-gated sentinel can't be bypassed.
+`persist_cwd=True` to make `cd` sticky across calls: each command is wrapped so
+that after it runs, its final working directory is recorded to a private temp
+file, and that directory is carried into subsequent calls. The path is only
+updated when the command exits `0`, and the record is written out-of-band (not
+to stdout) so command output can never spoof the tracked directory.
 
 ## Configuration
 

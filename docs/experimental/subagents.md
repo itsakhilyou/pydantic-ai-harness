@@ -235,3 +235,5 @@ SubAgent(
 ::: pydantic_ai_harness.experimental.subagents.SubAgents
 
 ::: pydantic_ai_harness.experimental.subagents.SubAgent
+
+::: pydantic_ai_harness.experimental.subagents.AgentOverride

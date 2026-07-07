@@ -70,6 +70,8 @@ The plan is never injected into the system prompt or instructions. Static usage 
 ## Configuration
 
 ```python
+from pydantic_ai_harness.experimental.planning import Planning
+
 Planning(
     guidance=None,      # static system-prompt guidance; None = default, '' = omit
     cache_ttl='5m',     # TTL for the cache breakpoint before the reminder ('5m' | '1h')

@@ -42,7 +42,8 @@ the registered `read_tool_result(handle, offset, limit, from_end, pattern)` tool
 Code pattern, the core [#4352](https://github.com/pydantic/pydantic-ai/issues/4352) design).
 That tool is bounded: `offset >= 0`, `limit` clamped to a built-in line cap, the joined output
 capped, and `pattern` is a literal substring (not a regex), so a model-supplied value cannot
-hang the host with catastrophic backtracking.
+hang the host with catastrophic backtracking. The read-back tool's own returns are exempt from
+reduction, so a `read_tool_result` result is never itself spilled or truncated.
 
 ### Both `return_value` and `content` are reduced
 
@@ -86,6 +87,9 @@ agent = Agent(
 The default band, when you pass no `bands`, is `Spill(then=Truncate())`: lossless when a
 store accepts the write, a bounded truncation otherwise -- zero LLM cost and no silent drop.
 
+`Passthrough()` is an explicit no-op action for `bands` or `per_tool` lists, leaving matching
+returns untouched.
+
 ### Fallbacks with `then`
 
 Every action takes an optional `then`, applied when the action cannot run: a `Spill` whose
@@ -99,12 +103,25 @@ spill -> truncate.
 `tail`); `tool_filter` (a `ToolSelector`) scopes which tools the capability touches at all.
 
 ```python
-OverflowingToolOutput(
-    per_tool={
-        'read_file': [Band(over=8_000, action=Truncate(strategy=TruncationStrategy.head))],
-        'run_shell': [Band(over=8_000, action=Truncate(strategy=TruncationStrategy.tail))],
-    },
-    tool_filter=['read_file', 'run_shell', 'search'],
+from pydantic_ai import Agent
+from pydantic_ai_harness.experimental.overflow import (
+    Band,
+    OverflowingToolOutput,
+    Truncate,
+    TruncationStrategy,
+)
+
+agent = Agent(
+    'openai:gpt-4o',
+    capabilities=[
+        OverflowingToolOutput(
+            per_tool={
+                'read_file': [Band(over=8_000, action=Truncate(strategy=TruncationStrategy.head))],
+                'run_shell': [Band(over=8_000, action=Truncate(strategy=TruncationStrategy.tail))],
+            },
+            tool_filter=['read_file', 'run_shell', 'search'],
+        )
+    ],
 )
 ```
 
@@ -113,7 +130,8 @@ OverflowingToolOutput(
 Thresholds are measured in characters by default. Set `over_tokens=True` to measure in
 estimated tokens (the same ~4-chars-per-token heuristic as `compaction`); pass a `tokenizer`
 callable for accuracy. `Truncate.max_chars` is always characters -- truncation is a
-character operation regardless of the threshold unit.
+character operation regardless of the threshold unit. Set `strip_ansi=True` to strip ANSI
+escape sequences from text returns before measuring and reducing.
 
 ## Spill store
 
@@ -126,6 +144,9 @@ workspace once #4352 lands) can resolve the same handle in another process. Supp
 backend with `store=...`.
 
 ```python
+from typing import Protocol
+
+
 class OverflowStore(Protocol):
     async def write(self, key: str, data: bytes) -> str: ...   # returns a handle
     async def read(self, handle: str) -> bytes: ...
@@ -147,7 +168,11 @@ agent that still wants to read a spill. To bound disk use, opt into age-based pr
 ```python
 from datetime import timedelta
 
+from pydantic_ai import Agent
+from pydantic_ai_harness.experimental.overflow import LocalFileStore, OverflowingToolOutput
+
 store = LocalFileStore(cleanup_after=timedelta(hours=6))  # default: None = keep forever
+agent = Agent('openai:gpt-4o', capabilities=[OverflowingToolOutput(store=store)])
 ```
 
 When set, a `write` schedules a background prune (a daemon thread, off the hot path) that
@@ -175,6 +200,11 @@ for path in root.rglob('*'):
 A `Summarize` call is a real request to the model, so its full usage -- tokens and the
 request itself -- folds into the run's `ctx.usage`, exactly like `SummarizingCompaction`. No
 token caps are imposed on the summary call. A `UsageLimits` request limit will see it.
+
+By default `Summarize` inherits the running agent's model (`ctx.model`). Pass a model id or
+instance to `Summarize(model=...)` to override, or a `summarize` callable to bypass the
+built-in prompt entirely. The `summary_prompt` template on the capability must contain both
+`{tool_name}` and `{output}` placeholders.
 
 ## Edge cases
 

@@ -6,7 +6,7 @@ description: Give a Pydantic AI agent sandboxed, glob-filtered file access scope
 # FileSystem
 
 `FileSystem` gives an agent a fixed set of file tools -- read, write, edit, list,
-search, find, and inspect -- all scoped to a single `root_dir`. Every path is
+search, find, create, and inspect -- all scoped to a single `root_dir`. Every path is
 resolved and containment-checked (symlinks included) before any I/O, and access
 is filtered through allow / deny / protected glob patterns.
 
@@ -122,6 +122,11 @@ The three rules apply at two different granularities:
 
 So with `allowed_patterns=['*.py']`, `list_directory('.')` succeeds and shows
 only the `.py` entries; `read_file('notes.md')` is rejected.
+
+Note that the walkers filter entries with write-level access, so
+`protected_patterns` matches are omitted from `list_directory`, `search_files`,
+and `find_files` output even though those exact paths remain directly readable
+via `read_file`/`file_info`.
 
 !!! note
     Dotfiles and dot-directories (`.git`, `.env`, `.github`, ...) are skipped by

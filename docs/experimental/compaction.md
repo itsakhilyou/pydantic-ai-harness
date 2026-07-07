@@ -255,7 +255,7 @@ The span name is the static `compact_messages`; the strategy is an attribute, no
 
 ## Out of scope
 
-These strategies compress or drop context *inside* the window. Moving large tool outputs *out* of the window -- overflowing them to a file the agent (or a subagent) can query on demand -- is a separate capability, not lossy truncation. Prefer it over capping individual tool outputs.
+These strategies compress or drop context *inside* the window. Moving large tool outputs *out* of the window -- overflowing them to a file the agent (or a subagent) can query on demand -- is a separate capability ([overflow](overflow.md)), not lossy truncation. Prefer it over capping individual tool outputs.
 
 ## API reference
 

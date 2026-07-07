@@ -283,7 +283,7 @@ Code runs inside [Monty](https://github.com/pydantic/monty), a sandboxed Python 
 - No wall-clock or timing primitives by default: `asyncio.sleep`, `datetime.datetime.now()`, `datetime.date.today()`, and the `time` module. `datetime.datetime.now()` / `datetime.date.today()` become available with an `os_access` handler (above); `asyncio.sleep` and `time` never do.
 - No `import *`.
 - Filesystem I/O needs an `os_access` handler or a `mount`; `os.getenv` / `os.environ` need an `os_access` handler.
-- Tools requiring approval or with deferred execution are excluded from the sandbox.
+- Tools requiring approval or with deferred (`CallDeferred`) execution are sandboxed like any other tool; without a `HandleDeferredToolCalls` (or equivalent) capability on the agent to resolve them inline, calling one from `run_code` raises an error that surfaces to the model as a retry.
 
 ## Agent spec (YAML/JSON)
 
