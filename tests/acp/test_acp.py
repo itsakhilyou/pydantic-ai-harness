@@ -21,7 +21,6 @@ from uuid import uuid4
 import acp
 import pytest
 from acp import RequestError, schema
-from acp.interfaces import Client
 from pydantic import BaseModel
 from pydantic_ai import Agent, DeferredToolRequests, RunContext, UsageLimitExceeded
 from pydantic_ai.messages import (
@@ -63,10 +62,10 @@ from pydantic_ai_harness.acp import (
     run_acp_stdio_sync,
 )
 from pydantic_ai_harness.acp._adapter import _finish_reason_to_stop_reason, _TurnState, _usage_limit_stop_reason
-from pydantic_ai_harness.acp._present import _HANDLERS, absolutize
+from pydantic_ai_harness.acp._presentation import _HANDLERS, absolutize
 from pydantic_ai_harness.acp._serialize import MAX_RAW_FIELD_CHARS, MAX_TEXT_UPDATE_BYTES, _escaped_len, chunk_text
 from pydantic_ai_harness.acp._session import SessionState
-from tests._acp_clients import RecordingClient  # pyright: ignore[reportMissingTypeStubs]
+from tests._acp_clients import RecordingClient, RecordingClientBase  # pyright: ignore[reportMissingTypeStubs]
 
 pytestmark = pytest.mark.anyio
 
@@ -75,21 +74,18 @@ pytestmark = pytest.mark.anyio
 PermissionDecider = Callable[[schema.ToolCallUpdate], str | None]
 
 
-class FakeClient(Client):
+class FakeClient(RecordingClientBase):
     """In-memory ACP client recording `session/update`s and answering `session/request_permission`.
 
     `decider` chooses the permission option per request (default: allow once). Returning `None`
-    from the decider produces a cancelled outcome. Terminal and filesystem callbacks are unused
-    by the adapter and raise if called.
+    from the decider produces a cancelled outcome. Filesystem and terminal callbacks stay stubbed
+    by `RecordingClientBase`.
     """
 
     def __init__(self, decider: PermissionDecider | None = None) -> None:
-        self.updates: list[object] = []
+        super().__init__()
         self.permission_requests: list[schema.ToolCallUpdate] = []
         self._decider: PermissionDecider = decider or (lambda _call: 'allow_once')
-
-    async def session_update(self, session_id: str, update: object, **kwargs: object) -> None:
-        self.updates.append(update)
 
     async def request_permission(
         self,
@@ -103,66 +99,6 @@ class FakeClient(Client):
         if option_id is None:
             return schema.RequestPermissionResponse(outcome=schema.DeniedOutcome(outcome='cancelled'))
         return schema.RequestPermissionResponse(outcome=schema.AllowedOutcome(outcome='selected', option_id=option_id))
-
-    def on_connect(self, conn: object) -> None:
-        return None
-
-    # The adapter never calls these client capabilities; present only to satisfy the interface.
-    async def read_text_file(
-        self, session_id: str, path: str, line: int | None = None, limit: int | None = None, **kwargs: object
-    ) -> schema.ReadTextFileResponse:
-        raise NotImplementedError  # pragma: no cover - unused client capability
-
-    async def write_text_file(
-        self, session_id: str, path: str, content: str, **kwargs: object
-    ) -> schema.WriteTextFileResponse | None:
-        raise NotImplementedError  # pragma: no cover - unused client capability
-
-    async def create_terminal(
-        self,
-        session_id: str,
-        command: str,
-        args: list[str] | None = None,
-        env: list[schema.EnvVariable] | None = None,
-        cwd: str | None = None,
-        output_byte_limit: int | None = None,
-        **kwargs: object,
-    ) -> schema.CreateTerminalResponse:
-        raise NotImplementedError  # pragma: no cover - unused client capability
-
-    async def terminal_output(
-        self, session_id: str, terminal_id: str, **kwargs: object
-    ) -> schema.TerminalOutputResponse:
-        raise NotImplementedError  # pragma: no cover - unused client capability
-
-    async def wait_for_terminal_exit(
-        self, session_id: str, terminal_id: str, **kwargs: object
-    ) -> schema.WaitForTerminalExitResponse:
-        raise NotImplementedError  # pragma: no cover - unused client capability
-
-    async def kill_terminal(
-        self, session_id: str, terminal_id: str, **kwargs: object
-    ) -> schema.KillTerminalResponse | None:
-        raise NotImplementedError  # pragma: no cover - unused client capability
-
-    async def release_terminal(
-        self, session_id: str, terminal_id: str, **kwargs: object
-    ) -> schema.ReleaseTerminalResponse | None:
-        raise NotImplementedError  # pragma: no cover - unused client capability
-
-    async def create_elicitation(
-        self, message: str, mode: schema.ElicitationMode, **kwargs: object
-    ) -> schema.CreateElicitationResponse:
-        raise NotImplementedError  # pragma: no cover - unused client capability
-
-    async def complete_elicitation(self, elicitation_id: str, **kwargs: object) -> None:
-        raise NotImplementedError  # pragma: no cover - unused client capability
-
-    async def ext_method(self, method: str, params: dict[str, object]) -> dict[str, object]:
-        raise RequestError.method_not_found(method)  # pragma: no cover - unused client capability
-
-    async def ext_notification(self, method: str, params: dict[str, object]) -> None:
-        return None  # pragma: no cover - unused client capability
 
     # --- assertion helpers -------------------------------------------------------------
 
@@ -1735,7 +1671,7 @@ class TestUnsupportedMethods:
         for call in calls:
             with pytest.raises(RequestError) as excinfo:
                 await call
-            assert excinfo.value.code == -32601  # method_not_found, as CONFORMANCE.md claims
+            assert excinfo.value.code == -32601  # method_not_found for an unsupported method
 
 
 class TestEntryPoints:

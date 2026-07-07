@@ -21,25 +21,17 @@ import socket
 from types import TracebackType
 
 import acp
-from acp import schema
 from acp.client.connection import ClientSideConnection
 
+from tests._acp_clients import RecordingClientBase  # pyright: ignore[reportMissingTypeStubs]
 
-class WireClient(acp.Client):
+
+class WireClient(RecordingClientBase):
     """A real ACP client reached over the wire, recording the `session/update`s it receives.
 
     The protocol-level conformance tests in this batch do not drive permission, filesystem, or
-    terminal methods, so those are present only to satisfy the `acp.Client` interface.
+    terminal methods; those stay stubbed by `RecordingClientBase`.
     """
-
-    def __init__(self) -> None:
-        self.updates: list[object] = []
-
-    async def session_update(self, session_id: str, update: object, **kwargs: object) -> None:
-        self.updates.append(update)
-
-    def on_connect(self, conn: object) -> None:
-        return None  # pragma: no cover - unused
 
     def texts(self) -> str:
         """The concatenated agent message text received over the wire (other update kinds skipped)."""
@@ -48,73 +40,6 @@ class WireClient(acp.Client):
             if getattr(update, 'session_update', '') == 'agent_message_chunk':
                 out.append(getattr(getattr(update, 'content', None), 'text', ''))
         return ''.join(out)
-
-    # --- unused client capabilities (present only to satisfy the interface) ----------------
-
-    async def request_permission(
-        self,
-        session_id: str,
-        tool_call: schema.ToolCallUpdate,
-        options: list[schema.PermissionOption],
-        **kwargs: object,
-    ) -> schema.RequestPermissionResponse:
-        raise NotImplementedError  # pragma: no cover - unused client capability
-
-    async def read_text_file(
-        self, session_id: str, path: str, line: int | None = None, limit: int | None = None, **kwargs: object
-    ) -> schema.ReadTextFileResponse:
-        raise NotImplementedError  # pragma: no cover - unused client capability
-
-    async def write_text_file(
-        self, session_id: str, path: str, content: str, **kwargs: object
-    ) -> schema.WriteTextFileResponse | None:
-        raise NotImplementedError  # pragma: no cover - unused client capability
-
-    async def create_terminal(
-        self,
-        session_id: str,
-        command: str,
-        args: list[str] | None = None,
-        env: list[schema.EnvVariable] | None = None,
-        cwd: str | None = None,
-        output_byte_limit: int | None = None,
-        **kwargs: object,
-    ) -> schema.CreateTerminalResponse:
-        raise NotImplementedError  # pragma: no cover - unused client capability
-
-    async def terminal_output(
-        self, session_id: str, terminal_id: str, **kwargs: object
-    ) -> schema.TerminalOutputResponse:
-        raise NotImplementedError  # pragma: no cover - unused client capability
-
-    async def wait_for_terminal_exit(
-        self, session_id: str, terminal_id: str, **kwargs: object
-    ) -> schema.WaitForTerminalExitResponse:
-        raise NotImplementedError  # pragma: no cover - unused client capability
-
-    async def kill_terminal(
-        self, session_id: str, terminal_id: str, **kwargs: object
-    ) -> schema.KillTerminalResponse | None:
-        raise NotImplementedError  # pragma: no cover - unused client capability
-
-    async def release_terminal(
-        self, session_id: str, terminal_id: str, **kwargs: object
-    ) -> schema.ReleaseTerminalResponse | None:
-        raise NotImplementedError  # pragma: no cover - unused client capability
-
-    async def create_elicitation(
-        self, message: str, mode: schema.ElicitationMode, **kwargs: object
-    ) -> schema.CreateElicitationResponse:
-        raise NotImplementedError  # pragma: no cover - unused client capability
-
-    async def complete_elicitation(self, elicitation_id: str, **kwargs: object) -> None:
-        raise NotImplementedError  # pragma: no cover - unused client capability
-
-    async def ext_method(self, method: str, params: dict[str, object]) -> dict[str, object]:
-        raise acp.RequestError.method_not_found(method)  # pragma: no cover - unused client capability
-
-    async def ext_notification(self, method: str, params: dict[str, object]) -> None:
-        return None  # pragma: no cover - unused client capability
 
 
 class wire_agent:

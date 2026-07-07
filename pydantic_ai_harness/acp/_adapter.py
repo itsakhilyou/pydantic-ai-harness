@@ -50,7 +50,13 @@ from pydantic_ai.usage import RunUsage, UsageLimits
 
 from ._content import PromptContentBlock, prompt_blocks_to_user_content
 from ._permission import PermissionPolicy, ToolCallPermission, default_permission_scope
-from ._present import ToolCallContent, ToolCallPresentation, ToolCallPresenter, absolutize, default_coding_presenter
+from ._presentation import (
+    ToolCallContent,
+    ToolCallPresentation,
+    ToolCallPresenter,
+    absolutize,
+    default_coding_presenter,
+)
 from ._serialize import bounded_jsonable, chunk_text, jsonable
 from ._session import AcpSession, AcpSessionConfig, McpServers, SessionConfigFunc, SessionState, SessionUpdate
 from ._store import SessionStore, StoredSession

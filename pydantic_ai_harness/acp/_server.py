@@ -15,7 +15,7 @@ from pydantic_ai.tools import AgentDepsT
 
 from ._adapter import DEFAULT_VERSION, PydanticAIACPAgent
 from ._permission import PermissionPolicy
-from ._present import ToolCallPresenter
+from ._presentation import ToolCallPresenter
 from ._session import SessionConfigFunc
 from ._store import SessionStore
 

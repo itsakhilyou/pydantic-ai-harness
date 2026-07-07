@@ -1,4 +1,4 @@
-"""Tests for the ACP-client-backed filesystem and terminal toolsets (`_native.py`)."""
+"""Tests for the ACP-client-backed filesystem and terminal toolsets (`_client_toolsets.py`)."""
 
 from __future__ import annotations
 

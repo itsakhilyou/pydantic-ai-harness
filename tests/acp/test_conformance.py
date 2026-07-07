@@ -6,8 +6,8 @@ compared back against itself. They run through the SDK's JSON-RPC router and ser
 cover what direct-call tests cannot: a method the router gates before the adapter sees it, and a
 frame whose serialized bytes overrun the client's read buffer.
 
-Each test names the spec clause it enforces; see `pydantic_ai_harness/acp/CONFORMANCE.md` for the
-adapter's supported-capability summary.
+Each test names the spec clause it enforces; the package README's feature sections and
+"Cancellation and limitations" summarize the adapter's supported surface.
 """
 
 from __future__ import annotations

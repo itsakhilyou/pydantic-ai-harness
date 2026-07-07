@@ -17,7 +17,7 @@ collect_ignore = (
         'test_conformance.py',
         'test_content.py',
         'test_models.py',
-        'test_native.py',
+        'test_client_toolsets.py',
         'test_persistence.py',
     ]
     if importlib.util.find_spec('acp') is None

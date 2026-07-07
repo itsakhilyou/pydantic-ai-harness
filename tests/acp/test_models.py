@@ -45,10 +45,9 @@ def _text_from(client: RecordingClient) -> str:
 
 def _model_option(
     response: schema.NewSessionResponse | schema.LoadSessionResponse | schema.SetSessionConfigOptionResponse,
-) -> schema.SessionConfigOptionSelect | None:
+) -> schema.SessionConfigOptionSelect:
     options = response.config_options
-    if options is None:
-        return None
+    assert options is not None
     [option] = options
     assert isinstance(option, schema.SessionConfigOptionSelect)
     return option
@@ -74,7 +73,6 @@ async def test_models_all_advertises_every_known_model() -> None:
     await adapter.initialize(protocol_version=1)
     response = await adapter.new_session(cwd='/ws')
     option = _model_option(response)
-    assert option is not None
     ids = [model.value for model in _select_options(option)]
     assert len(ids) > 100  # the whole known set, not a curated handful
     assert 'openai:gpt-4o' in ids
@@ -87,7 +85,6 @@ async def test_new_session_advertises_configured_models() -> None:
     await adapter.initialize(protocol_version=1)
     response = await adapter.new_session(cwd='/ws')
     option = _model_option(response)
-    assert option is not None
     assert option.id == 'model'
     assert option.name == 'Model'
     assert [model.value for model in _select_options(option)] == ['openai:gpt-4o', 'test']
@@ -106,7 +103,7 @@ async def test_set_model_config_updates_the_session_and_persists() -> None:
     response = await adapter.set_config_option(config_id='model', value='test', session_id=session_id)
     assert response is not None
     option = _model_option(response)
-    assert option is not None and option.current_value == 'test'
+    assert option.current_value == 'test'
     assert adapter._sessions[session_id].model == 'test'  # pyright: ignore[reportPrivateUsage]
     stored = await store.load(session_id)
     assert stored is not None and stored.model == 'test'
@@ -163,7 +160,7 @@ async def test_selected_model_survives_reload() -> None:
     assert adapter._sessions[session_id].model == 'test'  # pyright: ignore[reportPrivateUsage]
     assert response is not None
     option = _model_option(response)
-    assert option is not None and option.current_value == 'test'
+    assert option.current_value == 'test'
 
 
 async def test_session_model_option_returns_available_and_current_models() -> None:

@@ -7,10 +7,10 @@ Pydantic AI [`Agent`][pydantic_ai.Agent] to that interface, and
 """
 
 from ._adapter import PydanticAIACPAgent
+from ._client_toolsets import AcpFileSystemToolset, AcpTerminalToolset, acp_filesystem, acp_terminal
 from ._content import PromptContentBlock
-from ._native import AcpFileSystemToolset, AcpTerminalToolset, acp_filesystem, acp_terminal
 from ._permission import PermissionPolicy, ToolCallPermission, default_permission_scope
-from ._present import (
+from ._presentation import (
     ToolCallContent,
     ToolCallPresentation,
     ToolCallPresenter,
