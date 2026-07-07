@@ -15,7 +15,7 @@ Pydantic AI's [capabilities](https://ai.pydantic.dev/capabilities/) and [hooks](
 
 The [capability matrix](#capability-matrix) tracks where we are. [Tell us what to prioritize.](#help-us-prioritize)
 
-**Contents:** [Installation](#installation) · [Quick start](#quick-start) · [Capability matrix](#capability-matrix) · [An ecosystem agent](#an-ecosystem-agent) · [Help us prioritize](#help-us-prioritize) · [Build your own](#build-your-own) · [Contributing](#contributing) · [Version policy](#version-policy) · [Pydantic AI references](#pydantic-ai-references) · [License](#license)
+**Contents:** [Installation](#installation) · [Quick start](#quick-start) · [DynamicWorkflow](#orchestrating-sub-agents-dynamicworkflow) · [Capability matrix](#capability-matrix) · [An ecosystem agent](#an-ecosystem-agent) · [Help us prioritize](#help-us-prioritize) · [Build your own](#build-your-own) · [Contributing](#contributing) · [Version policy](#version-policy) · [Pydantic AI references](#pydantic-ai-references) · [License](#license)
 
 ## Installation
 
@@ -95,6 +95,45 @@ practices and warning of a "normalization of deviance" as engineers stop reviewi
 
 **[See this run as a public Logfire trace →](https://logfire-us.pydantic.dev/public-trace/84bcf123-2106-49da-9f6f-5c26395339bb?spanId=7650806a0785b946)** Each `run_code` span fans out into the tool calls the model issued from inside the sandbox -- it's the easiest way to understand what code mode actually did.
 
+## Orchestrating sub-agents: DynamicWorkflow
+
+`CodeMode` gives the model one script for its *tools*. `DynamicWorkflow` does the same for *sub-agents*. Without it, an orchestrator delegates one tool call at a time: call a sub-agent, wait, read the result into context, think, call the next one. Ten delegations cost ten model round-trips, and every intermediate result flows through the orchestrator's context whether it needed to see it or not.
+
+With it, the model writes one Python script in which each sub-agent is an async function, and the whole tree runs in a single tool call:
+
+```python
+from pydantic_ai import Agent
+from pydantic_ai_harness import DynamicWorkflow
+
+reviewer = Agent('anthropic:claude-sonnet-4-6', name='reviewer', description='Reviews code for bugs.')
+summarizer = Agent('anthropic:claude-sonnet-4-6', name='summarizer', description='Summarizes findings.')
+
+orchestrator = Agent(
+    'anthropic:claude-opus-4-7',
+    capabilities=[DynamicWorkflow(agents=[reviewer, summarizer])],
+)
+```
+
+The script the model writes looks like this -- fan out, chain, and only the last line's value returns to its context:
+
+```python
+import asyncio
+
+reports = await asyncio.gather(
+    reviewer(task="Review auth.py for bugs:\n<file contents>"),
+    reviewer(task="Review parser.py for bugs:\n<file contents>"),
+)
+await summarizer(task="Summarize these findings:\n" + "\n\n".join(reports))
+```
+
+It composes with the rest of the harness:
+
+- **With `CodeMode`**, the two merge automatically: sub-agents become typed async functions inside the same `run_code` sandbox as the agent's tools, so one script can fetch data with a tool, fan it out to sub-agents, and combine the results.
+- **Budgets**: `max_agent_calls` is an exact, host-enforced ceiling on sub-agent runs (it holds even under concurrent fan-out), and by default the whole tree's token spend lands on the parent run's `usage`.
+- **On-demand**: `defer_loading=True` keeps the catalog out of the prompt until the model loads the capability, and `reveal()` adds a sub-agent mid-run without disturbing the prompt cache.
+
+[Full tutorial →](pydantic_ai_harness/dynamic_workflow/)
+
 ## Capability matrix
 
 We studied leading coding agents, agent frameworks, and Claw-style assistants to map every capability area that matters for production agents. Each one is tracked as an [issue](https://github.com/pydantic/pydantic-ai-harness/issues) in this repo.
@@ -117,7 +156,7 @@ We studied leading coding agents, agent frameworks, and Claw-style assistants to
 | **Memory &&nbsp;persistence** | **Memory** | Persistent key-value memory across sessions | :construction: [PR&nbsp;#179](https://github.com/pydantic/pydantic-ai-harness/pull/179) | [pydantic-deep](https://github.com/vstorm-co/pydantic-deepagents) (vstorm&#8209;co) |
 | | **Session persistence** | Save and restore full conversation state | :construction: [PR&nbsp;#176](https://github.com/pydantic/pydantic-ai-harness/pull/176) | |
 | | **Checkpointing** | Save, rewind, and fork conversation state | :memo: [#196](https://github.com/pydantic/pydantic-ai-harness/issues/196) | [pydantic-deep](https://github.com/vstorm-co/pydantic-deepagents) (vstorm&#8209;co) |
-| **Agent orchestration** | **Dynamic workflow** | Orchestrate sub-agents from a model-written Python script -- fan-out, chaining, voting in one tool call | :white_check_mark: [Docs](pydantic_ai_harness/dynamic_workflow/) | |
+| **Agent orchestration** | **Dynamic workflow** | Orchestrate sub-agents from a model-written Python script -- fan-out, chaining, voting in one tool call; merges into `run_code` when CodeMode is present | :white_check_mark: [Docs](pydantic_ai_harness/dynamic_workflow/) | |
 | | **Sub-agents** | Delegate subtasks to specialized child agents | :construction: [PR&nbsp;#178](https://github.com/pydantic/pydantic-ai-harness/pull/178) | [subagents-pydantic-ai](https://github.com/vstorm-co/subagents-pydantic-ai) (vstorm&#8209;co) |
 | | **Skills** | Progressive tool loading -- search, activate, deactivate | :construction: [PR&nbsp;#183](https://github.com/pydantic/pydantic-ai-harness/pull/183) | [pydantic-ai-skills](https://github.com/DougTrajano/pydantic-ai-skills) (DougTrajano), [pydantic-deep](https://github.com/vstorm-co/pydantic-deepagents) (vstorm&#8209;co) |
 | | **Planning** | Break complex tasks into structured plans before execution | :construction: [PR&nbsp;#180](https://github.com/pydantic/pydantic-ai-harness/pull/180) | |
