@@ -5,7 +5,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from .code_mode import CodeMode
     from .filesystem import FileSystem
-    from .logfire import ManagedPrompt
+    from .logfire import ManagedPrompt, ManagedSettings, ManagedToolDefinitions
     from .shell import LLM_API_KEY_ENV_PATTERNS, Shell
 
 __all__ = [
@@ -13,6 +13,8 @@ __all__ = [
     'FileSystem',
     'LLM_API_KEY_ENV_PATTERNS',
     'ManagedPrompt',
+    'ManagedSettings',
+    'ManagedToolDefinitions',
     'Shell',
 ]
 
@@ -30,6 +32,14 @@ def __getattr__(name: str) -> object:
         from .logfire import ManagedPrompt
 
         return ManagedPrompt
+    if name == 'ManagedSettings':
+        from .logfire import ManagedSettings
+
+        return ManagedSettings
+    if name == 'ManagedToolDefinitions':
+        from .logfire import ManagedToolDefinitions
+
+        return ManagedToolDefinitions
     if name == 'Shell':
         from .shell import Shell
 

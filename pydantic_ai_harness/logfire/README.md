@@ -3,6 +3,24 @@
 Drive agent configuration from [Logfire managed variables](https://logfire.pydantic.dev/docs/reference/advanced/managed-variables/),
 so you can iterate on it from the Logfire UI -- versioned, labelled, and rolled out -- without redeploying.
 
+Each capability manages one surface of the agent, so you adopt exactly as much as you want:
+
+- [`ManagedPrompt`](#managedprompt) -- the agent's instructions
+- [`ManagedToolDefinitions`](#managedtooldefinitions) -- the LLM-facing definitions (name,
+  description, parameter docs) of the agent's tools
+- [`ManagedSettings`](#managedsettings) -- the agent's model and model settings
+
+They share one contract: **the code-defined agent is the fallback.** Every managed value is a
+patch on what's written in code -- unset fields keep their code values, and a missing, invalid,
+or unreachable remote value degrades to exactly the agent the developer wrote, never a crashed
+run. Values resolve **once per run** and the resolved label + version ride as baggage on every
+span of the run, so traces always show which version produced which behavior.
+
+**Auto-create on first use:** when the backing variable doesn't exist in Logfire yet, it is
+created in the background on first use -- from the code default, with the payload's JSON schema
+and description -- so the Logfire UI becomes the editing surface without a manual create step.
+Opt out per capability with `auto_create=False`.
+
 Install the extra:
 
 ```bash
@@ -13,12 +31,6 @@ pip install 'pydantic-ai-harness[logfire]'
 
 Back an agent's instructions with a Logfire-managed
 [Prompt](https://logfire.pydantic.dev/docs/reference/advanced/prompt-management/).
-
-> A broader, first-party `Managed` capability is in flight in
-> [pydantic-ai#5107](https://github.com/pydantic/pydantic-ai/pull/5107) and will eventually be
-> importable as `pydantic_ai.managed.logfire.Managed` -- covering instructions, model settings,
-> and whole-spec variables. Until then, `ManagedPrompt` is the supported path for backing
-> instructions with a Logfire-managed prompt.
 
 ### The problem
 
@@ -202,3 +214,134 @@ Logfire instance instead of the module-level default.
   [`targeting_context`](https://logfire.pydantic.dev/docs/reference/advanced/managed-variables/)
   in an outer scope; `ManagedPrompt` only needs `targeting_key`/`attributes` when the key
   comes from the agent's `RunContext`.
+
+## `ManagedToolDefinitions`
+
+Override the LLM-facing definitions of an agent's tools -- name, description, and parameter
+descriptions -- from one managed variable.
+
+### The problem
+
+Tools and their descriptions are half of what the model sees when deciding what to do -- as much
+a part of the "prompt" as the instructions. But tool definitions live in code, so tuning how a
+tool is framed to the model (or letting an optimizer propose that tuning) takes a redeploy per
+tweak.
+
+### The solution
+
+Drop `ManagedToolDefinitions` onto the agent and every tool's *definition* becomes manageable
+from Logfire, while the tool itself -- its implementation and its parameter schema structure --
+stays exactly as written in code. A tool is the executable unit; the tool definition is the
+LLM-facing spec, and only that spec is remotely patchable, so a remote value can never drift
+from the validator the tool actually runs against.
+
+### Usage
+
+The name `checkout_assistant` is declared as the managed variable
+`tool_definitions__checkout_assistant`, holding a list of per-tool overrides:
+
+```python
+import logfire
+from pydantic_ai import Agent
+
+from pydantic_ai_harness.logfire import ManagedToolDefinitions
+
+logfire.configure()
+
+def get_weather(city: str) -> str:
+    return f'The weather in {city} is sunny.'
+
+agent = Agent(
+    'openai:gpt-5',
+    tools=[get_weather],
+    capabilities=[ManagedToolDefinitions('checkout_assistant', label='production')],
+)
+```
+
+Each entry in the list is a `ToolDefinitionOverride` keyed to a tool by its original (code-side)
+`name`; every other field is optional and unset fields keep the tool's own definition:
+
+```json
+[
+  {
+    "name": "get_weather",
+    "new_name": "lookup_weather",
+    "description": "Look up the current weather for a city.",
+    "parameter_descriptions": {"city": "City name, e.g. 'London'"}
+  }
+]
+```
+
+### Notes
+
+- **Renames round-trip:** `new_name` changes the name the model is shown; a call to the renamed
+  tool routes back to the original implementation, and `ctx.tool_name` inside the tool is the
+  original name. A rename that collides with a name another tool already advertises is dropped
+  with a warning (other patches still apply) rather than breaking the run.
+- An override whose `name` matches no tool on the agent is inert -- that's the drift case (the
+  tool was removed or renamed in code), and the Logfire UI is where it becomes visible.
+- Only the `description` strings inside the parameter schema can be patched; parameter names,
+  types, and required-ness are deliberately fixed in code.
+
+## `ManagedSettings`
+
+Back an agent's model and model settings with a Logfire-managed variable.
+
+### The problem
+
+Model choice and sampling settings are the cheapest knobs to tune and the most annoying to
+redeploy for -- switching model for a canary, nudging temperature, or capping output tokens
+shouldn't require a release.
+
+### The solution
+
+`ManagedSettings` resolves an `agent__<name>` variable whose value patches the agent's model
+and model settings. Settings merge **over** the agent's constructor `model_settings` and
+**under** per-run `model_settings=`, so run arguments always win.
+
+### Usage
+
+```python
+import logfire
+from pydantic_ai import Agent
+
+from pydantic_ai_harness.logfire import ManagedSettings
+
+logfire.configure()
+
+agent = Agent(
+    'openai:gpt-5',
+    capabilities=[ManagedSettings('checkout_assistant', label='production')],
+)
+```
+
+The value patches the model and any of the canonical, cross-framework settings keys (they match
+`pydantic_ai.settings.ModelSettings`), with a nested `provider_options` escape hatch for
+provider-specific settings (`provider_options.openai.reasoning_effort` lowers to the
+`openai_reasoning_effort` model setting, and a provider-specific value wins over its canonical
+counterpart):
+
+```json
+{
+  "model": "openai:gpt-5",
+  "settings": {
+    "temperature": 0.4,
+    "max_tokens": 2048,
+    "thinking": "high",
+    "provider_options": {
+      "anthropic": {"thinking": {"type": "enabled", "budget_tokens": 16384}}
+    }
+  }
+}
+```
+
+### Notes
+
+- **Model override limits (for now):** the managed `model` overrides per request via
+  `before_model_request`, which requires the agent to have a code-side model and cannot yet
+  distinguish a per-run `model=` argument from the agent default -- so unlike settings, the
+  run-arguments-win precedence doesn't yet hold for the model itself. Both limits are pending
+  run-spec work in pydantic-ai.
+- `thinking` accepts `true`/`false` or an effort level (`'minimal'` ... `'xhigh'`), exactly like
+  the unified `thinking` model setting; per-provider lowering (e.g. effort to budget tokens) is
+  pydantic-ai's existing behavior.
