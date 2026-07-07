@@ -13,7 +13,7 @@ import asyncio
 import contextlib
 import json
 import logging
-from collections.abc import Hashable, Sequence
+from collections.abc import Callable, Hashable, Sequence
 from dataclasses import dataclass, field
 from inspect import isawaitable
 from typing import Generic, Literal
@@ -40,7 +40,7 @@ from pydantic_ai.messages import (
     ToolCallPart,
     UserContent,
 )
-from pydantic_ai.models import KnownModelName, known_model_names
+from pydantic_ai.models import KnownModelName, Model, known_model_names
 from pydantic_ai.output import OutputDataT
 from pydantic_ai.run import AgentRunResultEvent
 from pydantic_ai.tools import AgentDepsT
@@ -165,6 +165,7 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
         tool_presenter: ToolCallPresenter | None = None,
         session_store: SessionStore | None = None,
         models: Sequence[KnownModelName | str] | Literal['all'] | None = None,
+        model_resolver: Callable[[str], Model | str] | None = None,
         usage_limits: UsageLimits | None = None,
     ) -> None:
         """Build the adapter.
@@ -208,6 +209,11 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
                 offer every model Pydantic AI knows (its default is then the first known model, so
                 the user should pick one). Defaults to `None`, advertising no models and rejecting
                 `session/set_model`.
+            model_resolver: Optional hook mapping an advertised model id to the `Model` (or model
+                string) used for that run, applied just before each run's per-run override. Lets a
+                host advertise ids Pydantic AI's `infer_model` does not understand (e.g. OAuth/
+                subscription models) and supply a pre-built `Model` for them. Returning the id
+                unchanged falls back to `infer_model`. Defaults to identity.
             usage_limits: Optional per-run ceilings (`request_limit`, `tool_calls_limit`, token
                 limits) applied to every agent run, equivalent to `Agent.run(..., usage_limits=...)`.
                 A turn that resumes after a tool approval starts a fresh run, so the limits bound
@@ -232,6 +238,7 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
         self._tool_presenter = tool_presenter or default_coding_presenter
         self._session_store = session_store
         self._models: tuple[str, ...] = _all_known_model_names() if models == 'all' else tuple(models) if models else ()
+        self._model_resolver = model_resolver
         self._usage_limits = usage_limits
         self._client_capabilities: schema.ClientCapabilities | None = None
         self._conn: Client | None = None
@@ -381,6 +388,17 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
             available_models=[schema.ModelInfo(model_id=model, name=model) for model in self._models],
             current_model_id=current_model_id,
         )
+
+    def session_model_state(self, session_id: str) -> schema.SessionModelState | None:
+        """The model surface for a resident session -- its advertised set + current selection.
+
+        The public counterpart to the `models` field `new_session`/`load_session` return, for callers
+        that re-surface model state on a later interaction (e.g. an attach/resume reply) without
+        re-creating or reloading the session. `None` when the session is unknown to this adapter or
+        no switch-set was configured.
+        """
+        state = self._sessions.get(session_id)
+        return self._model_state(state.model) if state is not None else None
 
     async def _build_config(self, session_id: str, cwd: str, mcp_servers: McpServers) -> AcpSessionConfig[AgentDepsT]:
         """Derive a session's run configuration, calling the `session_config` factory if present.
@@ -561,8 +579,9 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
                     deps=config.deps,
                     toolsets=config.toolsets,
                     # Per-run override for the client's `session/set_model` choice; `None` uses the agent's
-                    # own model, never mutating the shared agent.
-                    model=state.model,
+                    # own model, never mutating the shared agent. A `model_resolver` (if given) maps the
+                    # advertised id to a pre-built `Model` for ids `infer_model` can't parse.
+                    model=self._resolve_run_model(state.model),
                     usage_limits=self._usage_limits,
                 ) as stream:
                     event: AgentStreamEvent | AgentRunResultEvent[object]
@@ -836,6 +855,15 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
         **kwargs: object,
     ) -> schema.ListSessionsResponse:
         raise acp.RequestError.method_not_found('session/list')
+
+    def _resolve_run_model(self, model_id: str | None) -> Model | str | None:
+        """Map an advertised model id to the per-run override, applying `model_resolver` if set.
+
+        `None` (no advertised models) is passed through so the run uses the agent's own model.
+        """
+        if model_id is None or self._model_resolver is None:
+            return model_id
+        return self._model_resolver(model_id)
 
     async def set_session_mode(
         self, mode_id: str, session_id: str, **kwargs: object

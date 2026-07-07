@@ -2,14 +2,16 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import AsyncIterator, Sequence
 from typing import Literal
 
 import acp
 import pytest
 from acp import schema
 from pydantic_ai import Agent
+from pydantic_ai.messages import ModelMessage
 from pydantic_ai.models import KnownModelName
+from pydantic_ai.models.function import AgentInfo, FunctionModel
 from pydantic_ai.models.test import TestModel
 
 from pydantic_ai_harness.acp import InMemorySessionStore, PydanticAIACPAgent
@@ -31,6 +33,14 @@ def _adapter(
     *, models: Sequence[KnownModelName | str] | Literal['all'] | None = None, store: InMemorySessionStore | None = None
 ) -> PydanticAIACPAgent[None, str]:
     return PydanticAIACPAgent(Agent(TestModel(custom_output_text='hi')), models=models, session_store=store)
+
+
+def _text_from(client: RecordingClient) -> str:
+    return ''.join(
+        str(getattr(getattr(update, 'content', None), 'text', ''))
+        for update in client.updates
+        if getattr(update, 'session_update', '') == 'agent_message_chunk'
+    )
 
 
 async def _started(adapter: PydanticAIACPAgent[None, str]) -> str:
@@ -86,12 +96,36 @@ async def test_selected_model_applies_to_a_run() -> None:
     session_id = (await adapter.new_session(cwd='/ws')).session_id
     response = await adapter.prompt(prompt=[acp.text_block('hi')], session_id=session_id)
     assert response.stop_reason == 'end_turn'
-    streamed = ''.join(
-        str(getattr(getattr(update, 'content', None), 'text', ''))
-        for update in client.updates
-        if getattr(update, 'session_update', '') == 'agent_message_chunk'
+    assert _text_from(client) == 'success (no tool calls)'  # TestModel's default, not the agent model's 'hi'
+
+
+async def test_model_resolver_applies_selected_model_to_a_run() -> None:
+    async def stream(messages: list[ModelMessage], info: AgentInfo) -> AsyncIterator[str]:
+        yield 'resolved model'
+
+    seen: list[str] = []
+    resolved_model = FunctionModel(stream_function=stream)
+
+    def resolve(model_id: str) -> FunctionModel:
+        seen.append(model_id)
+        return resolved_model
+
+    client = RecordingClient()
+    adapter: PydanticAIACPAgent[None, str] = PydanticAIACPAgent(
+        Agent(TestModel(custom_output_text='agent model')),
+        models=['test', 'host:gpt-custom'],
+        model_resolver=resolve,
     )
-    assert streamed == 'success (no tool calls)'  # TestModel's default, not the agent model's 'hi'
+    adapter.on_connect(client)
+    await adapter.initialize(protocol_version=1)
+    session_id = (await adapter.new_session(cwd='/ws')).session_id
+    await adapter.set_session_model(model_id='host:gpt-custom', session_id=session_id)
+
+    response = await adapter.prompt(prompt=[acp.text_block('hi')], session_id=session_id)
+
+    assert response.stop_reason == 'end_turn'
+    assert seen == ['host:gpt-custom']
+    assert _text_from(client) == 'resolved model'
 
 
 async def test_selected_model_survives_reload() -> None:
@@ -102,6 +136,26 @@ async def test_selected_model_survives_reload() -> None:
     response = await adapter.load_session(cwd='/ws', session_id=session_id)
     assert adapter._sessions[session_id].model == 'test'  # pyright: ignore[reportPrivateUsage]
     assert response is not None and response.models is not None and response.models.current_model_id == 'test'
+
+
+async def test_session_model_state_returns_available_and_current_models() -> None:
+    adapter = _adapter(models=['openai:gpt-4o', 'test'])
+    session_id = await _started(adapter)
+    await adapter.set_session_model(model_id='test', session_id=session_id)
+
+    state = adapter.session_model_state(session_id)
+
+    assert state is not None
+    assert [model.model_id for model in state.available_models] == ['openai:gpt-4o', 'test']
+    assert state.current_model_id == 'test'
+    assert adapter.session_model_state('no-such-session') is None
+
+
+async def test_session_model_state_without_models_returns_none() -> None:
+    adapter = _adapter()
+    session_id = await _started(adapter)
+
+    assert adapter.session_model_state(session_id) is None
 
 
 async def test_set_unknown_model_is_rejected() -> None:
