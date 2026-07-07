@@ -42,8 +42,10 @@ codemode = [
 ]
 sql-mode = [
     # 1.2.0 is the first release where registering a UDF that collides with a
-    # built-in raises; 3.14 wheels first ship in 1.4.2.
-    'duckdb>=1.2.0; python_version < "3.14"',
+    # built-in raises; 1.3.0 stops the UDF path leaking an unraisable exception
+    # on 3.13; 3.14 wheels first ship in 1.4.2.
+    'duckdb>=1.2.0; python_version < "3.13"',
+    'duckdb>=1.3.0; python_version == "3.13"',
     'duckdb>=1.4.2; python_version >= "3.14"',
     # DuckDB requires numpy to register Python user-defined functions. Floors
     # track the first numpy release with a wheel for each Python.
@@ -54,7 +56,8 @@ sql-mode = [
 ]
 # Extras metadata has no native redirect syntax, so aliases are represented as duplicate extras.
 sqlmode = [
-    'duckdb>=1.2.0; python_version < "3.14"',
+    'duckdb>=1.2.0; python_version < "3.13"',
+    'duckdb>=1.3.0; python_version == "3.13"',
     'duckdb>=1.4.2; python_version >= "3.14"',
     'numpy>=1.26; python_version < "3.13"',
     'numpy>=2.1.0; python_version == "3.13"',
