@@ -184,8 +184,23 @@ class ManagedVariableCapability(AbstractCapability[AgentDepsT], Generic[AgentDep
             _auto_create_attempted.add(name)
         _spawn_create(self._variable)
 
-    async def wrap_run(self, ctx: RunContext[AgentDepsT], *, handler: WrapRunHandler) -> AgentRunResult[Any]:
-        """Resolve the variable once and keep its baggage active for the duration of the run."""
+    def _maybe_auto_create_for(self, resolved: ResolvedVariable[ValueT]) -> None:
+        """Trigger background auto-create when the provider doesn't recognize the variable yet.
+
+        `'unrecognized_variable'` means a provider is configured but doesn't know this name yet --
+        the case auto-create is for. Reasons like `'no_provider'`/`'missing_config'` mean there's
+        no provider (or config) to create into, so they must not trigger. `ResolvedVariable` only
+        exposes the reason privately today (a known SDK gap we're flagging upstream).
+        """
+        if self.auto_create and resolved._reason == 'unrecognized_variable':  # pyright: ignore[reportPrivateUsage]
+            self._maybe_auto_create()
+
+    def _resolve(self, ctx: RunContext[AgentDepsT]) -> ResolvedVariable[ValueT]:
+        """Resolve the backing variable for this run using the capability's targeting inputs.
+
+        Shared by `wrap_run` (the base's per-run resolution point) and subclasses that must resolve
+        earlier -- e.g. in `for_run`, where the resolved value drives what the run is assembled from.
+        """
         if callable(self.targeting_key):
             targeting_key = self.targeting_key(ctx)
         else:
@@ -196,13 +211,12 @@ class ManagedVariableCapability(AbstractCapability[AgentDepsT], Generic[AgentDep
         else:
             attributes = self.attributes
 
-        resolved = self._variable.get(targeting_key=targeting_key, attributes=attributes, label=self.label)
-        # `'unrecognized_variable'` means a provider is configured but doesn't know this name yet --
-        # the case auto-create is for. Reasons like `'no_provider'`/`'missing_config'` mean there's
-        # no provider (or config) to create into, so they must not trigger. `ResolvedVariable` only
-        # exposes the reason privately today (a known SDK gap we're flagging upstream).
-        if self.auto_create and resolved._reason == 'unrecognized_variable':  # pyright: ignore[reportPrivateUsage]
-            self._maybe_auto_create()
+        return self._variable.get(targeting_key=targeting_key, attributes=attributes, label=self.label)
+
+    async def wrap_run(self, ctx: RunContext[AgentDepsT], *, handler: WrapRunHandler) -> AgentRunResult[Any]:
+        """Resolve the variable once and keep its baggage active for the duration of the run."""
+        resolved = self._resolve(ctx)
+        self._maybe_auto_create_for(resolved)
         with resolved:
             token = self._resolved.set(resolved)
             try:
