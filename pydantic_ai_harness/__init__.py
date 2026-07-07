@@ -7,14 +7,12 @@ if TYPE_CHECKING:
     from .filesystem import FileSystem
     from .logfire import ManagedPrompt
     from .shell import LLM_API_KEY_ENV_PATTERNS, Shell
-    from .sql_mode import SQLMode
 
 __all__ = [
     'CodeMode',
     'FileSystem',
     'LLM_API_KEY_ENV_PATTERNS',
     'ManagedPrompt',
-    'SQLMode',
     'Shell',
 ]
 
@@ -40,8 +38,4 @@ def __getattr__(name: str) -> object:
         from .shell import LLM_API_KEY_ENV_PATTERNS
 
         return LLM_API_KEY_ENV_PATTERNS
-    if name == 'SQLMode':
-        from .sql_mode import SQLMode
-
-        return SQLMode
     raise AttributeError(f'module {__name__!r} has no attribute {name!r}')

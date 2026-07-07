@@ -19,12 +19,7 @@ from pydantic_ai.tools import AgentDepsT, ToolSelector, matches_tool_selector
 from pydantic_ai.toolsets.abstract import SchemaValidatorProt, ToolsetTool
 from typing_extensions import TypedDict
 
-from pydantic_ai_harness.sql_mode._duckdb import run_query
-
-try:
-    from pydantic_ai.toolsets._tool_search import _SEARCH_TOOLS_NAME  # pyright: ignore[reportPrivateUsage]
-except ImportError:  # pragma: no cover
-    _SEARCH_TOOLS_NAME = 'search_tools'  # pyright: ignore[reportConstantRedefinition]
+from pydantic_ai_harness.experimental.sql_mode._duckdb import run_query
 
 _RUN_SQL_TOOL_NAME = 'run_sql'
 
@@ -140,8 +135,21 @@ def _duck_type(schema: dict[str, Any] | None) -> tuple[str, bool]:
 def _build_callable_tools(sandboxed_tools: dict[str, ToolsetTool[Any]]) -> tuple[_CallableTool, ...]:
     """Resolve each sandboxed tool's `ToolDefinition` into a `_CallableTool`."""
     callable_tools: list[_CallableTool] = []
+    seen: dict[str, str] = {}
     for name, tool in sandboxed_tools.items():
         tool_def = tool.tool_def
+        sql_name = _sanitize(name)
+        if sql_name in seen:
+            raise UserError(
+                f'SQLMode: tools {seen[sql_name]!r} and {name!r} both map to the SQL function '
+                f'name {sql_name!r}. Rename one of them.'
+            )
+        if sql_name == _RUN_SQL_TOOL_NAME:
+            raise UserError(
+                f'Tool {name!r} maps to the SQL function name {sql_name!r}, which is reserved for '
+                f"SQLMode's run_sql meta-tool. Rename your tool to avoid conflicts."
+            )
+        seen[sql_name] = name
         properties: dict[str, Any] = tool_def.parameters_json_schema.get('properties', {})
         params = [
             _CallableParam(name=param_name, duck_type=duck_type, is_json=is_json)
@@ -151,7 +159,7 @@ def _build_callable_tools(sandboxed_tools: dict[str, ToolsetTool[Any]]) -> tuple
         return_duck_type, return_is_json = _duck_type(tool_def.return_schema)
         callable_tools.append(
             _CallableTool(
-                sql_name=_sanitize(name),
+                sql_name=sql_name,
                 original_name=name,
                 description=tool_def.description,
                 params=tuple(params),
@@ -211,7 +219,9 @@ class SQLModeToolset(WrapperToolset[AgentDepsT]):
         sandboxed: dict[str, ToolsetTool[AgentDepsT]] = {}
         native: dict[str, ToolsetTool[AgentDepsT]] = {}
         for name, tool in wrapped_tools.items():
-            if name == _SEARCH_TOOLS_NAME:
+            if tool.tool_def.tool_kind is not None:
+                # Framework control tools (tool search, capability loading) drive protocol-level
+                # flows and must stay native.
                 native[name] = tool
             elif tool.tool_def.defer_loading:
                 # Tool Search keeps these out of the model's context until discovered.
@@ -238,6 +248,7 @@ class SQLModeToolset(WrapperToolset[AgentDepsT]):
                 description=_build_description(callable_tools),
                 parameters_json_schema=_RUN_SQL_JSON_SCHEMA,
                 metadata={'code_arg_name': 'query', 'code_arg_language': 'sql'},
+                sequential=True,
             ),
             max_retries=self.max_retries,
             args_validator=_RUN_SQL_ARGS_VALIDATOR,
@@ -275,11 +286,11 @@ class SQLModeToolset(WrapperToolset[AgentDepsT]):
         # so a `ModelRetry` reaches the caller directly, rather than wrapped in
         # the portal task group's `ExceptionGroup`.
         outcome: dict[str, Any] = {}
-        error: Exception | None = None
+        error: BaseException | None = None
         async with BlockingPortal() as portal:
             try:
                 outcome = await run_sync(run_query, tool.callable_tools, query, portal, self.max_rows, dispatch)
-            except Exception as exc:
+            except BaseException as exc:
                 error = exc
         if error is not None:
             raise error

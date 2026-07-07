@@ -2,14 +2,14 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import KW_ONLY, dataclass, field
 
 from pydantic_ai import AbstractToolset
 from pydantic_ai.capabilities import AbstractCapability, CapabilityOrdering
 from pydantic_ai.capabilities._tool_search import ToolSearch as _ToolSearch
 from pydantic_ai.tools import AgentDepsT, ToolSelector
 
-from pydantic_ai_harness.sql_mode._toolset import SQLModeToolset
+from pydantic_ai_harness.experimental.sql_mode._toolset import SQLModeToolset
 
 
 @dataclass
@@ -23,7 +23,7 @@ class SQLMode(AbstractCapability[AgentDepsT]):
 
     ```python
     from pydantic_ai import Agent
-    from pydantic_ai_harness import SQLMode
+    from pydantic_ai_harness.experimental.sql_mode import SQLMode
 
     agent = Agent('anthropic:claude-sonnet-4-6', capabilities=[SQLMode()])
 
@@ -44,11 +44,13 @@ class SQLMode(AbstractCapability[AgentDepsT]):
     Tools that do not match stay available to the model as normal tool calls.
     """
 
-    max_rows: int = 1000
-    """Maximum number of result rows returned to the model before truncation."""
-
     max_retries: int = 3
     """Maximum number of retries for the `run_sql` tool (a failed query counts as a retry)."""
+
+    _: KW_ONLY
+
+    max_rows: int = 1000
+    """Maximum number of result rows returned to the model before truncation."""
 
     def get_ordering(self) -> CapabilityOrdering:
         """SQLMode wraps around ToolSearch so `search_tools` stays a native tool."""

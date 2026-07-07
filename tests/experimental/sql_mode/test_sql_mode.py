@@ -12,8 +12,8 @@ from typing import Any, TypeVar
 import pytest
 from pydantic import BaseModel
 from pydantic_ai import AbstractToolset, Agent, RunContext, Tool, ToolDefinition
-from pydantic_ai.capabilities import CapabilityOrdering
-from pydantic_ai.exceptions import ModelRetry, UserError
+from pydantic_ai.capabilities import CapabilityOrdering, ToolSearch
+from pydantic_ai.exceptions import ModelRetry, UnexpectedModelBehavior, UserError
 from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart, ToolCallPart, ToolReturn
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 from pydantic_ai.models.test import TestModel
@@ -23,9 +23,8 @@ from pydantic_ai.toolsets.function import FunctionToolset
 from pydantic_ai.usage import RunUsage
 from pydantic_core import SchemaValidator, core_schema
 
-from pydantic_ai_harness import SQLMode
-from pydantic_ai_harness.sql_mode import SQLModeToolset
-from pydantic_ai_harness.sql_mode._toolset import (  # pyright: ignore[reportPrivateUsage]
+from pydantic_ai_harness.experimental.sql_mode import SQLMode, SQLModeToolset
+from pydantic_ai_harness.experimental.sql_mode._toolset import (  # pyright: ignore[reportPrivateUsage]
     _duck_type,
     _sanitize,
 )
@@ -95,6 +94,11 @@ def explode(x: int) -> int:
     raise RuntimeError('tool exploded')
 
 
+def retry_tool(x: int) -> int:
+    """A tool that asks the model to retry."""
+    raise ModelRetry('try again')
+
+
 def make_toolset(*fns: Any) -> FunctionToolset[None]:
     """Wrap plain functions in a `FunctionToolset`."""
     return FunctionToolset[None](tools=[Tool(fn) for fn in fns])
@@ -160,7 +164,10 @@ def test_duck_type() -> None:
 def test_capability_ordering_and_wrapper() -> None:
     """`SQLMode` orders itself outermost and produces a `SQLModeToolset`."""
     capability = SQLMode[None]()
-    assert isinstance(capability.get_ordering(), CapabilityOrdering)
+    ordering = capability.get_ordering()
+    assert isinstance(ordering, CapabilityOrdering)
+    assert ordering.position == 'outermost'
+    assert ToolSearch in ordering.wraps
     wrapper = capability.get_wrapper_toolset(make_toolset(geocode))
     assert isinstance(wrapper, SQLModeToolset)
 
@@ -177,6 +184,7 @@ async def test_default_wraps_all_tools() -> None:
     assert "Look up a city's coordinates." in description
     assert 'place_label(place JSON, prefix VARCHAR) -> VARCHAR' in description
     assert tools['run_sql'].tool_def.metadata == {'code_arg_name': 'query', 'code_arg_language': 'sql'}
+    assert tools['run_sql'].tool_def.sequential is True
 
 
 # ---------------------------------------------------------------------------
@@ -214,6 +222,22 @@ async def test_fan_out_with_unnest() -> None:
     assert [row['lat'] for row in result['rows']] == ['48.85', '48.85']
 
 
+async def test_per_row_tool_side_effects() -> None:
+    """DuckDB invokes SQL-callable tools once per row."""
+    calls = 0
+
+    def counter_tool(n: int) -> int:
+        nonlocal calls
+        calls += 1
+        return n
+
+    wrapper = SQLMode[None]().get_wrapper_toolset(make_toolset(counter_tool))
+    assert isinstance(wrapper, SQLModeToolset)
+    result = await run_sql(wrapper, 'SELECT counter_tool(n) AS value FROM (SELECT unnest([1, 2, 3]) AS n)')
+    assert result['rows'] == [{'value': 1}, {'value': 2}, {'value': 3}]
+    assert calls == 3
+
+
 async def test_truncation() -> None:
     """Result sets larger than `max_rows` are truncated and flagged."""
     wrapper = SQLMode[None](max_rows=2).get_wrapper_toolset(make_toolset(geocode))
@@ -221,7 +245,19 @@ async def test_truncation() -> None:
     result = await run_sql(wrapper, 'SELECT unnest([1, 2, 3, 4]) AS n')
     assert result['row_count'] == 2
     assert result['truncated'] is True
-    assert '4 rows' in result['note']
+    assert 'first 2 rows' in result['note']
+    assert 'truncated' in result['note']
+
+
+async def test_max_rows_default_returns_larger_result() -> None:
+    """The default `max_rows` allows ordinary multi-row SQL results."""
+    wrapper = SQLMode[None]().get_wrapper_toolset(make_toolset())
+    assert isinstance(wrapper, SQLModeToolset)
+    result = await run_sql(wrapper, 'SELECT i AS n FROM range(12) AS t(i)')
+    assert result['row_count'] == 12
+    assert result['rows'][0] == {'n': 0}
+    assert result['rows'][-1] == {'n': 11}
+    assert 'truncated' not in result
 
 
 async def test_statement_with_no_rows() -> None:
@@ -285,9 +321,11 @@ async def test_selector_keeps_unmatched_tools_native() -> None:
 
 
 async def test_search_tools_and_deferred_stay_native() -> None:
-    """`search_tools`, deferred-loading, and `unless_native` tools are never sandboxed."""
+    """Framework-control, deferred-loading, and `unless_native` tools are never sandboxed."""
     defs = [
-        ToolDefinition(name='search_tools', parameters_json_schema={'type': 'object', 'properties': {}}),
+        ToolDefinition(
+            name='search_tools', parameters_json_schema={'type': 'object', 'properties': {}}, tool_kind='tool-search'
+        ),
         ToolDefinition(
             name='deferred', parameters_json_schema={'type': 'object', 'properties': {}}, defer_loading=True
         ),
@@ -301,6 +339,20 @@ async def test_search_tools_and_deferred_stay_native() -> None:
     assert set(tools) == {'run_sql', 'search_tools', 'deferred', 'fallback'}
 
 
+async def test_capability_load_stays_native() -> None:
+    """Framework capability-loading stays native instead of becoming SQL-callable."""
+    load_capability = ToolDefinition(
+        name='load_capability',
+        parameters_json_schema={'type': 'object', 'properties': {'id': {'type': 'string'}}},
+        tool_kind='capability-load',
+    )
+    wrapper = SQLMode[None]().get_wrapper_toolset(_StaticToolset([load_capability]))
+    assert isinstance(wrapper, SQLModeToolset)
+    tools = await wrapper.get_tools(build_run_context(None))
+    assert set(tools) == {'run_sql', 'load_capability'}
+    assert 'load_capability(' not in (tools['run_sql'].tool_def.description or '')
+
+
 async def test_reserved_run_sql_name() -> None:
     """A native tool named `run_sql` conflicts with the SQLMode meta-tool."""
     clash = ToolDefinition(name='run_sql', parameters_json_schema={'type': 'object', 'properties': {}})
@@ -308,6 +360,29 @@ async def test_reserved_run_sql_name() -> None:
     assert isinstance(wrapper, SQLModeToolset)
     with pytest.raises(UserError, match='reserved for SQLMode'):
         await wrapper.get_tools(build_run_context(None))
+
+
+async def test_sandboxed_run_sql_name_is_reserved() -> None:
+    """A sandboxed tool cannot sanitize to the `run_sql` meta-tool name."""
+    clash = ToolDefinition(name='run-sql', parameters_json_schema={'type': 'object', 'properties': {}})
+    wrapper = SQLMode[None]().get_wrapper_toolset(_StaticToolset([clash]))
+    assert isinstance(wrapper, SQLModeToolset)
+    with pytest.raises(UserError, match="SQLMode's run_sql meta-tool"):
+        await wrapper.get_tools(build_run_context(None))
+
+
+async def test_sanitized_name_collision_raises_user_error() -> None:
+    """Two tools cannot map to the same SQL function name."""
+    hyphen = ToolDefinition(name='get-weather', parameters_json_schema={'type': 'object', 'properties': {}})
+    underscore = ToolDefinition(name='get_weather', parameters_json_schema={'type': 'object', 'properties': {}})
+    wrapper = SQLMode[None]().get_wrapper_toolset(_StaticToolset([hyphen, underscore]))
+    assert isinstance(wrapper, SQLModeToolset)
+    with pytest.raises(UserError) as exc_info:
+        await wrapper.get_tools(build_run_context(None))
+    message = str(exc_info.value)
+    assert "'get-weather'" in message
+    assert "'get_weather'" in message
+    assert "SQL function name 'get_weather'" in message
 
 
 async def test_no_tools() -> None:
@@ -339,12 +414,28 @@ async def test_lockdown_blocks_filesystem() -> None:
         await run_sql(wrapper, "SELECT * FROM read_csv('/etc/passwd')")
 
 
-async def test_tool_exception_raises_model_retry() -> None:
-    """An exception raised inside a tool surfaces as `ModelRetry`."""
-    wrapper = SQLMode[None]().get_wrapper_toolset(make_toolset(explode))
+async def test_lockdown_freezes_external_access_setting() -> None:
+    """The model cannot re-enable external access after lockdown."""
+    wrapper = SQLMode[None]().get_wrapper_toolset(make_toolset(geocode))
     assert isinstance(wrapper, SQLModeToolset)
     with pytest.raises(ModelRetry, match='SQL error'):
+        await run_sql(wrapper, 'SET enable_external_access=true')
+
+
+async def test_tool_exception_preserves_original_error() -> None:
+    """An exception raised inside a tool is not laundered into `ModelRetry`."""
+    wrapper = SQLMode[None]().get_wrapper_toolset(make_toolset(explode))
+    assert isinstance(wrapper, SQLModeToolset)
+    with pytest.raises(RuntimeError, match='tool exploded'):
         await run_sql(wrapper, 'SELECT explode(1) AS x')
+
+
+async def test_tool_model_retry_preserves_original_error() -> None:
+    """A tool-raised `ModelRetry` keeps its original message."""
+    wrapper = SQLMode[None]().get_wrapper_toolset(make_toolset(retry_tool))
+    assert isinstance(wrapper, SQLModeToolset)
+    with pytest.raises(ModelRetry, match='try again'):
+        await run_sql(wrapper, 'SELECT retry_tool(1) AS x')
 
 
 async def test_builtin_name_collision_raises_user_error() -> None:
@@ -382,3 +473,15 @@ async def test_agent_runs_sql_tool() -> None:
 
     result = await agent.run('where is paris')
     assert result.output == 'done'
+
+
+async def test_agent_run_sql_exhausts_max_retries() -> None:
+    """`SQLMode.max_retries` is wired to the `run_sql` tool retry budget."""
+
+    def model_fn(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        return ModelResponse(parts=[ToolCallPart('run_sql', {'query': 'SELCT nope'})])
+
+    agent = Agent(FunctionModel(model_fn), capabilities=[SQLMode(max_retries=1)])
+
+    with pytest.raises(UnexpectedModelBehavior, match='max retries'):
+        await agent.run('run invalid sql')
