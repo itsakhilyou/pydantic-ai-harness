@@ -6,7 +6,7 @@ import json
 from collections.abc import Callable, Hashable, Mapping
 from dataclasses import dataclass
 
-from ._serialize import jsonable
+from pydantic_ai_harness.experimental.acp._serialize import jsonable
 
 
 @dataclass(frozen=True, kw_only=True)

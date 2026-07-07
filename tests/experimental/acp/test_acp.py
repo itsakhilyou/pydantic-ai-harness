@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import importlib
 import json
 import sys
 from collections.abc import AsyncIterator, Callable
@@ -48,12 +49,12 @@ from pydantic_ai.toolsets import FunctionToolset
 from pydantic_ai.usage import UsageLimits
 
 from pydantic_ai_harness import FileSystem, Shell
-from pydantic_ai_harness.acp import (
+from pydantic_ai_harness.experimental import HarnessExperimentalWarning
+from pydantic_ai_harness.experimental.acp import (
     AcpSession,
     AcpSessionConfig,
     AcpTerminalToolset,
     InMemorySessionStore,
-    PromptContentBlock,
     PydanticAIACPAgent,
     ToolCallPresentation,
     chain_presenters,
@@ -61,11 +62,24 @@ from pydantic_ai_harness.acp import (
     run_acp_stdio,
     run_acp_stdio_sync,
 )
-from pydantic_ai_harness.acp._adapter import _finish_reason_to_stop_reason, _TurnState, _usage_limit_stop_reason
-from pydantic_ai_harness.acp._presentation import _HANDLERS, absolutize
-from pydantic_ai_harness.acp._serialize import MAX_RAW_FIELD_CHARS, MAX_TEXT_UPDATE_BYTES, _escaped_len, chunk_text
-from pydantic_ai_harness.acp._session import SessionState
-from tests._acp_clients import RecordingClient, RecordingClientBase  # pyright: ignore[reportMissingTypeStubs]
+from pydantic_ai_harness.experimental.acp._adapter import (
+    _finish_reason_to_stop_reason,
+    _TurnState,
+    _usage_limit_stop_reason,
+)
+from pydantic_ai_harness.experimental.acp._content import PromptContentBlock
+from pydantic_ai_harness.experimental.acp._presentation import _HANDLERS, absolutize
+from pydantic_ai_harness.experimental.acp._serialize import (
+    MAX_RAW_FIELD_CHARS,
+    MAX_TEXT_UPDATE_BYTES,
+    _escaped_len,
+    chunk_text,
+)
+from pydantic_ai_harness.experimental.acp._session import SessionState
+from tests.experimental.acp._acp_clients import (  # pyright: ignore[reportMissingTypeStubs]
+    RecordingClient,
+    RecordingClientBase,
+)
 
 pytestmark = pytest.mark.anyio
 
@@ -1818,6 +1832,14 @@ class TestEntryPoints:
         # The agent's read_file/run_command calls were served by the client over the wire.
         assert ('notes.txt', session.session_id) in client.reads
         assert any(command == 'echo hi' for command, _cwd in client.created)
+
+
+class TestExperimentalStatus:
+    def test_importing_acp_warns_experimental(self) -> None:
+        # Lives here (not test_packaging.py) so base installs without the `acp` SDK never import it.
+        module = importlib.import_module('pydantic_ai_harness.experimental.acp')
+        with pytest.warns(HarnessExperimentalWarning, match='acp'):
+            importlib.reload(module)
 
 
 def _tool_call(name: str, args: str | dict[str, Any] | None) -> ToolCallPart:

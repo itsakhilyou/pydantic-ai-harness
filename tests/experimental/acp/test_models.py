@@ -14,9 +14,9 @@ from pydantic_ai.models import KnownModelName
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 from pydantic_ai.models.test import TestModel
 
-from pydantic_ai_harness.acp import InMemorySessionStore, PydanticAIACPAgent
-from pydantic_ai_harness.acp._adapter import _all_known_model_names
-from tests._acp_clients import RecordingClient  # pyright: ignore[reportMissingTypeStubs]
+from pydantic_ai_harness.experimental.acp import InMemorySessionStore, PydanticAIACPAgent
+from pydantic_ai_harness.experimental.acp._adapter import _all_known_model_names
+from tests.experimental.acp._acp_clients import RecordingClient  # pyright: ignore[reportMissingTypeStubs]
 
 pytestmark = pytest.mark.anyio
 

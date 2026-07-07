@@ -8,11 +8,11 @@ actually lives on. ACP lets the agent ask the *client* to do the I/O: `fs/read_t
 `fs/write_text_file` for files, and the terminal lifecycle (`terminal/create`, `terminal/output`,
 `terminal/wait_for_exit`, `terminal/release`) for commands.
 
-[`AcpFileSystemToolset`][pydantic_ai_harness.acp.AcpFileSystemToolset] and
-[`AcpTerminalToolset`][pydantic_ai_harness.acp.AcpTerminalToolset] are those editor-native
+[`AcpFileSystemToolset`][pydantic_ai_harness.experimental.acp.AcpFileSystemToolset] and
+[`AcpTerminalToolset`][pydantic_ai_harness.experimental.acp.AcpTerminalToolset] are those editor-native
 counterparts. Build them per session with
-[`acp_filesystem`][pydantic_ai_harness.acp.acp_filesystem] /
-[`acp_terminal`][pydantic_ai_harness.acp.acp_terminal], which return the toolset only when the
+[`acp_filesystem`][pydantic_ai_harness.experimental.acp.acp_filesystem] /
+[`acp_terminal`][pydantic_ai_harness.experimental.acp.acp_terminal], which return the toolset only when the
 client advertised the matching capability and otherwise return `None` so the caller can fall back
 to the local capability.
 """
@@ -34,9 +34,8 @@ from acp import Client, schema
 from pydantic_ai.tools import AgentDepsT
 from pydantic_ai.toolsets import FunctionToolset
 
+from pydantic_ai_harness.experimental.acp._session import AcpSession
 from pydantic_ai_harness.filesystem import FileSystem
-
-from ._session import AcpSession
 
 
 class _LocalFileWriter(Protocol):
@@ -57,7 +56,7 @@ class AcpFileSystemToolset(FunctionToolset[AgentDepsT]):
     is set, relative paths are resolved against it before reaching the wire. The client still
     resolves and authorizes every path itself (this toolset adds no sandboxing of its own).
 
-    If `local_writer` is set (a read-only client -- see [`acp_filesystem`][pydantic_ai_harness.acp.acp_filesystem]),
+    If `local_writer` is set (a read-only client -- see [`acp_filesystem`][pydantic_ai_harness.experimental.acp.acp_filesystem]),
     `write_file` goes there instead of to the client, while reads still route through the editor.
     """
 
@@ -103,7 +102,7 @@ class AcpFileSystemToolset(FunctionToolset[AgentDepsT]):
 def acp_filesystem(session: AcpSession) -> AcpFileSystemToolset[None] | None:
     """Build an ACP-client-backed filesystem toolset for `session`, or `None` if unsupported.
 
-    Returns an [`AcpFileSystemToolset`][pydantic_ai_harness.acp.AcpFileSystemToolset] whenever the
+    Returns an [`AcpFileSystemToolset`][pydantic_ai_harness.experimental.acp.AcpFileSystemToolset] whenever the
     client advertised `fs/read_text_file` during `initialize`:
 
     - read + write advertised: reads and writes both route through the editor.
@@ -215,7 +214,7 @@ class AcpTerminalToolset(FunctionToolset[AgentDepsT]):
 def acp_terminal(session: AcpSession) -> AcpTerminalToolset[None] | None:
     """Build an ACP-client-backed terminal toolset for `session`, or `None` if unsupported.
 
-    Returns an [`AcpTerminalToolset`][pydantic_ai_harness.acp.AcpTerminalToolset] only when the
+    Returns an [`AcpTerminalToolset`][pydantic_ai_harness.experimental.acp.AcpTerminalToolset] only when the
     client advertised terminal support during `initialize`; otherwise returns `None` so the caller
     can fall back to a local toolset:
 

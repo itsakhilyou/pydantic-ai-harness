@@ -13,11 +13,11 @@ from pydantic_ai.models import KnownModelName
 from pydantic_ai.output import OutputDataT
 from pydantic_ai.tools import AgentDepsT
 
-from ._adapter import DEFAULT_VERSION, PydanticAIACPAgent
-from ._permission import PermissionPolicy
-from ._presentation import ToolCallPresenter
-from ._session import SessionConfigFunc
-from ._store import SessionStore
+from pydantic_ai_harness.experimental.acp._adapter import DEFAULT_VERSION, PydanticAIACPAgent
+from pydantic_ai_harness.experimental.acp._permission import PermissionPolicy
+from pydantic_ai_harness.experimental.acp._presentation import ToolCallPresenter
+from pydantic_ai_harness.experimental.acp._session import SessionConfigFunc
+from pydantic_ai_harness.experimental.acp._store import SessionStore
 
 
 async def run_acp_stdio(
@@ -45,20 +45,20 @@ async def run_acp_stdio(
         name: Name advertised to the client. Defaults to the agent's name, then `'pydantic-ai-agent'`.
         version: Version advertised to the client.
         session_config: Per-session factory deriving deps/toolsets from the client's workspace setup.
-            See [`PydanticAIACPAgent`][pydantic_ai_harness.acp.PydanticAIACPAgent].
+            See [`PydanticAIACPAgent`][pydantic_ai_harness.experimental.acp.PydanticAIACPAgent].
         permission_policy: Scopes how "always allow"/"always reject" decisions are remembered.
-            See [`PydanticAIACPAgent`][pydantic_ai_harness.acp.PydanticAIACPAgent].
+            See [`PydanticAIACPAgent`][pydantic_ai_harness.experimental.acp.PydanticAIACPAgent].
         prompt_capabilities: Prompt content types the agent advertises support for.
-            See [`PydanticAIACPAgent`][pydantic_ai_harness.acp.PydanticAIACPAgent].
+            See [`PydanticAIACPAgent`][pydantic_ai_harness.experimental.acp.PydanticAIACPAgent].
         mcp_capabilities: MCP transports the agent advertises support for. Requires a
             `session_config` that connects them. See
-            [`PydanticAIACPAgent`][pydantic_ai_harness.acp.PydanticAIACPAgent].
+            [`PydanticAIACPAgent`][pydantic_ai_harness.experimental.acp.PydanticAIACPAgent].
         tool_presenter: Maps tool calls to rich ACP presentation (kind, file locations, diffs).
-            See [`PydanticAIACPAgent`][pydantic_ai_harness.acp.PydanticAIACPAgent].
+            See [`PydanticAIACPAgent`][pydantic_ai_harness.experimental.acp.PydanticAIACPAgent].
         session_store: Enables `session/load` by persisting each session. See
-            [`PydanticAIACPAgent`][pydantic_ai_harness.acp.PydanticAIACPAgent].
+            [`PydanticAIACPAgent`][pydantic_ai_harness.experimental.acp.PydanticAIACPAgent].
         models: Models the client may switch between with the `model` session config option. See
-            [`PydanticAIACPAgent`][pydantic_ai_harness.acp.PydanticAIACPAgent].
+            [`PydanticAIACPAgent`][pydantic_ai_harness.experimental.acp.PydanticAIACPAgent].
     """
     adapter = PydanticAIACPAgent(
         agent,
@@ -92,7 +92,7 @@ def run_acp_stdio_sync(
     session_store: SessionStore | None = None,
     models: Sequence[KnownModelName | str] | Literal['all'] | None = None,
 ) -> None:
-    """Synchronous wrapper around [`run_acp_stdio`][pydantic_ai_harness.acp.run_acp_stdio].
+    """Synchronous wrapper around [`run_acp_stdio`][pydantic_ai_harness.experimental.acp.run_acp_stdio].
 
     Convenient as the `main()` of an ACP agent script, which clients launch as a subprocess.
     """

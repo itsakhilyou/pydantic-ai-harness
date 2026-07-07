@@ -48,18 +48,29 @@ from pydantic_ai.tools import AgentDepsT
 from pydantic_ai.toolsets import AbstractToolset, FunctionToolset
 from pydantic_ai.usage import RunUsage, UsageLimits
 
-from ._content import PromptContentBlock, prompt_blocks_to_user_content
-from ._permission import PermissionPolicy, ToolCallPermission, default_permission_scope
-from ._presentation import (
+from pydantic_ai_harness.experimental.acp._content import PromptContentBlock, prompt_blocks_to_user_content
+from pydantic_ai_harness.experimental.acp._permission import (
+    PermissionPolicy,
+    ToolCallPermission,
+    default_permission_scope,
+)
+from pydantic_ai_harness.experimental.acp._presentation import (
     ToolCallContent,
     ToolCallPresentation,
     ToolCallPresenter,
     absolutize,
     default_coding_presenter,
 )
-from ._serialize import bounded_jsonable, chunk_text, jsonable
-from ._session import AcpSession, AcpSessionConfig, McpServers, SessionConfigFunc, SessionState, SessionUpdate
-from ._store import SessionStore, StoredSession
+from pydantic_ai_harness.experimental.acp._serialize import bounded_jsonable, chunk_text, jsonable
+from pydantic_ai_harness.experimental.acp._session import (
+    AcpSession,
+    AcpSessionConfig,
+    McpServers,
+    SessionConfigFunc,
+    SessionState,
+    SessionUpdate,
+)
+from pydantic_ai_harness.experimental.acp._store import SessionStore, StoredSession
 
 # Version advertised to the client when the caller does not supply one.
 DEFAULT_VERSION = '0.1.0'
@@ -145,8 +156,10 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
     """An ACP agent backed by a Pydantic AI [`Agent`][pydantic_ai.Agent].
 
     Each ACP session is an independent conversation, keyed by session ID. Pass the instance to
-    [`run_acp_stdio`][pydantic_ai_harness.acp.run_acp_stdio] (or the lower-level `acp.run_agent`)
-    to serve it over stdio.
+    [`run_acp_stdio`][pydantic_ai_harness.experimental.acp.run_acp_stdio] (or the lower-level `acp.run_agent`)
+    to serve it over stdio. When calling `acp.run_agent` yourself, pass `use_unstable_protocol=True`
+    as `run_acp_stdio` does, or the SDK router rejects `session/close` (still UNSTABLE in the SDK)
+    with `method_not_found`.
 
     A tool that [requires approval](https://pydantic.dev/docs/ai/tools-toolsets/deferred-tools/)
     pauses the run and asks the client via `session/request_permission`; "always allow"/"always
@@ -185,9 +198,9 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
             name: Name advertised to the client. Defaults to the agent's name, then `'pydantic-ai-agent'`.
             version: Version advertised to the client.
             session_config: Optional factory called once per session with the client's
-                [`AcpSession`][pydantic_ai_harness.acp.AcpSession] setup (its `cwd`, MCP servers,
+                [`AcpSession`][pydantic_ai_harness.experimental.acp.AcpSession] setup (its `cwd`, MCP servers,
                 and capabilities). It returns an
-                [`AcpSessionConfig`][pydantic_ai_harness.acp.AcpSessionConfig] whose `deps` and
+                [`AcpSessionConfig`][pydantic_ai_harness.experimental.acp.AcpSessionConfig] whose `deps` and
                 `toolsets` are applied to every run in that session. May be sync or async.
             permission_policy: Optional function deciding the scope under which an "always
                 allow"/"always reject" decision is remembered. Defaults to the exact call (tool
@@ -202,12 +215,12 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
                 `session_config`, since without one MCP servers are rejected at `session/new`.
             tool_presenter: Maps a tool call to its rich ACP presentation (`kind`, file
                 `locations`, and diff `content`). Defaults to
-                [`default_coding_presenter`][pydantic_ai_harness.acp.default_coding_presenter],
+                [`default_coding_presenter`][pydantic_ai_harness.experimental.acp.default_coding_presenter],
                 which recognizes the `FileSystem`/`Shell` tools by name (a custom tool sharing a
                 name is also matched). Pass your own presenter (optionally chained ahead of the
-                default with [`chain_presenters`][pydantic_ai_harness.acp.chain_presenters]), or
+                default with [`chain_presenters`][pydantic_ai_harness.experimental.acp.chain_presenters]), or
                 `lambda _call: None` to disable rich rendering.
-            session_store: Optional [`SessionStore`][pydantic_ai_harness.acp.SessionStore] enabling
+            session_store: Optional [`SessionStore`][pydantic_ai_harness.experimental.acp.SessionStore] enabling
                 `session/load`: each committed turn is persisted (model history plus client
                 transcript) and a stored session can be reopened. Defaults to `None`, advertising
                 `session/load` as unsupported.

@@ -13,7 +13,13 @@ from pydantic_ai import Agent
 from pydantic_ai.messages import ModelMessage, ToolReturnPart
 from pydantic_ai.models.function import AgentInfo, DeltaToolCall, FunctionModel
 
-from pydantic_ai_harness.acp import AcpSession, AcpSessionConfig, acp_filesystem, acp_terminal, run_acp_stdio_sync
+from pydantic_ai_harness.experimental.acp import (
+    AcpSession,
+    AcpSessionConfig,
+    acp_filesystem,
+    acp_terminal,
+    run_acp_stdio_sync,
+)
 
 
 async def stream(messages: list[ModelMessage], info: AgentInfo) -> AsyncIterator[str | dict[int, DeltaToolCall]]:

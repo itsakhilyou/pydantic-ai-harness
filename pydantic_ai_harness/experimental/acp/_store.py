@@ -1,7 +1,7 @@
 """Pluggable persistence for ACP sessions, so `session/load` can reopen a past conversation.
 
 Persistence is opt-in: pass a `SessionStore` to the adapter to advertise and support
-`session/load`. [`InMemorySessionStore`][pydantic_ai_harness.acp.InMemorySessionStore] keeps
+`session/load`. [`InMemorySessionStore`][pydantic_ai_harness.experimental.acp.InMemorySessionStore] keeps
 sessions for the process's lifetime; implement the protocol over a file or database for
 durability.
 """
@@ -13,7 +13,7 @@ from typing import Protocol
 
 from pydantic_ai.messages import ModelMessage
 
-from ._session import SessionUpdate
+from pydantic_ai_harness.experimental.acp._session import SessionUpdate
 
 
 # The two views are stored separately because neither can be derived from the other: the messages
@@ -52,7 +52,7 @@ class SessionStore(Protocol):
 
 
 class InMemorySessionStore:
-    """A [`SessionStore`][pydantic_ai_harness.acp.SessionStore] holding sessions in a dict.
+    """A [`SessionStore`][pydantic_ai_harness.experimental.acp.SessionStore] holding sessions in a dict.
 
     Sessions can be reopened within one process but do not survive a restart; back the store
     with a file or database for that.

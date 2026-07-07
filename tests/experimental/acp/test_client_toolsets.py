@@ -12,14 +12,14 @@ from pydantic_ai import RunContext
 from pydantic_ai.models.test import TestModel
 from pydantic_ai.usage import RunUsage
 
-from pydantic_ai_harness.acp import (
+from pydantic_ai_harness.experimental.acp import (
     AcpFileSystemToolset,
     AcpSession,
     AcpTerminalToolset,
     acp_filesystem,
     acp_terminal,
 )
-from tests._acp_clients import RecordingClient  # pyright: ignore[reportMissingTypeStubs]
+from tests.experimental.acp._acp_clients import RecordingClient  # pyright: ignore[reportMissingTypeStubs]
 
 pytestmark = pytest.mark.anyio
 

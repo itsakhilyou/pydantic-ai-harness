@@ -46,7 +46,7 @@ class AcpSession:
     filesystem or terminal support).
 
     `client` and `session_id` are the live connection handle for this session: pass them to a
-    client-backed toolset (see [`acp_filesystem`][pydantic_ai_harness.acp.acp_filesystem]) to
+    client-backed toolset (see [`acp_filesystem`][pydantic_ai_harness.experimental.acp.acp_filesystem]) to
     route the agent's I/O through the editor rather than local disk.
     """
 

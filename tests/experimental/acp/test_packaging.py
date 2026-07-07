@@ -1,10 +1,13 @@
 """The ACP integration ships as the optional `acp` extra: `pip install pydantic-ai-harness[acp]`.
 
-Needed because a clean install during review could not import `pydantic_ai_harness.acp` at all:
+Needed because a clean install during review could not import `pydantic_ai_harness.experimental.acp` at all:
 `agent-client-protocol` was missing from the package metadata, which only an isolated install
 (not the dev environment) reveals. It is declared as an optional extra so base installs stay
 lean; these checks keep it in the metadata. The full clean-install import
 (`uv run --isolated --with '.[acp]' ...`) is verified manually until a CI job covers it.
+
+Only metadata checks belong here: this file stays collected on base (no-extras) installs, so it
+must not import `pydantic_ai_harness.experimental.acp` or the `acp` SDK.
 """
 
 from __future__ import annotations

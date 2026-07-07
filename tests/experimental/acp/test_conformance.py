@@ -1,4 +1,4 @@
-"""ACP spec-conformance tests, driven over a real in-memory wire (`tests/acp/_wire.py`).
+"""ACP spec-conformance tests, driven over a real in-memory wire (`tests/experimental/acp/_wire.py`).
 
 These tests are organized by spec clause, not by adapter method, and each pins the *protocol*
 invariant with an oracle constructed independently of the adapter -- not the adapter's own output
@@ -18,8 +18,8 @@ from acp import RequestError, schema
 from pydantic_ai import Agent
 from pydantic_ai.models.test import TestModel
 
-from pydantic_ai_harness.acp import InMemorySessionStore, PydanticAIACPAgent
-from tests.acp._wire import WireClient, wire_agent  # pyright: ignore[reportMissingTypeStubs]
+from pydantic_ai_harness.experimental.acp import InMemorySessionStore, PydanticAIACPAgent
+from tests.experimental.acp._wire import WireClient, wire_agent  # pyright: ignore[reportMissingTypeStubs]
 
 pytestmark = pytest.mark.anyio
 

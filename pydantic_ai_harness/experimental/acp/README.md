@@ -1,5 +1,24 @@
 # ACP (Agent Client Protocol)
 
+> [!WARNING]
+> **Experimental.** This capability lives under `pydantic_ai_harness.experimental` and may
+> change or be removed in any release, without a deprecation period. Import it from the
+> experimental path -- there is no top-level export:
+>
+> ```python
+> from pydantic_ai_harness.experimental.acp import run_acp_stdio_sync
+> ```
+>
+> Importing any experimental capability emits a `HarnessExperimentalWarning`. Silence **all**
+> harness experimental warnings with a single filter (no per-capability lines needed):
+>
+> ```python
+> import warnings
+> from pydantic_ai_harness.experimental import HarnessExperimentalWarning
+>
+> warnings.filterwarnings('ignore', category=HarnessExperimentalWarning)
+> ```
+
 Expose a Pydantic AI agent to editors and terminal UIs over the [Agent Client Protocol](https://agentclientprotocol.com).
 
 ## The problem
@@ -24,7 +43,7 @@ Editors like [Zed](https://zed.dev/docs/ai/external-agents) speak ACP: a stdio J
 uv add "pydantic-ai-harness[acp]"
 ```
 
-This pulls in the [`agent-client-protocol`](https://pypi.org/project/agent-client-protocol/) SDK. The rest of the harness does not depend on it -- only `pydantic_ai_harness.acp` does.
+This pulls in the [`agent-client-protocol`](https://pypi.org/project/agent-client-protocol/) SDK. The rest of the harness does not depend on it -- only `pydantic_ai_harness.experimental.acp` does.
 
 ## Quick start
 
@@ -33,7 +52,7 @@ Write a script that builds your agent and serves it:
 ```python
 # my_acp_agent.py
 from pydantic_ai import Agent
-from pydantic_ai_harness.acp import run_acp_stdio_sync
+from pydantic_ai_harness.experimental.acp import run_acp_stdio_sync
 
 
 def build_agent() -> Agent[None, str]:
@@ -77,7 +96,7 @@ A coding agent should read and write files in the workspace the editor opened, n
 
 ```python
 from pydantic_ai import Agent
-from pydantic_ai_harness.acp import AcpSession, AcpSessionConfig, run_acp_stdio_sync
+from pydantic_ai_harness.experimental.acp import AcpSession, AcpSessionConfig, run_acp_stdio_sync
 from pydantic_ai_harness.filesystem import FileSystem
 from pydantic_ai_harness.shell import Shell
 
@@ -99,14 +118,14 @@ if __name__ == '__main__':
     run_acp_stdio_sync(agent, session_config=session_config)
 ```
 
-The factory runs once per session with the client's [`AcpSession`][pydantic_ai_harness.acp.AcpSession] setup (its `cwd`, `mcp_servers`, and capabilities) and returns an [`AcpSessionConfig`][pydantic_ai_harness.acp.AcpSessionConfig] whose `deps` and `toolsets` apply to every run in that session. This is correct across multiple concurrent sessions in one process, where a single static `FileSystem` could not be.
+The factory runs once per session with the client's [`AcpSession`][pydantic_ai_harness.experimental.acp.AcpSession] setup (its `cwd`, `mcp_servers`, and capabilities) and returns an [`AcpSessionConfig`][pydantic_ai_harness.experimental.acp.AcpSessionConfig] whose `deps` and `toolsets` apply to every run in that session. This is correct across multiple concurrent sessions in one process, where a single static `FileSystem` could not be.
 
 ## Editor-native filesystem and shell (optional)
 
-The local `FileSystem` and `Shell` above operate on the agent process's own disk and subprocesses. An editor's source of truth is different: it has unsaved buffers, the file layout it considers the workspace, and -- for a remote or containerized editor -- the machine the code actually lives on. When the client advertises support, [`acp_filesystem`][pydantic_ai_harness.acp.acp_filesystem] and [`acp_terminal`][pydantic_ai_harness.acp.acp_terminal] give the agent `read_file`/`write_file`/`run_command` tools that route through the client, so it acts where the user is:
+The local `FileSystem` and `Shell` above operate on the agent process's own disk and subprocesses. An editor's source of truth is different: it has unsaved buffers, the file layout it considers the workspace, and -- for a remote or containerized editor -- the machine the code actually lives on. When the client advertises support, [`acp_filesystem`][pydantic_ai_harness.experimental.acp.acp_filesystem] and [`acp_terminal`][pydantic_ai_harness.experimental.acp.acp_terminal] give the agent `read_file`/`write_file`/`run_command` tools that route through the client, so it acts where the user is:
 
 ```python
-from pydantic_ai_harness.acp import AcpSession, AcpSessionConfig, acp_filesystem, acp_terminal
+from pydantic_ai_harness.experimental.acp import AcpSession, AcpSessionConfig, acp_filesystem, acp_terminal
 from pydantic_ai_harness.filesystem import FileSystem
 from pydantic_ai_harness.shell import Shell
 
@@ -167,7 +186,7 @@ run_acp_stdio_sync(agent, prompt_capabilities=schema.PromptCapabilities(image=Tr
 Pass a `session_store` to let a client reopen a past conversation with `session/load`. Each committed turn is persisted as two parts -- the model's message history and the client-visible transcript (the user's messages plus everything streamed back) -- and reopening restores the history into the agent and replays the transcript to the client, so its UI is rebuilt as the user last saw it. Without a store, `session/load` is advertised as unsupported.
 
 ```python
-from pydantic_ai_harness.acp import InMemorySessionStore
+from pydantic_ai_harness.experimental.acp import InMemorySessionStore
 
 run_acp_stdio_sync(agent, session_store=InMemorySessionStore())
 ```
@@ -209,7 +228,7 @@ run_acp_stdio(            # async; serve until the client disconnects
     deps=None,
     name=None,            # advertised name; defaults to the agent's name
     version='0.1.0',
-    session_config=None,  # SessionConfigFunc: per-session deps/toolsets from the client's setup
+    session_config=None,  # per-session deps/toolsets from the client's setup
     permission_policy=None,   # scope of remembered "always" approval decisions
     prompt_capabilities=None, # defaults to text-only
     mcp_capabilities=None,    # MCP transports to advertise; needs a session_config to connect them

@@ -7,7 +7,7 @@ import base64
 import acp
 from pydantic_ai.messages import BinaryContent, ImageUrl
 
-from pydantic_ai_harness.acp._content import prompt_blocks_to_user_content
+from pydantic_ai_harness.experimental.acp._content import prompt_blocks_to_user_content
 
 
 def test_text_block_becomes_string() -> None:
