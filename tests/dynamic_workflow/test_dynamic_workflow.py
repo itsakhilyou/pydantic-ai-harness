@@ -14,6 +14,7 @@ from pydantic_ai import Agent, RunContext, capture_run_messages
 from pydantic_ai.capabilities import AbstractCapability, PrefixTools
 from pydantic_ai.exceptions import ModelRetry, UnexpectedModelBehavior, UserError
 from pydantic_ai.messages import (
+    InstructionPart,
     ModelMessage,
     ModelRequest,
     ModelResponse,
@@ -28,12 +29,12 @@ from pydantic_ai.models.test import TestModel
 from pydantic_ai.usage import RunUsage, UsageLimits
 from pydantic_core import core_schema
 
-from pydantic_ai_harness.dynamic_workflow import DynamicWorkflow, WorkflowAgent, WorkflowResourceLimits
-from pydantic_ai_harness.dynamic_workflow._toolset import (  # pyright: ignore[reportPrivateUsage]
+from pydantic_ai_harness.code_mode import CodeMode
+from pydantic_ai_harness.dynamic_workflow import (
+    DynamicWorkflow,
     DynamicWorkflowToolset,
-    _default_resource_limits,
-    _in_workflow,
-    _resolve_resource_limits,
+    WorkflowAgent,
+    WorkflowResourceLimits,
 )
 
 pytestmark = pytest.mark.anyio
@@ -600,41 +601,25 @@ async def test_max_agent_calls_exact_under_concurrent_fan_out() -> None:
     assert len(runs) == 3
 
 
-async def test_budget_terminal_result_keeps_surfaced_error_detail(monkeypatch: pytest.MonkeyPatch) -> None:
-    from pydantic_monty import MontyRepl, MontyRuntimeError
+async def test_budget_terminal_result_keeps_surfaced_error_detail() -> None:
+    # When the budget is exhausted in the same batch as an unrelated sub-agent failure, the
+    # terminal result leads with the budget message and demotes the surfaced error to
+    # `last_error`. Which of the batch's failures surfaces first inside the sandbox is
+    # scheduler-dependent (the unrelated ValueError or the budget refusal), so assert the
+    # invariant shape, not the specific failure.
+    def boom(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        raise ValueError('kaboom')
 
-    def runtime_error(message: str) -> MontyRuntimeError:
-        try:
-            MontyRepl().feed_start(f'raise RuntimeError({message!r})')
-        except MontyRuntimeError as exc:
-            return exc
-        raise AssertionError('expected MontyRuntimeError')  # pragma: no cover
-
-    class FakeExecutor:
-        dispatch: Callable[[str, dict[str, Any]], Coroutine[Any, Any, Any]]
-
-        def __init__(
-            self, dispatch: Callable[[str, dict[str, Any]], Coroutine[Any, Any, Any]], valid_names: object
-        ) -> None:
-            _ = valid_names
-            self.dispatch = dispatch
-
-        async def run(self, _state: object) -> object:
-            await self.dispatch('good', {'task': 'x'})
-            with pytest.raises(RuntimeError, match='budget'):
-                await self.dispatch('good', {'task': 'y'})
-            raise runtime_error("sub-agent 'bad' raised ValueError")
-
-    monkeypatch.setattr('pydantic_ai_harness.dynamic_workflow._toolset.MontyExecutor', FakeExecutor)
-    ts = DynamicWorkflowToolset[object](agents=[_wf_agent('ok', 'good')], max_agent_calls=1)
-    out = await _run_script(ts, '1 + 1')
+    bad: Agent[object, str] = Agent(FunctionModel(boom), name='bad')
+    ts = DynamicWorkflowToolset[object](agents=[_wf_agent('ok', 'good'), WorkflowAgent(agent=bad)], max_agent_calls=2)
+    code = "import asyncio\nawait asyncio.gather(good(task='x'), bad(task='y'), good(task='z'))"
+    out = await _run_script(ts, code)
     assert isinstance(out, dict)
     assert out['error'] == (
-        'This run exhausted its sub-agent call budget (1). Conclude using the results already gathered; '
+        'This run exhausted its sub-agent call budget (2). Conclude using the results already gathered; '
         'further sub-agent calls in this run will be refused.'
     )
-    assert "'bad'" in out['last_error']
-    assert 'ValueError' in out['last_error']
+    assert 'sub-agent' in out['last_error']
     assert out['completed'] == ['good(task="x") -> "ok"']
 
 
@@ -643,20 +628,19 @@ def test_max_agent_calls_must_be_positive() -> None:
         DynamicWorkflowToolset[object](agents=[_wf_agent()], max_agent_calls=0)
 
 
-async def test_nested_workflow_is_refused() -> None:
-    # A workflow already in progress (the flag a sub-agent would inherit) refuses to start another.
-    ts = DynamicWorkflowToolset[object](agents=[_wf_agent()])
-    token = _in_workflow.set(True)
-    try:
-        out = await _run_script(ts, "await sub(task='x')")
-    finally:
-        _in_workflow.reset(token)
-    assert out == {
-        'error': (
-            'Workflows do not nest: this sub-agent was invoked from a workflow and cannot start '
-            'its own. Return your result to the orchestrating workflow instead.'
-        )
-    }
+async def test_budget_shared_across_run_workflow_calls_in_one_run() -> None:
+    # The description's headline claim: one budget shared across every `run_workflow` call in
+    # the run, not per script. A second script on the same per-run instance sees the remainder.
+    ts = DynamicWorkflowToolset[object](agents=[_wf_agent()], max_agent_calls=2)
+    ctx = _ctx()
+    assert await _run_script(ts, "await sub(task='a')", ctx) == 'ok'
+    out = await _run_script(ts, "import asyncio\nawait asyncio.gather(sub(task='b'), sub(task='c'))", ctx)
+    # Read `completed` before the `isinstance` narrow so pyright keeps the element type.
+    completed: list[str] = out['completed']
+    assert isinstance(out, dict)
+    assert 'budget' in out['error']
+    # Only one of the second script's two calls fit in the remaining budget.
+    assert len(completed) == 1
 
 
 async def test_nested_workflow_refused_end_to_end() -> None:
@@ -695,43 +679,59 @@ async def test_nested_workflow_refused_end_to_end() -> None:
     ]
 
 
-async def test_unknown_agent_raises_model_retry() -> None:
+async def test_unknown_agent_rejected_by_type_check() -> None:
+    # An unresolved name can't evade the static check, so it never reaches the sandbox.
     ts = DynamicWorkflowToolset[object](agents=[_wf_agent()])
-    with pytest.raises(ModelRetry, match='Unknown function'):
+    with pytest.raises(ModelRetry, match='Type error in workflow'):
         await _run_script(ts, "await nonexistent(task='x')")
 
 
 async def test_missing_task_kwarg() -> None:
+    # `**` through `json.loads` (typed `Any`) evades the static check; the runtime guard
+    # must still reject the call before the budget is touched.
     ts = DynamicWorkflowToolset[object](agents=[_wf_agent()])
     with pytest.raises(ModelRetry, match='missing required keyword argument'):
-        await _run_script(ts, 'await sub(wrong=1)')
+        await _run_script(ts, "import json\nawait sub(**json.loads('{}'))")
 
 
 async def test_positional_sub_agent_call_is_rejected() -> None:
+    # Keyword-only `task` is enforced statically, before any sandbox execution.
     ts = DynamicWorkflowToolset[object](agents=[_wf_agent()])
-    with pytest.raises(ModelRetry, match='does not accept positional arguments'):
+    with pytest.raises(ModelRetry, match='Type error in workflow'):
         await _run_script(ts, "await sub('x')")
 
 
 async def test_extra_kwargs_rejected() -> None:
     # An extra kwarg must not be silently dropped -- the model needs to know it was ignored.
+    # Smuggled through `**json.loads(...)` so the static check can't catch it first.
     ts = DynamicWorkflowToolset[object](agents=[_wf_agent()])
     with pytest.raises(ModelRetry, match='unexpected keyword argument'):
-        await _run_script(ts, "await sub(task='x', foo='y')")
+        await _run_script(ts, "import json\nawait sub(task='x', **json.loads('{\"foo\": 1}'))")
 
 
 async def test_non_str_task_rejected() -> None:
     # A non-string task (a dict/list would otherwise be silently smeared into message parts).
+    # `json.loads` returns `Any`, so only the runtime guard can catch this.
     ts = DynamicWorkflowToolset[object](agents=[_wf_agent()])
     with pytest.raises(ModelRetry, match='task must be a string'):
-        await _run_script(ts, "await sub(task={'k': 'v'})")
+        await _run_script(ts, 'import json\nawait sub(task=json.loads(\'{"k": "v"}\'))')
+
+
+async def test_type_error_caught_before_budget_is_spent() -> None:
+    # A statically-detectable mistake costs a retry but no sub-agent budget: the full
+    # budget is still available to a corrected script on the same toolset instance.
+    ts = DynamicWorkflowToolset[object](agents=[_wf_agent()], max_agent_calls=1)
+    with pytest.raises(ModelRetry, match='Type error in workflow'):
+        await _run_script(ts, 'await sub(task=123)')
+    assert await _run_script(ts, "await sub(task='x')") == 'ok'
 
 
 async def test_forward_usage_true_shares_parent_usage() -> None:
     ts = DynamicWorkflowToolset[object](agents=[_wf_agent()], forward_usage=True)
     ctx = _ctx()
     await _run_script(ts, "await sub(task='x')", ctx)
-    assert ctx.usage.requests > 0
+    # Exactly the sub-agent's one model request lands on the shared counter -- no double-counting.
+    assert ctx.usage.requests == 1
 
 
 async def test_forward_usage_false_isolates_usage() -> None:
@@ -888,7 +888,7 @@ async def test_sub_agent_usage_limits_generous_allows_run() -> None:
 async def test_syntax_error() -> None:
     ts = DynamicWorkflowToolset[object](agents=[_wf_agent()])
     with pytest.raises(ModelRetry, match='Syntax error'):
-        await _run_script(ts, 'this is not valid python !!!')
+        await _run_script(ts, 'x = (')
 
 
 async def test_retry_exhaustion_for_invalid_code_end_to_end() -> None:
@@ -897,9 +897,7 @@ async def test_retry_exhaustion_for_invalid_code_end_to_end() -> None:
     def model_fn(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
         nonlocal model_calls
         model_calls += 1
-        return ModelResponse(
-            parts=[ToolCallPart(tool_name='run_workflow', args={'code': 'this is not valid python !!!'})]
-        )
+        return ModelResponse(parts=[ToolCallPart(tool_name='run_workflow', args={'code': 'x = ('})])
 
     agent: Agent[object, str] = Agent(
         FunctionModel(model_fn),
@@ -1147,23 +1145,12 @@ async def test_runaway_loop_stopped_by_duration_cap() -> None:
         await _run_script(ts, 'while True:\n    x = 1')
 
 
-def test_resolve_resource_limits_none_is_backstop() -> None:
-    # Pin the documented backstop values (256 MB, 50M allocations, no duration cap) so the docs
-    # can't silently drift from the constant.
-    assert _resolve_resource_limits(None) == {'max_memory': 256 * 1024 * 1024, 'max_allocations': 50_000_000}
-    assert _resolve_resource_limits(None) == _default_resource_limits()
-
-
-def test_resolve_resource_limits_unlimited_removes_all() -> None:
-    assert _resolve_resource_limits('unlimited') == {}
-
-
-def test_resolve_resource_limits_partial_merges_onto_backstop() -> None:
-    # A partial dict overrides only the cap it names; the others keep their backstop value.
-    resolved = _resolve_resource_limits({'max_memory': 1})
-    # Equality with the full backstop (plus the override) proves the allocations backstop
-    # survives a partial dict rather than being dropped. (There is no duration backstop.)
-    assert resolved == {**_default_resource_limits(), 'max_memory': 1}
+async def test_resource_limit_override_is_enforced_in_the_sandbox() -> None:
+    # The configured cap reaches the sandbox: a script comfortably under the default backstop
+    # trips a small explicit `max_memory`, proving a partial dict is applied (merged, not dropped).
+    ts = DynamicWorkflowToolset[object](agents=[_wf_agent()], resource_limits={'max_memory': 4096})
+    with pytest.raises(ModelRetry, match='Runtime error'):
+        await _run_script(ts, "x = ['data'] * 100000\nlen(x)")
 
 
 async def test_unlimited_runs_without_a_backstop() -> None:
@@ -1537,3 +1524,181 @@ async def test_reveal_end_to_end_via_agent_run() -> None:
     result = await agent.run('start')
     assert saw_announcement == [True]  # the model saw the reveal announcement, mid-run
     assert result.output == 'final: extra-done'  # and the revealed sub-agent actually ran
+
+
+# --- CodeMode merge ----------------------------------------------------------
+
+
+def _code_mode_ctx(*capabilities: AbstractCapability[object]) -> RunContext[object]:
+    """A `RunContext` whose registry holds a `CodeMode` plus any extra capabilities."""
+    registry: dict[str, AbstractCapability[object]] = {'code_mode': CodeMode[object]()}
+    for index, capability in enumerate(capabilities):
+        registry[f'cap_{index}'] = capability
+    return _registry_ctx(registry, loaded=set())
+
+
+async def test_merged_mode_exposes_sub_agent_tools_instead_of_run_workflow() -> None:
+    # With CodeMode registered, the toolset trades `run_workflow` for one `(task)` tool per
+    # sub-agent, each carrying the return schema CodeMode needs to render a typed function.
+    ts = DynamicWorkflowToolset[object](agents=[_wf_agent(description='Reviews code.')])
+    tools = await ts.get_tools(_code_mode_ctx())
+    assert set(tools) == {'sub'}
+    tool_def = tools['sub'].tool_def
+    assert tool_def.description == 'Reviews code.'
+    assert tool_def.parameters_json_schema['required'] == ['task']
+    assert tool_def.return_schema == {'type': 'string'}
+    assert tool_def.sequential is False
+
+
+async def test_merged_mode_detects_wrapped_code_mode() -> None:
+    # A CodeMode inside a wrapper capability still triggers the merge (registry walk unwraps).
+    wrapper = PrefixTools[object](wrapped=CodeMode[object](), prefix='cm')
+    ts = DynamicWorkflowToolset[object](agents=[_wf_agent()])
+    tools = await ts.get_tools(_registry_ctx({'cm': wrapper}, loaded=set()))
+    assert set(tools) == {'sub'}
+
+
+async def test_merged_mode_renders_sub_agents_in_run_code_catalog() -> None:
+    # End to end: the model sees a single `run_code` tool whose catalog lists the sub-agent as
+    # a typed async function, with the structured output type rendered as a TypedDict.
+    model = TestModel(call_tools=[])
+    agent: Agent[object, str] = Agent(
+        model,
+        capabilities=[CodeMode[object](), DynamicWorkflow[object](agents=[_review_agent()])],
+    )
+    await agent.run('hi')
+    params = model.last_model_request_parameters
+    assert params is not None
+    assert [td.name for td in params.function_tools] == ['run_code']
+    description = params.function_tools[0].description or ''
+    assert 'async def reviewer(*, task: str) -> Review:' in description
+    assert 'class Review(TypedDict):' in description
+    assert 'run_workflow' not in description
+
+
+async def test_merged_mode_instructions_carry_budget_and_isolation_guidance() -> None:
+    # The guidance `run_workflow`'s description used to carry (isolated runs, shared budget)
+    # moves into instructions; standalone mode contributes none.
+    ts = DynamicWorkflowToolset[object](agents=[_wf_agent()], max_agent_calls=9)
+    part = await ts.get_instructions(_code_mode_ctx())
+    assert isinstance(part, InstructionPart)
+    assert '`sub`' in part.content
+    assert 'at most 9 sub-agent calls' in part.content
+    assert part.dynamic is True
+    assert await ts.get_instructions(_ctx()) is None
+
+
+async def test_merged_mode_end_to_end_mixes_tools_and_sub_agents() -> None:
+    # The point of the merge: one `run_code` script calls a regular tool and fans out
+    # sub-agents, composing both results without a model round-trip in between.
+    reviewer = _sub_agent('LGTM', 'reviewer')
+    script = (
+        'import asyncio\n'
+        'data = await fetch_data(url="https://example.com")\n'
+        'reviews = await asyncio.gather(reviewer(task="A: " + data), reviewer(task="B: " + data))\n'
+        '{"data": data, "reviews": reviews}'
+    )
+
+    def model_fn(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        if len(messages) == 1:
+            return ModelResponse(parts=[ToolCallPart(tool_name='run_code', args={'code': script})])
+        return ModelResponse(parts=[TextPart('done')])
+
+    agent: Agent[object, str] = Agent(
+        FunctionModel(model_fn),
+        capabilities=[CodeMode[object](), DynamicWorkflow[object](agents=[reviewer])],
+    )
+
+    @agent.tool_plain
+    def fetch_data(url: str) -> str:
+        """Fetch a URL."""
+        return f'data-from-{url}'
+
+    result = await agent.run('go')
+    assert result.output == 'done'
+    returns = [
+        p
+        for m in result.all_messages()
+        if isinstance(m, ModelRequest)
+        for p in m.parts
+        if isinstance(p, ToolReturnPart) and p.tool_name == 'run_code'
+    ]
+    assert returns[-1].content == {'data': 'data-from-https://example.com', 'reviews': ['LGTM', 'LGTM']}
+
+
+async def test_merged_mode_budget_shared_and_exhaustion_raises() -> None:
+    # The same per-run budget applies to sub-agents called as tools; the call after the
+    # ceiling raises, which inside CodeMode's sandbox surfaces as a `run_code` retry.
+    ts = DynamicWorkflowToolset[object](agents=[_wf_agent()], max_agent_calls=2)
+    ctx = _code_mode_ctx()
+    tool = (await ts.get_tools(ctx))['sub']
+    assert await ts.call_tool('sub', {'task': 'a'}, ctx, tool) == 'ok'
+    assert await ts.call_tool('sub', {'task': 'b'}, ctx, tool) == 'ok'
+    with pytest.raises(RuntimeError, match=r'sub-agent call budget \(2\) exhausted'):
+        await ts.call_tool('sub', {'task': 'c'}, ctx, tool)
+
+
+async def test_merged_mode_structured_output_returned_as_dict() -> None:
+    ts = DynamicWorkflowToolset[object](agents=[WorkflowAgent(_review_agent())])
+    ctx = _code_mode_ctx()
+    tool = (await ts.get_tools(ctx))['reviewer']
+    out = await ts.call_tool('reviewer', {'task': 'rate this'}, ctx, tool)
+    assert out == {'score': 9, 'note': 'great'}
+
+
+async def test_merged_mode_reveal_adds_tool_without_announcement() -> None:
+    # In merged mode a reveal needs no enqueued announcement: the new function simply appears
+    # in the `run_code` catalog, which CodeMode re-renders each step.
+    workflow = DynamicWorkflow[object](agents=[_sub_agent('b', 'base')])
+    ts = workflow.get_toolset()
+    ctx = _code_mode_ctx(workflow)
+    assert set(await ts.get_tools(ctx)) == {'base'}
+    workflow.reveal(_sub_agent('e', 'extra'))
+    assert set(await ts.get_tools(ctx)) == {'base', 'extra'}
+    assert _enqueued_text(ctx) == ''
+
+
+async def test_merged_mode_nesting_refused_end_to_end() -> None:
+    # A sub-agent invoked through the merged path must not delegate further: its own merged
+    # sub-agent tool returns the refusal as a value the inner script can observe.
+    leaf = _sub_agent('leaf-done', 'leaf')
+    inner_returns: list[Any] = []
+
+    def inner_fn(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        returns = [
+            p
+            for m in messages
+            if isinstance(m, ModelRequest)
+            for p in m.parts
+            if isinstance(p, ToolReturnPart) and p.tool_name == 'run_code'
+        ]
+        if returns:
+            inner_returns.append(returns[-1].content)
+            return ModelResponse(parts=[TextPart('inner saw refusal')])
+        return ModelResponse(parts=[ToolCallPart(tool_name='run_code', args={'code': "await leaf(task='x')"})])
+
+    inner: Agent[object, str] = Agent(
+        FunctionModel(inner_fn),
+        name='inner',
+        capabilities=[CodeMode[object](), DynamicWorkflow[object](agents=[leaf])],
+    )
+
+    def outer_fn(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        if len(messages) == 1:
+            return ModelResponse(parts=[ToolCallPart(tool_name='run_code', args={'code': "await inner(task='go')"})])
+        return ModelResponse(parts=[TextPart('done')])
+
+    outer: Agent[object, str] = Agent(
+        FunctionModel(outer_fn),
+        capabilities=[CodeMode[object](), DynamicWorkflow[object](agents=[inner])],
+    )
+    result = await outer.run('start')
+    assert result.output == 'done'
+    assert inner_returns == [
+        {
+            'error': (
+                'Sub-agent delegation does not nest: this agent was itself invoked as a sub-agent. '
+                'Return your result to the caller instead.'
+            )
+        }
+    ]

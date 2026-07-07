@@ -3,6 +3,11 @@
 Exposes a single `run_workflow` tool: the model writes a Python orchestration
 script (run in a Monty sandbox) that calls named sub-agents as async functions
 and composes their results -- fan-out, chaining, voting, loops -- in one step.
+
+When a `CodeMode` capability is registered on the same run, the toolset merges
+into it instead: each sub-agent is exposed as its own `(task)` tool, which
+CodeMode folds into the `run_code` sandbox as a typed async function callable
+alongside the agent's regular tools.
 """
 
 from __future__ import annotations
@@ -16,12 +21,13 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Annotated, Any, Generic, Literal
 
-from pydantic import Field, TypeAdapter
+from pydantic import ConfigDict, Field, TypeAdapter, with_config
 from pydantic_ai import AbstractToolset, RunContext, ToolDefinition
 from pydantic_ai.agent.abstract import AbstractAgent
 from pydantic_ai.capabilities import AbstractCapability, WrapperCapability
 from pydantic_ai.exceptions import ModelRetry, UsageLimitExceeded, UserError
 from pydantic_ai.function_signature import FunctionSignature
+from pydantic_ai.messages import InstructionPart
 from pydantic_ai.tools import AgentDepsT
 from pydantic_ai.toolsets.abstract import SchemaValidatorProt, ToolsetTool
 from pydantic_ai.usage import UsageLimits
@@ -29,7 +35,7 @@ from pydantic_core import to_jsonable_python
 from typing_extensions import Self, TypedDict
 
 try:
-    from pydantic_monty import MontyRepl, MontyRuntimeError, MontySyntaxError, ResourceLimits
+    from pydantic_monty import Monty, MontyRepl, MontyRuntimeError, MontySyntaxError, MontyTypingError, ResourceLimits
 except ImportError as _import_error:  # pragma: no cover
     raise ImportError(
         'pydantic-monty is required for DynamicWorkflow. '
@@ -112,6 +118,25 @@ _WORKFLOW_ARGS_ADAPTER = TypeAdapter(_WorkflowArguments)
 _WORKFLOW_ARGS_JSON_SCHEMA = _WORKFLOW_ARGS_ADAPTER.json_schema()
 _WORKFLOW_ARGS_VALIDATOR: SchemaValidatorProt = _WORKFLOW_ARGS_ADAPTER.validator  # pyright: ignore[reportAssignmentType]
 
+
+# `extra='forbid'` so an unexpected keyword fails validation loudly, matching the explicit
+# kwarg check on the script path (Monty does not validate kwargs against the signature).
+@with_config(ConfigDict(extra='forbid'))
+class _SubAgentArguments(TypedDict):
+    task: str
+
+
+_TASK_ARGS_ADAPTER = TypeAdapter(_SubAgentArguments)
+_TASK_ARGS_VALIDATOR: SchemaValidatorProt = _TASK_ARGS_ADAPTER.validator  # pyright: ignore[reportAssignmentType]
+
+
+class _BudgetExhausted(RuntimeError):
+    """The run's `max_agent_calls` budget is spent; no further sub-agent runs are allowed."""
+
+    def __init__(self, max_agent_calls: int) -> None:
+        super().__init__(f'sub-agent call budget ({max_agent_calls}) exhausted')
+
+
 _WORKFLOW_BASE_DESCRIPTION = """\
 Write and run a Python orchestration script in a sandbox to coordinate multiple sub-agents.
 
@@ -174,16 +199,20 @@ _SUB_AGENT_PARAMS_SCHEMA: dict[str, Any] = {
 _NO_CONFLICTING_TYPE_NAMES: frozenset[str] = frozenset()
 
 
+def _agent_return_schema(agent: AbstractAgent[AgentDepsT, object]) -> dict[str, Any] | None:
+    """The sub-agent's output JSON schema, or `None` when it cannot be derived."""
+    try:
+        return agent.output_json_schema()
+    except Exception:
+        return None
+
+
 def _agent_signature(name: str, agent: AbstractAgent[AgentDepsT, object]) -> FunctionSignature:
     """Build the sandbox function signature for one sub-agent."""
-    try:
-        return_schema = agent.output_json_schema()
-    except Exception:
-        return_schema = None
     return FunctionSignature.from_schema(
         name=name,
         parameters_schema=_SUB_AGENT_PARAMS_SCHEMA,
-        return_schema=return_schema,
+        return_schema=_agent_return_schema(agent),
     )
 
 
@@ -478,15 +507,17 @@ class DynamicWorkflowToolset(AbstractToolset[AgentDepsT]):
         clone._rebuild()
         return clone
 
-    def _reveal_pending(self, ctx: RunContext[AgentDepsT]) -> None:
-        """Reveal sub-agents appended to `agents` since the run started.
+    def _fold_reveals(self, ctx: RunContext[AgentDepsT], *, announce: bool) -> None:
+        """Fold sub-agents appended to `agents` since the run started into the name index.
 
         Diffs the live `agents` list against the names already known (`_by_name`, which holds the
         baseline plus anything revealed so far) and folds each newcomer in -- so `dispatch` resolves
-        it -- enqueuing an announcement for the model. The frozen `_description` is untouched, so
-        the cached prompt prefix is unaffected. Re-seeing an already-known entry (a baseline agent,
-        or one revealed on an earlier step) is a no-op, identified by object identity so it is never
-        mistaken for a name collision.
+        it -- enqueuing an announcement for the model when `announce` is set. The frozen
+        `_description` is untouched, so the cached prompt prefix is unaffected. In merged mode
+        (`announce=False`) no announcement is needed: the newcomer surfaces as a new function in the
+        `run_code` catalog, which CodeMode re-renders each step. Re-seeing an already-known entry (a
+        baseline agent, or one revealed on an earlier step) is a no-op, identified by object
+        identity so it is never mistaken for a name collision.
 
         A newcomer whose name is missing, invalid, or already taken by a different
         sub-agent is a contract violation and raises `UserError`.
@@ -502,6 +533,8 @@ class DynamicWorkflowToolset(AbstractToolset[AgentDepsT]):
                 continue
             name = validate_workflow_agent(entry, set(self._by_name))
             self._by_name[name] = entry
+            if not announce:
+                continue
             try:
                 ctx.enqueue(_render_reveal(name, self._by_name, self.tool_name))
             except UserError as exc:
@@ -539,12 +572,86 @@ class DynamicWorkflowToolset(AbstractToolset[AgentDepsT]):
                 candidate = candidate.wrapped if isinstance(candidate, WrapperCapability) else None
         return True
 
+    def _merged_with_code_mode(self, ctx: RunContext[AgentDepsT]) -> bool:
+        """Whether a `CodeMode` capability is registered on this run (merged mode).
+
+        With CodeMode present, exposing `run_workflow` would nest one code sandbox inside
+        another: CodeMode folds every plain tool into `run_code`, so the model would have to
+        write a Python script containing a second Python script as a string literal. Merged
+        mode avoids that by exposing each sub-agent as its own `(task)` tool instead, which
+        CodeMode renders as a typed async function in the one `run_code` sandbox -- tools and
+        sub-agents composable in a single script. `WrapperCapability` chains are unwrapped so
+        a wrapped CodeMode still triggers the merge.
+        """
+        from pydantic_ai_harness.code_mode import CodeMode
+
+        for registered in ctx.capabilities.values():
+            candidate: AbstractCapability[AgentDepsT] | None = registered
+            while candidate is not None:
+                if isinstance(candidate, CodeMode):
+                    return True
+                candidate = candidate.wrapped if isinstance(candidate, WrapperCapability) else None
+        return False
+
+    def _sub_agent_tools(self) -> dict[str, ToolsetTool[AgentDepsT]]:
+        """One `(task)` tool per sub-agent, for CodeMode to fold into the `run_code` sandbox.
+
+        `return_schema` is set so CodeMode renders (and type-checks) each function with the
+        sub-agent's real output type instead of `-> Any`. The tools are left non-sequential so
+        CodeMode renders them `async def` and dispatches concurrent calls in parallel, matching
+        the `run_workflow` script semantics.
+        """
+        return {
+            name: ToolsetTool(
+                toolset=self,
+                tool_def=ToolDefinition(
+                    name=name,
+                    description=entry.resolved_description,
+                    parameters_json_schema=_SUB_AGENT_PARAMS_SCHEMA,
+                    return_schema=_agent_return_schema(entry.agent),
+                ),
+                max_retries=self.max_retries,
+                args_validator=_TASK_ARGS_VALIDATOR,
+            )
+            for name, entry in self._by_name.items()
+        }
+
+    async def get_instructions(
+        self, ctx: RunContext[AgentDepsT]
+    ) -> str | InstructionPart | Sequence[str | InstructionPart] | None:
+        """In merged mode, carry the sub-agent guidance that `run_workflow`'s description held.
+
+        The per-agent tool descriptions cover what each sub-agent does; this covers how to call
+        them: isolated runs, all context via `task`, and the shared call budget. Marked dynamic
+        so a mid-run `reveal()` (which changes the text) lands after the provider's static-prefix
+        cache breakpoint. Standalone mode returns `None` -- the `run_workflow` description
+        already says all of this.
+        """
+        if not self._merged_with_code_mode(ctx):
+            return None
+        names = ', '.join(f'`{name}`' for name in self._by_name)
+        return InstructionPart(
+            content=(
+                f'Some functions available in the code sandbox are sub-agents: {names}. Each '
+                'sub-agent call is an independent agent run with no memory of earlier calls, so '
+                'include all needed context in `task`. Fan out independent calls with '
+                f'`asyncio.gather`. This run can make at most {self.max_agent_calls} sub-agent '
+                'calls in total; plan fan-out width accordingly.'
+            ),
+            dynamic=True,
+        )
+
     async def get_tools(self, ctx: RunContext[AgentDepsT]) -> dict[str, ToolsetTool[AgentDepsT]]:
+        if self._merged_with_code_mode(ctx):
+            # No announcements: newly-revealed sub-agents surface as new functions in the
+            # `run_code` catalog, which CodeMode re-renders each step.
+            self._fold_reveals(ctx, announce=False)
+            return self._sub_agent_tools()
         # Skip reveal processing while the capability is deferred and unloaded: the newcomers
         # stay pending in `agents` and are folded in and announced on the first step after the
         # model loads the capability.
         if self._visible_to_model(ctx):
-            self._reveal_pending(ctx)
+            self._fold_reveals(ctx, announce=True)
         return {
             self.tool_name: ToolsetTool(
                 toolset=self,
@@ -560,9 +667,96 @@ class DynamicWorkflowToolset(AbstractToolset[AgentDepsT]):
             )
         }
 
+    async def _run_one(self, agent_name: str, task: str, ctx: RunContext[AgentDepsT]) -> Any:
+        """Run one sub-agent against the shared per-run budget; the core of both call paths.
+
+        The budget check + increment must stay suspension-free: there must be no `await`
+        between them. asyncio only switches tasks at suspension points, so an await-free
+        check-then-increment is atomic across the concurrently-gathered dispatches, which
+        is what makes `max_agent_calls` an exact ceiling under fan-out. Insert an `await`
+        here (e.g. an async permission check) and the count can race past the limit; you
+        would then need an explicit reservation instead.
+
+        This exists precisely because `usage_limits` cannot give an exact ceiling here:
+        core's own limit check is split from its increment by the model-request `await`
+        (a TOCTOU race -- N gathered sub-agents all pass the check before any increments;
+        measured ~20x overshoot), and `RunContext` exposes `usage` but not `usage_limits`,
+        so the parent's configured limit can't be forwarded to sub-agents at all.
+        TODO: file upstream on pydantic-ai -- (a) expose `usage_limits` on `RunContext`,
+        (b) atomic reserve-then-request in the run loop. Until then, tree-wide token caps
+        stay best-effort (see `forward_usage` / `sub_agent_usage_limits` docstrings).
+        """
+        if self._call_count >= self.max_agent_calls:
+            raise _BudgetExhausted(self.max_agent_calls)
+        self._call_count += 1
+        try:
+            result = await self._by_name[agent_name].agent.run(
+                task,
+                deps=ctx.deps,
+                model=ctx.model if self.inherit_model else None,
+                usage=ctx.usage if self.forward_usage else None,
+                usage_limits=self.sub_agent_usage_limits,
+            )
+            return to_jsonable_python(result.output)
+        except Exception as exc:
+            # Don't leak host internals (file paths, deps/agent reprs) to the model;
+            # surface the failing agent and error type by default.
+            message = f'sub-agent {agent_name!r} raised {type(exc).__name__}'
+            if isinstance(exc, _MODEL_SAFE_EXCEPTION_MESSAGE_TYPES):
+                message = f'{message}: {exc}'
+            raise RuntimeError(message) from exc
+
+    async def _call_sub_agent_tool(
+        self, agent_name: str, tool_args: dict[str, Any], ctx: RunContext[AgentDepsT]
+    ) -> Any:
+        """Run one sub-agent invoked as its own tool (merged mode).
+
+        Errors (budget exhaustion, sub-agent failures) propagate as exceptions: inside
+        CodeMode's sandbox they surface at the `await` site and become a `run_code` retry
+        whose message tells the model what happened.
+        """
+        if _in_workflow.get():
+            return {
+                'error': (
+                    'Sub-agent delegation does not nest: this agent was itself invoked as a sub-agent. '
+                    'Return your result to the caller instead.'
+                )
+            }
+        in_workflow_token = _in_workflow.set(True)
+        try:
+            return await self._run_one(agent_name, tool_args['task'], ctx)
+        finally:
+            _in_workflow.reset(in_workflow_token)
+
+    def _type_check(self, code: str, capture: PrintCapture) -> None:
+        """Statically check the script against the sub-agent signatures before running it.
+
+        Each `run_workflow` call is a fresh sandbox with no accumulated state, so the check is
+        always sound (unlike CodeMode's REPL, which can only check fresh sessions). Catching a
+        positional `task`, a misspelled function, or a wrong-typed argument here costs a retry
+        but no sub-agent budget.
+        """
+        signatures = [_agent_signature(name, entry.agent) for name, entry in self._by_name.items()]
+        conflicting = FunctionSignature.get_conflicting_type_names(signatures)
+        parts = ['import asyncio\nfrom typing import Any, TypedDict, NotRequired, Literal']
+        parts.extend(FunctionSignature.render_type_definitions(signatures, conflicting))
+        parts.extend(
+            signature.render('raise NotImplementedError()', is_async=True, conflicting_type_names=conflicting)
+            for signature in signatures
+        )
+        try:
+            Monty(code, type_check=True, type_check_stubs='\n\n'.join(parts))
+        except MontyTypingError as e:
+            raise ModelRetry(f'Type error in workflow:\n{capture.prepend_to(e.display())}') from e
+        except MontySyntaxError as e:
+            raise ModelRetry(f'Syntax error in workflow:\n{capture.prepend_to(e.display())}') from e
+
     async def call_tool(
         self, name: str, tool_args: dict[str, Any], ctx: RunContext[AgentDepsT], tool: ToolsetTool[AgentDepsT]
     ) -> Any:
+        if name != self.tool_name:
+            return await self._call_sub_agent_tool(name, tool_args, ctx)
+
         if _in_workflow.get():
             return {
                 'error': (
@@ -578,8 +772,10 @@ class DynamicWorkflowToolset(AbstractToolset[AgentDepsT]):
         async def dispatch(agent_name: str, kwargs: dict[str, Any]) -> Any:
             nonlocal budget_exhausted
             # The sandbox signature is `(*, task: str)`, but Monty does not validate kwargs against
-            # it, so check here: a dropped extra kwarg or a non-string `task` would otherwise run the
-            # sub-agent on silently-wrong input. Each raises before the budget is touched.
+            # it at runtime, and the static check can be evaded through `Any` (e.g. `json.loads`
+            # results) -- so check here: a dropped extra kwarg or a non-string `task` would
+            # otherwise run the sub-agent on silently-wrong input. Each raises before the budget
+            # is touched.
             if 'task' not in kwargs:
                 raise TypeError(f'{agent_name}() missing required keyword argument: task')
             extra = sorted(set(kwargs) - {'task'})
@@ -588,46 +784,17 @@ class DynamicWorkflowToolset(AbstractToolset[AgentDepsT]):
             task = kwargs['task']
             if not isinstance(task, str):
                 raise TypeError(f'{agent_name}() task must be a string, got {type(task).__name__}')
-            # Budget check + increment must stay suspension-free: there must be no `await`
-            # between them. asyncio only switches tasks at suspension points, so an await-free
-            # check-then-increment is atomic across the concurrently-gathered dispatches, which
-            # is what makes `max_agent_calls` an exact ceiling under fan-out. Insert an `await`
-            # here (e.g. an async permission check) and the count can race past the limit; you
-            # would then need an explicit reservation instead.
-            #
-            # This exists precisely because `usage_limits` cannot give an exact ceiling here:
-            # core's own limit check is split from its increment by the model-request `await`
-            # (a TOCTOU race -- N gathered sub-agents all pass the check before any increments;
-            # measured ~20x overshoot), and `RunContext` exposes `usage` but not `usage_limits`,
-            # so the parent's configured limit can't be forwarded to sub-agents at all.
-            # TODO: file upstream on pydantic-ai -- (a) expose `usage_limits` on `RunContext`,
-            # (b) atomic reserve-then-request in the run loop. Until then, tree-wide token caps
-            # stay best-effort (see `forward_usage` / `sub_agent_usage_limits` docstrings).
-            if self._call_count >= self.max_agent_calls:
-                budget_exhausted = True
-                raise RuntimeError(f'sub-agent call budget ({self.max_agent_calls}) exhausted')
-            self._call_count += 1
             try:
-                result = await self._by_name[agent_name].agent.run(
-                    task,
-                    deps=ctx.deps,
-                    model=ctx.model if self.inherit_model else None,
-                    usage=ctx.usage if self.forward_usage else None,
-                    usage_limits=self.sub_agent_usage_limits,
-                )
-                output = to_jsonable_python(result.output)
-                completed_dispatches.append(_CompletedDispatch(agent_name=agent_name, task=task, result=output))
-                return output
-            except Exception as exc:
-                # Don't leak host internals (file paths, deps/agent reprs) to the model;
-                # surface the failing agent and error type by default.
-                message = f'sub-agent {agent_name!r} raised {type(exc).__name__}'
-                if isinstance(exc, _MODEL_SAFE_EXCEPTION_MESSAGE_TYPES):
-                    message = f'{message}: {exc}'
-                raise RuntimeError(message) from exc
+                output = await self._run_one(agent_name, task, ctx)
+            except _BudgetExhausted:
+                budget_exhausted = True
+                raise
+            completed_dispatches.append(_CompletedDispatch(agent_name=agent_name, task=task, result=output))
+            return output
 
         limits = _resolve_resource_limits(self.resource_limits)
         capture = PrintCapture()
+        self._type_check(code, capture)
         in_workflow_token = _in_workflow.set(True)
         try:
             repl = MontyRepl(limits=limits)
@@ -637,7 +804,7 @@ class DynamicWorkflowToolset(AbstractToolset[AgentDepsT]):
             # the whole script. Sub-agents always run concurrently (the executor's defaults);
             # durable ordering (global_sequential) lands with durability.
             completed = await MontyExecutor(dispatch=dispatch, valid_names=self._by_name).run(monty_state)
-        except MontySyntaxError as e:
+        except MontySyntaxError as e:  # pragma: no cover -- backstop; `_type_check` rejects syntax errors first
             raise ModelRetry(f'Syntax error in workflow:\n{capture.prepend_to(e.display())}') from e
         except MontyRuntimeError as e:
             if budget_exhausted:

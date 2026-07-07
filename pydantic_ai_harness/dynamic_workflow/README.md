@@ -98,6 +98,12 @@ A few things are worth pointing out here, because they are the core of how you u
 > - **Calls cost tokens and take time.** That is why this capability gives you budgets, which we
 >   get to below.
 
+Because the coordination is ordinary Python, it scales past one-shot fan-out. "Re-dispatch only
+the files that failed review, with the reviewer's issues attached, for up to two more rounds" is a
+`for` loop over `asyncio.gather`, with the retry task text rebuilt from each failed review --
+control flow the model would otherwise have to run turn by turn, one round-trip per step, with
+every intermediate draft flowing through its context.
+
 ## Sub-agents can return structured data
 
 A sub-agent returns whatever its `output_type` produces. By default that is a string. But give a
@@ -408,6 +414,43 @@ DynamicWorkflow(
 [on-demand capabilities](https://pydantic.dev/docs/ai/core-concepts/capabilities/#on-demand-capabilities)
 for the full picture.
 
+## Using with CodeMode
+
+[`CodeMode`](../code_mode/README.md) puts the agent's regular tools behind the same kind of
+sandbox: the model writes one script that calls tools as functions. Put both capabilities on one
+agent and they merge: `run_workflow` disappears, and every sub-agent becomes a typed async
+function inside `run_code`, next to the tools.
+
+```python
+from pydantic_ai import Agent
+from pydantic_ai_harness import CodeMode, DynamicWorkflow
+
+agent = Agent(
+    'anthropic:claude-sonnet-4-6',
+    capabilities=[CodeMode(), DynamicWorkflow(agents=[reviewer, summarizer])],
+)
+```
+
+One script can now gather data with a tool, fan it out to sub-agents, and post-process the
+results, in a single tool call:
+
+```python
+import asyncio
+
+diff = await read_file(path="src/auth.py")
+reviews = await asyncio.gather(
+    reviewer(task="Review for bugs:\n" + diff),
+    reviewer(task="Review for style:\n" + diff),
+)
+await summarizer(task="Merge these reviews:\n" + "\n\n".join(reviews))
+```
+
+In merged mode the sandbox is CodeMode's: state persists between `run_code` calls (REPL-style),
+and CodeMode's `os_access`/`mount`/`resource_limits` govern the sandbox, so `tool_name` and
+`resource_limits` on `DynamicWorkflow` have no effect there. Everything about the sub-agents
+still applies -- isolated runs, `max_agent_calls`, `forward_usage`, `sub_agent_usage_limits`,
+`reveal()`, and the no-nesting rule -- enforced on each sub-agent call, not per script.
+
 ## What runs in the sandbox
 
 The script runs in Monty, a subset of Python. The subset is what makes the sandbox safe, so it is
@@ -419,6 +462,10 @@ worth knowing where the edges are:
 - No wall-clock or timing primitives: no `asyncio.sleep`, no `datetime.now()`, no `time` module.
 - `asyncio.gather(...)` runs sub-agents concurrently, but it does not support
   `return_exceptions=True`.
+
+Before a script runs, it is statically type-checked against the sub-agent signatures. A
+misspelled function, a positional `task`, or a wrong-typed argument costs one retry, but no
+sub-agent budget and no sandbox execution.
 
 > **Warning: errors abort the whole script**
 >
