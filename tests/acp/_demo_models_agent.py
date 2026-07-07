@@ -1,4 +1,4 @@
-"""An ACP agent advertising switchable models, used by the unstable-routing stdio test."""
+"""An ACP agent advertising switchable models, used by the stdio model-config test."""
 
 from __future__ import annotations
 

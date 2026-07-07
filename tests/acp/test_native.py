@@ -200,11 +200,11 @@ async def test_run_command_cancelled_during_a_failing_create_has_nothing_to_clea
     class _CreateFails(RecordingClient):
         async def create_terminal(
             self,
-            command: str,
             session_id: str,
+            command: str,
             args: list[str] | None = None,
-            cwd: str | None = None,
             env: list[schema.EnvVariable] | None = None,
+            cwd: str | None = None,
             output_byte_limit: int | None = None,
             **kwargs: object,
         ) -> schema.CreateTerminalResponse:
@@ -230,11 +230,11 @@ async def test_run_command_create_failure_propagates() -> None:
     class _CreateRaises(RecordingClient):
         async def create_terminal(
             self,
-            command: str,
             session_id: str,
+            command: str,
             args: list[str] | None = None,
-            cwd: str | None = None,
             env: list[schema.EnvVariable] | None = None,
+            cwd: str | None = None,
             output_byte_limit: int | None = None,
             **kwargs: object,
         ) -> schema.CreateTerminalResponse:

@@ -59,6 +59,7 @@ from ._store import SessionStore, StoredSession
 DEFAULT_VERSION = '0.1.0'
 
 _logger = logging.getLogger(__name__)
+_MODEL_CONFIG_ID = 'model'
 
 
 def _all_known_model_names() -> tuple[str, ...]:
@@ -147,9 +148,9 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
     (the client's `cwd` and MCP servers) is surfaced through the optional `session_config` factory.
 
     `session/close` cancels any in-flight turn and discards the session. `session/load` (with a
-    `session_store`) and `session/set_model` (with `models`) are supported when configured; fork,
-    resume, modes, and config options are advertised as unsupported. As with any `output_type`
-    override, this adapter is incompatible with agents that define output validators.
+    `session_store`) and model selection via `session/set_config_option` (with `models`) are
+    supported when configured; fork, resume, and modes are advertised as unsupported. As with any
+    `output_type` override, this adapter is incompatible with agents that define output validators.
     """
 
     def __init__(
@@ -204,12 +205,12 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
                 `session/load`: each committed turn is persisted (model history plus client
                 transcript) and a stored session can be reopened. Defaults to `None`, advertising
                 `session/load` as unsupported.
-            models: Optional models the client may switch between with `session/set_model`. The
-                first is each session's default. A selection applies as a per-run override (the
-                shared agent is never mutated) and is persisted with the session. Pass `'all'` to
-                offer every model Pydantic AI knows (its default is then the first known model, so
-                the user should pick one). Defaults to `None`, advertising no models and rejecting
-                `session/set_model`.
+            models: Optional models the client may switch between with the stable ACP session
+                config option `model`. The first is each session's default. A selection applies as
+                a per-run override (the shared agent is never mutated) and is persisted with the
+                session. Pass `'all'` to offer every model Pydantic AI knows (its default is then
+                the first known model, so the user should pick one). Defaults to `None`,
+                advertising no model config option.
             model_resolver: Optional hook mapping an advertised model id to the `Model` (or model
                 string) used for that run, applied just before each run's per-run override. Lets a
                 host advertise ids Pydantic AI's `infer_model` does not understand (e.g. OAuth/
@@ -303,14 +304,14 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
         self._sessions[session_id] = state
         # Persist the empty session so the client can reopen it even before its first turn.
         await self._persist(state)
-        return schema.NewSessionResponse(session_id=session_id, models=self._model_state(state.model))
+        return schema.NewSessionResponse(session_id=session_id, config_options=self._model_config_options(state.model))
 
     async def load_session(
         self,
         cwd: str,
         session_id: str,
-        additional_directories: list[str] | None = None,
         mcp_servers: McpServers = None,
+        additional_directories: list[str] | None = None,
         **kwargs: object,
     ) -> schema.LoadSessionResponse | None:
         """Reopen a stored session: restore its model history and replay its transcript to the client.
@@ -361,7 +362,7 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
         self._sessions[session_id] = state
         for update in stored.updates:
             await self._conn.session_update(session_id=session_id, update=update)
-        return schema.LoadSessionResponse(models=self._model_state(state.model))
+        return schema.LoadSessionResponse(config_options=self._model_config_options(state.model))
 
     async def _persist(self, state: SessionState[AgentDepsT]) -> None:
         """Save a session's committed state (history, transcript, selected model), if a store is configured.
@@ -381,14 +382,24 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
         except Exception:
             _logger.exception('failed to persist ACP session %s; durable state is now behind', state.session_id)
 
-    def _model_state(self, current_model_id: str | None) -> schema.SessionModelState | None:
-        """The available/current models advertised to the client, or `None` when none are configured."""
-        if current_model_id is None:
+    def _model_option(self, current_model_id: str | None) -> schema.SessionConfigOptionSelect | None:
+        """The model config option advertised to the client, or `None` when none is configured."""
+        if current_model_id is None or not self._models:
             return None
-        return schema.SessionModelState(
-            available_models=[schema.ModelInfo(model_id=model, name=model) for model in self._models],
-            current_model_id=current_model_id,
+        return schema.SessionConfigOptionSelect(
+            id=_MODEL_CONFIG_ID,
+            name='Model',
+            type='select',
+            current_value=current_model_id,
+            options=[schema.SessionConfigSelectOption(value=model, name=model) for model in self._models],
         )
+
+    def _model_config_options(
+        self, current_model_id: str | None
+    ) -> list[schema.SessionConfigOptionSelect | schema.SessionConfigOptionBoolean] | None:
+        """The full session config option list, or `None` when model switching is not configured."""
+        option = self._model_option(current_model_id)
+        return None if option is None else [option]
 
     def session_history(self, session_id: str) -> list[ModelMessage] | None:
         """A snapshot of a resident session's committed model history (what the next turn will send).
@@ -400,16 +411,16 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
         state = self._sessions.get(session_id)
         return list(state.history) if state is not None else None
 
-    def session_model_state(self, session_id: str) -> schema.SessionModelState | None:
-        """The model surface for a resident session -- its advertised set + current selection.
+    def session_model_option(self, session_id: str) -> schema.SessionConfigOptionSelect | None:
+        """The model config option for a resident session -- its option set + current selection.
 
-        The public counterpart to the `models` field `new_session`/`load_session` return, for callers
-        that re-surface model state on a later interaction (e.g. an attach/resume reply) without
-        re-creating or reloading the session. `None` when the session is unknown to this adapter or
-        no switch-set was configured.
+        The public counterpart to the `config_options` entry `new_session`/`load_session` return,
+        for callers that re-surface model selection on a later interaction (e.g. an attach/resume
+        reply) without re-creating or reloading the session. `None` when the session is unknown to
+        this adapter or no switch-set was configured.
         """
         state = self._sessions.get(session_id)
-        return self._model_state(state.model) if state is not None else None
+        return self._model_option(state.model) if state is not None else None
 
     async def _build_config(self, session_id: str, cwd: str, mcp_servers: McpServers) -> AcpSessionConfig[AgentDepsT]:
         """Derive a session's run configuration, calling the `session_config` factory if present.
@@ -442,9 +453,8 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
 
     async def prompt(
         self,
-        prompt: list[PromptContentBlock],
         session_id: str,
-        message_id: str | None = None,
+        prompt: list[PromptContentBlock],
         **kwargs: object,
     ) -> schema.PromptResponse:
         """Run one user turn, streaming the agent's output to the client.
@@ -471,7 +481,7 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
                     {'session_id': session_id, 'reason': 'session was closed while the prompt was queued'}
                 )
             state.cancel_requested = False
-            turn = asyncio.ensure_future(self._run_turn(state, prompt, user_content, message_id))
+            turn = asyncio.ensure_future(self._run_turn(state, prompt, user_content))
             state.active_turn = turn
             try:
                 # Shielded so this coroutine's *own* cancellation (connection teardown) surfaces
@@ -480,7 +490,6 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
                 # cancelled would deadlock its shutdown (the response future is never resolved).
                 return await asyncio.shield(turn)
             except _TurnCancelled:
-                # Rolled back: omit `user_message_id`, which would signal the message was persisted.
                 return schema.PromptResponse(stop_reason='cancelled')
             except asyncio.CancelledError:
                 # `turn.done()` cannot fully prove the cancellation came from the turn: in the one
@@ -551,15 +560,13 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
         state: SessionState[AgentDepsT],
         prompt: list[PromptContentBlock],
         user_content: list[UserContent],
-        message_id: str | None,
     ) -> schema.PromptResponse:
         """Drive the agent (resuming across tool-approval pauses), stream updates, and build the response.
 
         The response carries the ACP stop reason mapped from the final model response, plus the
-        committed signals: `user_message_id` echoing `message_id`, and the turn's total token
-        usage (summed across every run pass, one per approval pause). A turn ended by a usage
-        limit rolls back like a cancellation, so its response omits both while still answering
-        with the limit's `max_tokens`/`max_turn_requests` stop reason.
+        turn's total token usage (summed across every run pass, one per approval pause). A turn
+        ended by a usage limit rolls back like a cancellation, so its response omits usage while
+        still answering with the limit's `max_tokens`/`max_turn_requests` stop reason.
         """
         conn = self._conn
         assert conn is not None
@@ -576,7 +583,7 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
         # Recorded for replay only, never sent live: the client renders its own prompt during
         # the turn, but `session/load` must rebuild the user side of the conversation too.
         # Going through `turn.updates` keeps the cancel semantics: a rolled-back turn does not
-        # persist its user message either (matching the omitted `user_message_id`).
+        # persist its user message either.
         turn.updates.extend(acp.update_user_message(block) for block in prompt)
 
         try:
@@ -589,9 +596,10 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
                     output_type=output_type,
                     deps=config.deps,
                     toolsets=config.toolsets,
-                    # Per-run override for the client's `session/set_model` choice; `None` uses the agent's
-                    # own model, never mutating the shared agent. A `model_resolver` (if given) maps the
-                    # advertised id to a pre-built `Model` for ids `infer_model` can't parse.
+                    # Per-run override for the client's model config choice; `None` uses the
+                    # agent's own model, never mutating the shared agent. A `model_resolver` (if
+                    # given) maps the advertised id to a pre-built `Model` for ids `infer_model`
+                    # can't parse.
                     model=self._resolve_run_model(state.model),
                     usage_limits=self._usage_limits,
                 ) as stream:
@@ -630,7 +638,7 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
             # ACP models a turn ending at a limit as a normal stop reason, not a request error.
             # The raising run's partial messages are not retrievable, so nothing is committed --
             # the turn rolls back to the prior state, like a cancellation, and the response must
-            # not claim the user message was persisted nor report uncommitted usage.
+            # not report uncommitted usage.
             await self._fail_outstanding_tool_calls(turn)
             return schema.PromptResponse(stop_reason=_usage_limit_stop_reason(exc))
         except Exception:
@@ -649,14 +657,14 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
             except asyncio.CancelledError:
                 # The turn is already committed: a cancel landing inside the store's save came
                 # too late to roll anything back. The spec still requires the prompt to answer
-                # `cancelled`, so that stop reason is reported alongside the committed signals
-                # (`user_message_id`, usage). The interrupted save is the same benign failure
-                # `_persist` swallows; the next successful save catches the store up.
+                # `cancelled`, so that stop reason is reported alongside committed usage. The
+                # interrupted save is the same benign failure `_persist` swallows; the next
+                # successful save catches the store up.
                 _logger.warning(
                     'persisting ACP session %s was cancelled; durable state is now behind', state.session_id
                 )
                 stop_reason = 'cancelled'
-        return schema.PromptResponse(stop_reason=stop_reason, user_message_id=message_id, usage=_to_acp_usage(usage))
+        return schema.PromptResponse(stop_reason=stop_reason, usage=_to_acp_usage(usage))
 
     async def _fail_outstanding_tool_calls(self, turn: _TurnState) -> None:
         """Drive every announced-but-unfinished tool call to a terminal `failed` status.
@@ -860,9 +868,8 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
 
     async def list_sessions(
         self,
-        additional_directories: list[str] | None = None,
-        cursor: str | None = None,
         cwd: str | None = None,
+        cursor: str | None = None,
         **kwargs: object,
     ) -> schema.ListSessionsResponse:
         raise acp.RequestError.method_not_found('session/list')
@@ -877,39 +884,31 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
         return self._model_resolver(model_id)
 
     async def set_session_mode(
-        self, mode_id: str, session_id: str, **kwargs: object
+        self, session_id: str, mode_id: str, **kwargs: object
     ) -> schema.SetSessionModeResponse | None:
         raise acp.RequestError.method_not_found('session/set_mode')
-
-    async def set_session_model(
-        self, model_id: str, session_id: str, **kwargs: object
-    ) -> schema.SetSessionModelResponse | None:
-        """Switch the session's model to one of the advertised `models`, persisting the choice.
-
-        Raises:
-            acp.RequestError: if no models were configured (`session/set_model` is then advertised
-                as unsupported), the session is unknown, or `model_id` is not an advertised model.
-        """
-        if not self._models:
-            raise acp.RequestError.method_not_found('session/set_model')
-        state = self._sessions.get(session_id)
-        if state is None:
-            raise acp.RequestError.invalid_params({'session_id': session_id})
-        if model_id not in self._models:
-            raise acp.RequestError.invalid_params({'model_id': model_id, 'reason': 'not an advertised model'})
-        state.model = model_id
-        await self._persist(state)
-        return schema.SetSessionModelResponse()
 
     async def set_config_option(
         self, config_id: str, session_id: str, value: str | bool, **kwargs: object
     ) -> schema.SetSessionConfigOptionResponse | None:
-        raise acp.RequestError.method_not_found('session/set_config_option')
+        """Switch the session's model through ACP's stable session config option surface."""
+        state = self._sessions.get(session_id)
+        if state is None:
+            raise acp.RequestError.invalid_params({'session_id': session_id})
+        if config_id != _MODEL_CONFIG_ID:
+            raise acp.RequestError.invalid_params({'config_id': config_id, 'reason': 'unknown config option'})
+        if not isinstance(value, str) or value not in self._models:
+            raise acp.RequestError.invalid_params({'model_id': value, 'reason': 'not an advertised model'})
+        state.model = value
+        await self._persist(state)
+        options = self._model_config_options(state.model)
+        assert options is not None
+        return schema.SetSessionConfigOptionResponse(config_options=options)
 
     async def fork_session(
         self,
-        cwd: str,
         session_id: str,
+        cwd: str,
         additional_directories: list[str] | None = None,
         mcp_servers: McpServers = None,
         **kwargs: object,
@@ -918,8 +917,8 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
 
     async def resume_session(
         self,
-        cwd: str,
         session_id: str,
+        cwd: str,
         additional_directories: list[str] | None = None,
         mcp_servers: McpServers = None,
         **kwargs: object,

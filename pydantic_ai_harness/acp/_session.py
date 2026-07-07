@@ -13,7 +13,7 @@ from pydantic_ai.tools import AgentDepsT
 from pydantic_ai.toolsets import AbstractToolset
 
 # A single MCP server configuration, in any of the transports ACP carries.
-McpServer: TypeAlias = schema.HttpMcpServer | schema.SseMcpServer | schema.McpServerStdio
+McpServer: TypeAlias = schema.HttpMcpServer | schema.SseMcpServer | schema.AcpMcpServer | schema.McpServerStdio
 
 # MCP server configuration list, as carried by ACP session methods (matches `acp.Agent`).
 McpServers: TypeAlias = list[McpServer] | None
@@ -98,8 +98,8 @@ class SessionState(Generic[AgentDepsT]):
     cwd: str
     history: list[ModelMessage] = field(default_factory=list[ModelMessage])
     transcript: list[SessionUpdate] = field(default_factory=list[SessionUpdate])
-    # The model the client selected for this session via `session/set_model`, or `None` to use the
-    # agent's own model. Applied as a per-run override so the shared agent is never mutated.
+    # The model the client selected for this session via the `model` config option, or `None` to
+    # use the agent's own model. Applied as a per-run override so the shared agent is never mutated.
     model: str | None = None
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     active_turn: asyncio.Task[schema.PromptResponse] | None = None

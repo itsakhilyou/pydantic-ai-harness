@@ -178,13 +178,13 @@ Session persistence is for *reopening a conversation*; it is orthogonal to per-r
 
 ## Model selection
 
-Pass `models` to let the client switch the session's model with `session/set_model` (using Pydantic AI [model names](https://ai.pydantic.dev/models/)). The first is each session's default. A selection is applied as a per-run override -- the shared agent is never mutated -- and is persisted with the session when a `session_store` is set.
+Pass `models` to advertise a stable ACP session config option named `model` (using Pydantic AI [model names](https://ai.pydantic.dev/models/)). The first is each session's default. A selection is applied as a per-run override -- the shared agent is never mutated -- and is persisted with the session when a `session_store` is set.
 
 ```python
 run_acp_stdio_sync(agent, models=['anthropic:claude-sonnet-4-6', 'anthropic:claude-opus-4-8', 'openai:gpt-4o'])
 ```
 
-A model id is any string a Pydantic AI model accepts, so newer models not yet in `KnownModelName` work too. Pass `models='all'` to offer every model Pydantic AI knows (its default is then the first known model, so curate the list when you want a specific default). Without `models`, none are advertised and `session/set_model` is rejected.
+A model id is any string a Pydantic AI model accepts, so newer models not yet in `KnownModelName` work too. Pass `models='all'` to offer every model Pydantic AI knows (its default is then the first known model, so curate the list when you want a specific default). Without `models`, no model config option is advertised.
 
 ## Token usage
 
@@ -215,7 +215,7 @@ run_acp_stdio(            # async; serve until the client disconnects
     mcp_capabilities=None,    # MCP transports to advertise; needs a session_config to connect them
     tool_presenter=None,      # defaults to the FileSystem/Shell presenter
     session_store=None,       # enables session/load by persisting each session
-    models=None,              # models offered to session/set_model ('all' for every known model)
+    models=None,              # models offered as the `model` config option ('all' for every known model)
 )
 
 run_acp_stdio_sync(...)   # synchronous wrapper, same arguments

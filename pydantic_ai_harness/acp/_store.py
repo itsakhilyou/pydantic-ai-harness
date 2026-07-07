@@ -28,7 +28,7 @@ class StoredSession:
 
     messages: list[ModelMessage] = field(default_factory=list[ModelMessage])
     updates: list[SessionUpdate] = field(default_factory=list[SessionUpdate])
-    # The model selected via `session/set_model`, restored so a reopened session keeps it.
+    # The model selected via the `model` config option, restored so a reopened session keeps it.
     model: str | None = None
 
 

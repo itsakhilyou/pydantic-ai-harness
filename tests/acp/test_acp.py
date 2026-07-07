@@ -93,9 +93,9 @@ class FakeClient(Client):
 
     async def request_permission(
         self,
-        options: list[schema.PermissionOption],
         session_id: str,
         tool_call: schema.ToolCallUpdate,
+        options: list[schema.PermissionOption],
         **kwargs: object,
     ) -> schema.RequestPermissionResponse:
         self.permission_requests.append(tool_call)
@@ -109,22 +109,22 @@ class FakeClient(Client):
 
     # The adapter never calls these client capabilities; present only to satisfy the interface.
     async def read_text_file(
-        self, path: str, session_id: str, limit: int | None = None, line: int | None = None, **kwargs: object
+        self, session_id: str, path: str, line: int | None = None, limit: int | None = None, **kwargs: object
     ) -> schema.ReadTextFileResponse:
         raise NotImplementedError  # pragma: no cover - unused client capability
 
     async def write_text_file(
-        self, content: str, path: str, session_id: str, **kwargs: object
+        self, session_id: str, path: str, content: str, **kwargs: object
     ) -> schema.WriteTextFileResponse | None:
         raise NotImplementedError  # pragma: no cover - unused client capability
 
     async def create_terminal(
         self,
-        command: str,
         session_id: str,
+        command: str,
         args: list[str] | None = None,
-        cwd: str | None = None,
         env: list[schema.EnvVariable] | None = None,
+        cwd: str | None = None,
         output_byte_limit: int | None = None,
         **kwargs: object,
     ) -> schema.CreateTerminalResponse:
@@ -148,6 +148,14 @@ class FakeClient(Client):
     async def release_terminal(
         self, session_id: str, terminal_id: str, **kwargs: object
     ) -> schema.ReleaseTerminalResponse | None:
+        raise NotImplementedError  # pragma: no cover - unused client capability
+
+    async def create_elicitation(
+        self, message: str, mode: schema.ElicitationMode, **kwargs: object
+    ) -> schema.CreateElicitationResponse:
+        raise NotImplementedError  # pragma: no cover - unused client capability
+
+    async def complete_elicitation(self, elicitation_id: str, **kwargs: object) -> None:
         raise NotImplementedError  # pragma: no cover - unused client capability
 
     async def ext_method(self, method: str, params: dict[str, object]) -> dict[str, object]:
@@ -337,17 +345,6 @@ class TestLifecycle:
         first = await adapter.new_session(cwd='.')
         second = await adapter.new_session(cwd='.')
         assert first.session_id != second.session_id
-
-    async def test_completed_turn_echoes_user_message_id(self) -> None:
-        adapter: PydanticAIACPAgent[None, str] = PydanticAIACPAgent(Agent(TestModel()))
-        client = FakeClient()
-        session_id = await _start(adapter, client)
-
-        response = await adapter.prompt(prompt=[acp.text_block('hi')], session_id=session_id, message_id='msg-9')
-
-        # A committed turn confirms the user message was recorded by echoing its id.
-        assert response.stop_reason == 'end_turn'
-        assert response.user_message_id == 'msg-9'
 
 
 @dataclass
@@ -700,8 +697,8 @@ class TestStopReason:
 
         assert response.stop_reason == 'max_turn_requests'
         # The raising run's messages are not retrievable, so the turn rolls back like a
-        # cancellation: no persisted-message claim and no committed history.
-        assert response.user_message_id is None
+        # cancellation: no committed history or usage.
+        assert response.usage is None
         assert adapter._sessions[session_id].history == []  # pyright: ignore[reportPrivateUsage]
 
     async def test_configured_usage_limits_end_the_turn_with_max_turn_requests(self) -> None:
@@ -725,7 +722,7 @@ class TestStopReason:
         response = await adapter.prompt(prompt=[acp.text_block('go')], session_id=session_id, message_id='m1')
 
         assert response.stop_reason == 'max_turn_requests'
-        assert response.user_message_id is None
+        assert response.usage is None
         assert request_count == 2
         assert adapter._sessions[session_id].history == []  # pyright: ignore[reportPrivateUsage]
 
@@ -755,7 +752,7 @@ class TestStopReason:
         response = await adapter.prompt(prompt=[acp.text_block('go')], session_id=session_id, message_id='m1')
 
         assert response.stop_reason == 'end_turn'
-        assert response.user_message_id == 'm1'
+        assert response.usage is not None
         assert request_count == 2
         assert len(adapter._sessions[session_id].history) >= 2  # pyright: ignore[reportPrivateUsage]
 
@@ -1140,9 +1137,9 @@ class TestPermission:
         class _BlockedPermissionClient(FakeClient):
             async def request_permission(
                 self,
-                options: list[schema.PermissionOption],
                 session_id: str,
                 tool_call: schema.ToolCallUpdate,
+                options: list[schema.PermissionOption],
                 **kwargs: object,
             ) -> schema.RequestPermissionResponse:
                 requested.set()
@@ -1174,7 +1171,6 @@ class TestPermission:
         response = await adapter.prompt(prompt=[acp.text_block('delete')], session_id=session_id, message_id='msg-1')
 
         assert response.stop_reason == 'cancelled'
-        assert response.user_message_id is None  # rolled back, so not acknowledged as recorded
         assert executed == []
         # The tool the dismissed dialog was for is closed out as failed, not left pending forever.
         assert 'failed' in [status for _id, status, _out in client.tool_completions()]
@@ -1227,8 +1223,6 @@ class TestCancellation:
         response = await asyncio.wait_for(turn, timeout=5)
 
         assert response.stop_reason == 'cancelled'
-        # The turn is rolled back, so the response must not claim the user message was recorded.
-        assert response.user_message_id is None
 
     async def test_cancel_closes_out_in_flight_tool_calls(self) -> None:
         started = asyncio.Event()
@@ -1736,8 +1730,6 @@ class TestUnsupportedMethods:
             adapter.fork_session(cwd='.', session_id='s'),
             adapter.resume_session(cwd='.', session_id='s'),
             adapter.set_session_mode(mode_id='m', session_id='s'),
-            adapter.set_session_model(model_id='m', session_id='s'),
-            adapter.set_config_option(config_id='c', session_id='s', value=True),
             adapter.ext_method(method='x', params={}),
         ]
         for call in calls:
@@ -1758,8 +1750,8 @@ class TestEntryPoints:
         monkeypatch.setattr(acp, 'run_agent', fake_run_agent)
         await run_acp_stdio(Agent(TestModel()))
         assert isinstance(served[0], PydanticAIACPAgent)
-        # Unstable routing must be on, or the advertised `session/set_model` and `session/close`
-        # methods are rejected by the SDK router before reaching the adapter.
+        # Unstable routing must be on, or `session/close` is rejected by the SDK router before
+        # reaching the adapter.
         assert unstable == [True]
 
     async def test_run_acp_stdio_forwards_session_config(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1859,19 +1851,21 @@ class TestEntryPoints:
 
         assert client.text() == 'x' * 200_000
 
-    async def test_unstable_methods_route_over_stdio(self) -> None:
-        """`session/set_model` and `session/close` are UNSTABLE in the SDK and rejected by its router
-        unless the server enables unstable routing -- verify both reach the handler over a real wire."""
+    async def test_model_config_and_unstable_close_route_over_stdio(self) -> None:
+        """Model config updates and unstable `session/close` reach the handler over a real wire."""
         client = FakeClient()
         script = Path(__file__).parent / '_demo_models_agent.py'
         async with acp.spawn_agent_process(client, sys.executable, str(script)) as (conn, _proc):
             await conn.initialize(protocol_version=acp.PROTOCOL_VERSION)
             session = await conn.new_session(cwd='.', mcp_servers=[])
-            # Each call would raise `method_not_found` if unstable routing were off (the bug guard).
-            model_result = await conn.set_session_model(model_id='openai:gpt-4o', session_id=session.session_id)
+            model_result = await conn.set_config_option(
+                config_id='model', value='openai:gpt-4o', session_id=session.session_id
+            )
             await conn.close_session(session_id=session.session_id)
 
-        assert model_result is not None
+        [option] = model_result.config_options
+        assert isinstance(option, schema.SessionConfigOptionSelect)
+        assert option.current_value == 'openai:gpt-4o'
 
     async def test_native_toolsets_route_over_stdio(self) -> None:
         """Client-backed fs/terminal tools reach the real client over stdio when mounted per session."""

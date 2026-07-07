@@ -51,9 +51,8 @@ logfire = [
     "pydantic-ai-slim[spec]>=2.1.0",
 ]
 acp = [
-    # 0.11 renamed wire models the adapter maps 1:1 (e.g. SessionModelState) and reworked
-    # unstable-method routing; tracking it is its own change, so cap until the adapter follows.
-    "agent-client-protocol>=0.10.1,<0.11",
+    # The SDK breaks across minors, so cap per minor.
+    "agent-client-protocol>=0.11,<0.12",
 ]
 
 [project.urls]

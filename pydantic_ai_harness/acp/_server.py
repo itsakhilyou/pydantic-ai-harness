@@ -57,7 +57,7 @@ async def run_acp_stdio(
             See [`PydanticAIACPAgent`][pydantic_ai_harness.acp.PydanticAIACPAgent].
         session_store: Enables `session/load` by persisting each session. See
             [`PydanticAIACPAgent`][pydantic_ai_harness.acp.PydanticAIACPAgent].
-        models: Models the client may switch between with `session/set_model`. See
+        models: Models the client may switch between with the `model` session config option. See
             [`PydanticAIACPAgent`][pydantic_ai_harness.acp.PydanticAIACPAgent].
     """
     adapter = PydanticAIACPAgent(
@@ -73,10 +73,8 @@ async def run_acp_stdio(
         session_store=session_store,
         models=models,
     )
-    # `session/set_model` and `session/close` are still UNSTABLE in the ACP SDK, and the SDK's
-    # router rejects unstable methods with `method_not_found` unless this flag is set -- so without
-    # it, the model picker and session-close affordances we advertise at `initialize` are dead over
-    # the wire even though their handlers exist. Keep enabled until those methods stabilize.
+    # `session/close` is still UNSTABLE in the ACP SDK, and the SDK's router rejects unstable
+    # methods with `method_not_found` unless this flag is set. Keep enabled until close stabilizes.
     await acp.run_agent(adapter, use_unstable_protocol=True)
 
 

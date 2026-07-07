@@ -87,10 +87,9 @@ class TestCapabilityAdvertisement:
             caps = (await conn.initialize(protocol_version=1)).agent_capabilities
         assert caps is not None and caps.load_session is True
 
-    async def test_session_setup_advertises_no_modes_or_config_options(self) -> None:
+    async def test_session_setup_without_models_advertises_no_modes_or_config_options(self) -> None:
         # session-modes.md / session-config-options.md: both are advertised per-session. The adapter
-        # supports neither, so new_session must offer neither -- the advertisement coupling for the
-        # `session/set_mode` and `session/set_config_option` rejections.
+        # supports no modes and only advertises config options when a model switch-set is configured.
         async with wire_agent(_agent()) as (conn, _client):
             await conn.initialize(protocol_version=1)
             session = await conn.new_session(cwd='/ws', mcp_servers=[])
@@ -98,19 +97,31 @@ class TestCapabilityAdvertisement:
         assert session.config_options is None
 
 
+class TestModelConfigRouting:
+    """session-config-options.md: model switching is a stable config-option update."""
+
+    async def test_set_config_option_routes_without_unstable_protocol(self) -> None:
+        adapter: PydanticAIACPAgent[None, str] = PydanticAIACPAgent(Agent(TestModel()), models=['test'])
+        async with wire_agent(adapter, unstable=False) as (conn, _client):
+            await conn.initialize(protocol_version=1)
+            session = await conn.new_session(cwd='/ws', mcp_servers=[])
+            response = await conn.set_config_option(config_id='model', value='test', session_id=session.session_id)
+        [option] = response.config_options
+        assert isinstance(option, schema.SessionConfigOptionSelect)
+        assert option.current_value == 'test'
+
+
 class TestUnstableMethodRouting:
     """transports/schema: an UNSTABLE method is reachable only with `use_unstable_protocol`."""
 
-    async def test_unstable_methods_reach_the_adapter_when_enabled(self) -> None:
-        # set_model and close are UNSTABLE in the SDK router; with the flag on they must route
-        # through to the adapter. (Direct-call tests bypass the router and cannot see this.)
-        adapter: PydanticAIACPAgent[None, str] = PydanticAIACPAgent(Agent(TestModel()), models=['test'])
+    async def test_unstable_close_reaches_the_adapter_when_enabled(self) -> None:
+        # session/close is UNSTABLE in the SDK router; with the flag on it must route through to
+        # the adapter. (Direct-call tests bypass the router and cannot see this.)
+        adapter: PydanticAIACPAgent[None, str] = PydanticAIACPAgent(Agent(TestModel()))
         async with wire_agent(adapter, unstable=True) as (conn, _client):
             await conn.initialize(protocol_version=1)
             session = await conn.new_session(cwd='/ws', mcp_servers=[])
-            set_model = await conn.set_session_model(model_id='test', session_id=session.session_id)
             closed = await conn.close_session(session_id=session.session_id)
-        assert set_model == schema.SetSessionModelResponse()
         assert closed == schema.CloseSessionResponse()
 
     # The SDK router emits a UserWarning before rejecting an unstable method; this suite promotes
@@ -118,16 +129,15 @@ class TestUnstableMethodRouting:
     # agent task). Letting it stay a warning lets the real production error code -- method_not_found
     # -- reach the client, which is the contract this test pins.
     @pytest.mark.filterwarnings('ignore::UserWarning')
-    async def test_unstable_method_is_gated_off_without_the_flag(self) -> None:
+    async def test_unstable_close_is_gated_off_without_the_flag(self) -> None:
         # The load-bearing reason `run_acp_stdio` passes use_unstable_protocol=True: without it the
-        # SDK router rejects set_model with method_not_found BEFORE the adapter -- the method we
-        # advertise would be dead over the wire. This negative test pins that necessity.
-        adapter: PydanticAIACPAgent[None, str] = PydanticAIACPAgent(Agent(TestModel()), models=['test'])
+        # SDK router rejects close with method_not_found before the adapter.
+        adapter: PydanticAIACPAgent[None, str] = PydanticAIACPAgent(Agent(TestModel()))
         async with wire_agent(adapter, unstable=False) as (conn, _client):
             await conn.initialize(protocol_version=1)
             session = await conn.new_session(cwd='/ws', mcp_servers=[])
             with pytest.raises(RequestError) as exc:
-                await conn.set_session_model(model_id='test', session_id=session.session_id)
+                await conn.close_session(session_id=session.session_id)
         assert exc.value.code == _method_not_found_code()
 
 
@@ -139,8 +149,7 @@ class TestErrorCodes:
             await conn.initialize(protocol_version=1)
             session = await conn.new_session(cwd='/ws', mcp_servers=[])
             with pytest.raises(RequestError) as exc:
-                # No models configured -> set_model is an unsupported method, not bad input.
-                await conn.set_session_model(model_id='whatever', session_id=session.session_id)
+                await conn.set_session_mode(mode_id='whatever', session_id=session.session_id)
         assert exc.value.code == _method_not_found_code()
 
     async def test_unknown_model_uses_invalid_params(self) -> None:
@@ -149,8 +158,17 @@ class TestErrorCodes:
             await conn.initialize(protocol_version=1)
             session = await conn.new_session(cwd='/ws', mcp_servers=[])
             with pytest.raises(RequestError) as exc:
-                # set_model IS supported here, so a bad model id is malformed input, not unsupported.
-                await conn.set_session_model(model_id='not-a-model', session_id=session.session_id)
+                # The model config option exists here, so a bad model id is malformed input.
+                await conn.set_config_option(config_id='model', value='not-a-model', session_id=session.session_id)
+        assert exc.value.code == _invalid_params_code()
+
+    async def test_unknown_config_option_uses_invalid_params(self) -> None:
+        adapter: PydanticAIACPAgent[None, str] = PydanticAIACPAgent(Agent(TestModel()), models=['test'])
+        async with wire_agent(adapter) as (conn, _client):
+            await conn.initialize(protocol_version=1)
+            session = await conn.new_session(cwd='/ws', mcp_servers=[])
+            with pytest.raises(RequestError) as exc:
+                await conn.set_config_option(config_id='theme', value='dark', session_id=session.session_id)
         assert exc.value.code == _invalid_params_code()
 
 

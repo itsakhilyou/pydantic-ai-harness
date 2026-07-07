@@ -53,30 +53,30 @@ class WireClient(acp.Client):
 
     async def request_permission(
         self,
-        options: list[schema.PermissionOption],
         session_id: str,
         tool_call: schema.ToolCallUpdate,
+        options: list[schema.PermissionOption],
         **kwargs: object,
     ) -> schema.RequestPermissionResponse:
         raise NotImplementedError  # pragma: no cover - unused client capability
 
     async def read_text_file(
-        self, path: str, session_id: str, limit: int | None = None, line: int | None = None, **kwargs: object
+        self, session_id: str, path: str, line: int | None = None, limit: int | None = None, **kwargs: object
     ) -> schema.ReadTextFileResponse:
         raise NotImplementedError  # pragma: no cover - unused client capability
 
     async def write_text_file(
-        self, content: str, path: str, session_id: str, **kwargs: object
+        self, session_id: str, path: str, content: str, **kwargs: object
     ) -> schema.WriteTextFileResponse | None:
         raise NotImplementedError  # pragma: no cover - unused client capability
 
     async def create_terminal(
         self,
-        command: str,
         session_id: str,
+        command: str,
         args: list[str] | None = None,
-        cwd: str | None = None,
         env: list[schema.EnvVariable] | None = None,
+        cwd: str | None = None,
         output_byte_limit: int | None = None,
         **kwargs: object,
     ) -> schema.CreateTerminalResponse:
@@ -100,6 +100,14 @@ class WireClient(acp.Client):
     async def release_terminal(
         self, session_id: str, terminal_id: str, **kwargs: object
     ) -> schema.ReleaseTerminalResponse | None:
+        raise NotImplementedError  # pragma: no cover - unused client capability
+
+    async def create_elicitation(
+        self, message: str, mode: schema.ElicitationMode, **kwargs: object
+    ) -> schema.CreateElicitationResponse:
+        raise NotImplementedError  # pragma: no cover - unused client capability
+
+    async def complete_elicitation(self, elicitation_id: str, **kwargs: object) -> None:
         raise NotImplementedError  # pragma: no cover - unused client capability
 
     async def ext_method(self, method: str, params: dict[str, object]) -> dict[str, object]:

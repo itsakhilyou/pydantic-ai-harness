@@ -1,4 +1,4 @@
-"""Tests for ACP model selection (`session/set_model`)."""
+"""Tests for ACP model selection through session config options."""
 
 from __future__ import annotations
 
@@ -43,6 +43,25 @@ def _text_from(client: RecordingClient) -> str:
     )
 
 
+def _model_option(
+    response: schema.NewSessionResponse | schema.LoadSessionResponse | schema.SetSessionConfigOptionResponse,
+) -> schema.SessionConfigOptionSelect | None:
+    options = response.config_options
+    if options is None:
+        return None
+    [option] = options
+    assert isinstance(option, schema.SessionConfigOptionSelect)
+    return option
+
+
+def _select_options(option: schema.SessionConfigOptionSelect) -> list[schema.SessionConfigSelectOption]:
+    options: list[schema.SessionConfigSelectOption] = []
+    for item in option.options:
+        assert isinstance(item, schema.SessionConfigSelectOption)
+        options.append(item)
+    return options
+
+
 async def _started(adapter: PydanticAIACPAgent[None, str]) -> str:
     adapter.on_connect(RecordingClient())
     await adapter.initialize(protocol_version=1)
@@ -54,11 +73,12 @@ async def test_models_all_advertises_every_known_model() -> None:
     adapter.on_connect(RecordingClient())
     await adapter.initialize(protocol_version=1)
     response = await adapter.new_session(cwd='/ws')
-    assert response.models is not None
-    ids = [m.model_id for m in response.models.available_models]
+    option = _model_option(response)
+    assert option is not None
+    ids = [model.value for model in _select_options(option)]
     assert len(ids) > 100  # the whole known set, not a curated handful
     assert 'openai:gpt-4o' in ids
-    assert response.models.current_model_id == ids[0]  # first known model is the default
+    assert option.current_value == ids[0]  # first known model is the default
 
 
 async def test_new_session_advertises_configured_models() -> None:
@@ -66,21 +86,27 @@ async def test_new_session_advertises_configured_models() -> None:
     adapter.on_connect(RecordingClient())
     await adapter.initialize(protocol_version=1)
     response = await adapter.new_session(cwd='/ws')
-    assert response.models is not None
-    assert [m.model_id for m in response.models.available_models] == ['openai:gpt-4o', 'test']
-    assert response.models.current_model_id == 'openai:gpt-4o'  # the first configured model is the default
+    option = _model_option(response)
+    assert option is not None
+    assert option.id == 'model'
+    assert option.name == 'Model'
+    assert [model.value for model in _select_options(option)] == ['openai:gpt-4o', 'test']
+    assert option.current_value == 'openai:gpt-4o'  # the first configured model is the default
 
 
 async def test_new_session_without_models_advertises_none() -> None:
     adapter = _adapter()
-    assert (await adapter.new_session(cwd='/ws')).models is None
+    assert (await adapter.new_session(cwd='/ws')).config_options is None
 
 
-async def test_set_model_updates_the_session_and_persists() -> None:
+async def test_set_model_config_updates_the_session_and_persists() -> None:
     store = InMemorySessionStore()
     adapter = _adapter(models=['openai:gpt-4o', 'test'], store=store)
     session_id = await _started(adapter)
-    assert await adapter.set_session_model(model_id='test', session_id=session_id) == schema.SetSessionModelResponse()
+    response = await adapter.set_config_option(config_id='model', value='test', session_id=session_id)
+    assert response is not None
+    option = _model_option(response)
+    assert option is not None and option.current_value == 'test'
     assert adapter._sessions[session_id].model == 'test'  # pyright: ignore[reportPrivateUsage]
     stored = await store.load(session_id)
     assert stored is not None and stored.model == 'test'
@@ -119,7 +145,7 @@ async def test_model_resolver_applies_selected_model_to_a_run() -> None:
     adapter.on_connect(client)
     await adapter.initialize(protocol_version=1)
     session_id = (await adapter.new_session(cwd='/ws')).session_id
-    await adapter.set_session_model(model_id='host:gpt-custom', session_id=session_id)
+    await adapter.set_config_option(config_id='model', value='host:gpt-custom', session_id=session_id)
 
     response = await adapter.prompt(prompt=[acp.text_block('hi')], session_id=session_id)
 
@@ -132,48 +158,57 @@ async def test_selected_model_survives_reload() -> None:
     store = InMemorySessionStore()
     adapter = _adapter(models=['openai:gpt-4o', 'test'], store=store)
     session_id = await _started(adapter)
-    await adapter.set_session_model(model_id='test', session_id=session_id)
+    await adapter.set_config_option(config_id='model', value='test', session_id=session_id)
     response = await adapter.load_session(cwd='/ws', session_id=session_id)
     assert adapter._sessions[session_id].model == 'test'  # pyright: ignore[reportPrivateUsage]
-    assert response is not None and response.models is not None and response.models.current_model_id == 'test'
+    assert response is not None
+    option = _model_option(response)
+    assert option is not None and option.current_value == 'test'
 
 
-async def test_session_model_state_returns_available_and_current_models() -> None:
+async def test_session_model_option_returns_available_and_current_models() -> None:
     adapter = _adapter(models=['openai:gpt-4o', 'test'])
     session_id = await _started(adapter)
-    await adapter.set_session_model(model_id='test', session_id=session_id)
+    await adapter.set_config_option(config_id='model', value='test', session_id=session_id)
 
-    state = adapter.session_model_state(session_id)
+    state = adapter.session_model_option(session_id)
 
     assert state is not None
-    assert [model.model_id for model in state.available_models] == ['openai:gpt-4o', 'test']
-    assert state.current_model_id == 'test'
-    assert adapter.session_model_state('no-such-session') is None
+    assert [model.value for model in _select_options(state)] == ['openai:gpt-4o', 'test']
+    assert state.current_value == 'test'
+    assert adapter.session_model_option('no-such-session') is None
 
 
-async def test_session_model_state_without_models_returns_none() -> None:
+async def test_session_model_option_without_models_returns_none() -> None:
     adapter = _adapter()
     session_id = await _started(adapter)
 
-    assert adapter.session_model_state(session_id) is None
+    assert adapter.session_model_option(session_id) is None
 
 
 async def test_set_unknown_model_is_rejected() -> None:
     adapter = _adapter(models=['test'])
     session_id = await _started(adapter)
     with pytest.raises(acp.RequestError):
-        await adapter.set_session_model(model_id='not-a-model', session_id=session_id)
+        await adapter.set_config_option(config_id='model', value='not-a-model', session_id=session_id)
 
 
-async def test_set_model_for_unknown_session_is_rejected() -> None:
+async def test_set_model_config_for_unknown_session_is_rejected() -> None:
     adapter = _adapter(models=['test'])
     await _started(adapter)
     with pytest.raises(acp.RequestError):
-        await adapter.set_session_model(model_id='test', session_id='no-such-session')
+        await adapter.set_config_option(config_id='model', value='test', session_id='no-such-session')
 
 
-async def test_set_model_without_configured_models_is_method_not_found() -> None:
+async def test_unknown_config_option_is_rejected() -> None:
+    adapter = _adapter(models=['test'])
+    session_id = await _started(adapter)
+    with pytest.raises(acp.RequestError):
+        await adapter.set_config_option(config_id='theme', value='test', session_id=session_id)
+
+
+async def test_set_model_config_without_configured_models_is_rejected() -> None:
     adapter = _adapter()
     session_id = await _started(adapter)
     with pytest.raises(acp.RequestError):
-        await adapter.set_session_model(model_id='test', session_id=session_id)
+        await adapter.set_config_option(config_id='model', value='test', session_id=session_id)

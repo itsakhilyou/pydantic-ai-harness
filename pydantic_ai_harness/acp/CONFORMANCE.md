@@ -13,7 +13,7 @@ each behavior against the spec.
 - `session/new`, `session/prompt`, `session/cancel`, and streamed `session/update`.
 - `session/load` with a `session_store` -- replays the full conversation, user turns included.
 - `session/close`.
-- `session/set_model` when `models` are configured.
+- `session/set_config_option` for the stable `model` config option when `models` are configured.
 - Tool calls with rich presentation (kind, file locations, diffs) and the
   `pending → in_progress → completed/failed` status lifecycle.
 - Human-in-the-loop approval via `session/request_permission`.
@@ -28,8 +28,8 @@ each behavior against the spec.
 
 ## Not supported
 
-- `session/fork`, `session/resume`, `session/list`, `session/set_mode`, and
-  `session/set_config_option` -- advertised off and rejected with `method_not_found`.
+- `session/fork`, `session/resume`, `session/list`, and `session/set_mode` -- advertised off and
+  rejected with `method_not_found`.
 - Agent plans -- Pydantic AI surfaces no structured plan event to report.
 - `additionalDirectories` (extra workspace roots beyond `cwd`) -- not advertised or consumed; would
   require multi-root filesystem support first.
@@ -47,5 +47,5 @@ each behavior against the spec.
   rolls back like a cancellation (the raising run's messages are not retrievable), so nothing is
   committed or persisted for it.
 - A cancel that lands after the turn has already committed (during the store save) still answers
-  `cancelled`, but with `user_message_id` and usage set: the turn's history and transcript are
-  kept, and only the durable copy may lag until the next save.
+  `cancelled`, but with usage set: the turn's history and transcript are kept, and only the durable
+  copy may lag until the next save.

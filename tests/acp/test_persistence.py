@@ -234,13 +234,12 @@ async def test_cancel_landing_in_the_post_commit_save_commits_but_answers_cancel
     await asyncio.wait_for(store.saving.wait(), timeout=5)
     # The turn is fully committed in memory and is suspended inside the store's save: a cancel
     # arriving now came too late to roll anything back. The spec still requires the prompt to
-    # answer `cancelled`, but the committed signals must survive -- `user_message_id` says the
-    # message was recorded, and the session history keeps the turn.
+    # answer `cancelled`, but the committed signals must survive: usage is reported, and the
+    # session history keeps the turn.
     await adapter.cancel(session_id=session.session_id)
     response = await asyncio.wait_for(turn, timeout=5)
 
     assert response.stop_reason == 'cancelled'
-    assert response.user_message_id == 'm1'
     assert response.usage is not None
     assert len(adapter._sessions[session.session_id].history) >= 2  # pyright: ignore[reportPrivateUsage]
 
@@ -271,7 +270,7 @@ async def test_save_failure_is_logged_and_does_not_fail_the_turn(caplog: pytest.
     assert 'failed to persist' in caplog.text
 
 
-async def test_set_model_save_failure_is_logged_and_does_not_fail_the_request(
+async def test_set_model_config_save_failure_is_logged_and_does_not_fail_the_request(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     adapter: PydanticAIACPAgent[None, str] = PydanticAIACPAgent(
@@ -281,7 +280,7 @@ async def test_set_model_save_failure_is_logged_and_does_not_fail_the_request(
     await adapter.initialize(protocol_version=1)
     session = await adapter.new_session(cwd='/ws')
     with caplog.at_level(logging.ERROR):
-        response = await adapter.set_session_model(model_id='test', session_id=session.session_id)
+        response = await adapter.set_config_option(config_id='model', value='test', session_id=session.session_id)
     # The selection took effect in memory; only the durable copy is behind, which is logged.
     assert response is not None
     assert adapter._sessions[session.session_id].model == 'test'  # pyright: ignore[reportPrivateUsage]
