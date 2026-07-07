@@ -118,12 +118,24 @@ pydantic_ai_harness/
     __init__.py        # public exports for the capability
     _capability.py     # capability class (AbstractCapability subclass)
     _toolset.py        # toolset implementation
-    README.md          # standalone docs for the capability
+    README.md          # GitHub/PyPI docs for the capability
+docs/                  # source for the unified docs site (pydantic.dev/docs/harness)
+  index.md             # harness overview / landing page
+  capabilities/
+    <capability>.md    # released capability doc (mirrors the README)
+  experimental/
+    <capability>.md    # experimental capability doc
 tests/
   conftest.py          # shared fixtures (TestModel, test_agent)
   <capability>/        # tests mirror source packages
     test_<capability>.py
 ```
+
+Each released capability has **two** hand-maintained docs that must stay in
+sync: the `README.md` next to the code (GitHub/PyPI) and the `docs/` page (the
+docs site). A user-facing change updates both. See
+`agent_docs/review-checklist.md` "Docs" for the parity gate and the
+`docs-parity-reviewer` subagent that enforces it before merge.
 
 Do not add placeholder template files for new capabilities. Start from the
 existing `CodeMode` package shape, then delete what the new capability does not

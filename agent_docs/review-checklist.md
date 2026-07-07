@@ -45,7 +45,31 @@ well before now, or that was built against unreleased Pydantic AI changes.
 
 ## Docs
 
-- Capability README or root README is updated for user-facing behavior.
-- Examples match declared extras.
+Every released capability ships two hand-maintained docs that must stay in sync
+with the code and with each other:
+
+- the **README** next to the implementation (`pydantic_ai_harness/<capability>/README.md`),
+  which serves GitHub and PyPI, and
+- the **unified doc** on the docs site (`docs/capabilities/<capability>.md`, or
+  `docs/experimental/<capability>.md` for experimental capabilities).
+
+Checks:
+
+- Both the README and the unified doc are updated for any user-facing change
+  (public class, params, defaults, tool names, extras, safety semantics). A
+  change reflected in only one of them is a defect, not a follow-up.
+- The two do not contradict each other or the source on extras, option names,
+  defaults, or safety caveats.
+- Every snippet in both docs is runnable: all imports present, class/param names
+  match the source, model ids unchanged from what the source uses.
+- The unified doc ends with a `## API reference` + `::: pydantic_ai_harness.<Class>`
+  block (auto-expanded from the docstring, not hand-written), uses relative `.md`
+  links to other harness pages, and links Pydantic AI docs with root-relative
+  internal links `/ai/<section>/<page>/` (verify the route resolves on the live
+  `pydantic.dev/docs` site before using it).
 - Docs explain composition constraints and safety implications.
 - The PR links an issue.
+
+This is the last documentation gate before merge. Run the `docs-parity-reviewer`
+subagent (`.agents/agents/docs-parity-reviewer.md`) on the change as the final
+review step; treat its blocking findings as merge blockers.
