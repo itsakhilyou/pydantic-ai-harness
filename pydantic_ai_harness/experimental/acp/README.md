@@ -205,6 +205,8 @@ run_acp_stdio_sync(agent, models=['anthropic:claude-sonnet-4-6', 'anthropic:clau
 
 A model id is any string a Pydantic AI model accepts, so newer models not yet in `KnownModelName` work too. Pass `models='all'` to offer every model Pydantic AI knows (its default is then the first known model, so curate the list when you want a specific default). Without `models`, no model config option is advertised.
 
+To advertise ids Pydantic AI's `infer_model` does not understand (for example OAuth or subscription models), pass `model_resolver` to map the selected id to a prebuilt `Model`; returning the id unchanged falls back to `infer_model`.
+
 ## Token usage
 
 Each completed turn reports its token counts (input/output/total, plus cached tokens) on the ACP `PromptResponse`, summed across any approval pauses. This is an UNSTABLE ACP field, so clients that don't support it simply ignore it.
@@ -235,6 +237,8 @@ run_acp_stdio(            # async; serve until the client disconnects
     tool_presenter=None,      # defaults to the FileSystem/Shell presenter
     session_store=None,       # enables session/load by persisting each session
     models=None,              # models offered as the `model` config option ('all' for every known model)
+    model_resolver=None,      # maps an advertised model id to the Model used for the run
+    usage_limits=None,        # per-run request/token ceilings
 )
 
 run_acp_stdio_sync(...)   # synchronous wrapper, same arguments

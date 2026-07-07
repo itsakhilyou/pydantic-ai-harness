@@ -3,15 +3,16 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from typing import Literal
 
 import acp
 from acp import schema
 from pydantic_ai.agent import AbstractAgent
-from pydantic_ai.models import KnownModelName
+from pydantic_ai.models import KnownModelName, Model
 from pydantic_ai.output import OutputDataT
 from pydantic_ai.tools import AgentDepsT
+from pydantic_ai.usage import UsageLimits
 
 from pydantic_ai_harness.experimental.acp._adapter import DEFAULT_VERSION, PydanticAIACPAgent
 from pydantic_ai_harness.experimental.acp._permission import PermissionPolicy
@@ -33,6 +34,8 @@ async def run_acp_stdio(
     tool_presenter: ToolCallPresenter | None = None,
     session_store: SessionStore | None = None,
     models: Sequence[KnownModelName | str] | Literal['all'] | None = None,
+    model_resolver: Callable[[str], Model | str] | None = None,
+    usage_limits: UsageLimits | None = None,
 ) -> None:
     """Serve `agent` as an ACP agent over stdin/stdout until the client disconnects.
 
@@ -59,6 +62,10 @@ async def run_acp_stdio(
             [`PydanticAIACPAgent`][pydantic_ai_harness.experimental.acp.PydanticAIACPAgent].
         models: Models the client may switch between with the `model` session config option. See
             [`PydanticAIACPAgent`][pydantic_ai_harness.experimental.acp.PydanticAIACPAgent].
+        model_resolver: Maps an advertised model id to the `Model` (or model string) used for the
+            run. See [`PydanticAIACPAgent`][pydantic_ai_harness.experimental.acp.PydanticAIACPAgent].
+        usage_limits: Per-run request/token ceilings applied to every agent run. See
+            [`PydanticAIACPAgent`][pydantic_ai_harness.experimental.acp.PydanticAIACPAgent].
     """
     adapter = PydanticAIACPAgent(
         agent,
@@ -72,6 +79,8 @@ async def run_acp_stdio(
         tool_presenter=tool_presenter,
         session_store=session_store,
         models=models,
+        model_resolver=model_resolver,
+        usage_limits=usage_limits,
     )
     # `session/close` is still UNSTABLE in the ACP SDK, and the SDK's router rejects unstable
     # methods with `method_not_found` unless this flag is set. Keep enabled until close stabilizes.
@@ -91,6 +100,8 @@ def run_acp_stdio_sync(
     tool_presenter: ToolCallPresenter | None = None,
     session_store: SessionStore | None = None,
     models: Sequence[KnownModelName | str] | Literal['all'] | None = None,
+    model_resolver: Callable[[str], Model | str] | None = None,
+    usage_limits: UsageLimits | None = None,
 ) -> None:
     """Synchronous wrapper around [`run_acp_stdio`][pydantic_ai_harness.experimental.acp.run_acp_stdio].
 
@@ -109,5 +120,7 @@ def run_acp_stdio_sync(
             tool_presenter=tool_presenter,
             session_store=session_store,
             models=models,
+            model_resolver=model_resolver,
+            usage_limits=usage_limits,
         )
     )

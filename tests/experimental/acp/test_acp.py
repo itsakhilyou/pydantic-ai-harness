@@ -1728,6 +1728,56 @@ class TestEntryPoints:
 
         assert [raw_output for _id, _status, raw_output in client.tool_completions()] == ['/wired']
 
+    async def test_run_acp_stdio_forwards_usage_limits(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        served: list[PydanticAIACPAgent[None, str]] = []
+
+        async def fake_run_agent(agent: PydanticAIACPAgent[None, str], **kwargs: object) -> None:
+            served.append(agent)
+
+        async def stream(messages: list[ModelMessage], info: AgentInfo) -> AsyncIterator[dict[int, DeltaToolCall]]:
+            yield {0: DeltaToolCall(name='spin', json_args='{}')}
+
+        agent = Agent(FunctionModel(stream_function=stream))
+
+        @agent.tool_plain
+        def spin() -> str:
+            return 'again'
+
+        monkeypatch.setattr(acp, 'run_agent', fake_run_agent)
+        await run_acp_stdio(agent, usage_limits=UsageLimits(request_limit=2))
+
+        # The helper handed the limits to the adapter: an endlessly tool-calling run is cut off.
+        adapter = served[0]
+        session_id = await _start(adapter, FakeClient())
+        response = await adapter.prompt(prompt=[acp.text_block('go')], session_id=session_id, message_id='m1')
+        assert response.stop_reason == 'max_turn_requests'
+
+    async def test_run_acp_stdio_forwards_model_resolver(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        served: list[PydanticAIACPAgent[None, str]] = []
+
+        async def fake_run_agent(agent: PydanticAIACPAgent[None, str], **kwargs: object) -> None:
+            served.append(agent)
+
+        async def stream(messages: list[ModelMessage], info: AgentInfo) -> AsyncIterator[str]:
+            yield 'resolved model'
+
+        seen: list[str] = []
+
+        def resolve(model_id: str) -> FunctionModel:
+            seen.append(model_id)
+            return FunctionModel(stream_function=stream)
+
+        monkeypatch.setattr(acp, 'run_agent', fake_run_agent)
+        await run_acp_stdio(Agent(TestModel()), models=['test', 'host:custom'], model_resolver=resolve)
+
+        # The helper handed the resolver to the adapter: a selected model id goes through it.
+        adapter = served[0]
+        session_id = await _start(adapter, FakeClient())
+        await adapter.set_config_option(config_id='model', value='host:custom', session_id=session_id)
+        response = await adapter.prompt(prompt=[acp.text_block('hi')], session_id=session_id)
+        assert response.stop_reason == 'end_turn'
+        assert seen == ['host:custom']
+
     def test_run_acp_stdio_sync_serves_the_agent(self, monkeypatch: pytest.MonkeyPatch) -> None:
         served: list[object] = []
 
@@ -1737,6 +1787,47 @@ class TestEntryPoints:
         monkeypatch.setattr(acp, 'run_agent', fake_run_agent)
         run_acp_stdio_sync(Agent(TestModel()))
         assert isinstance(served[0], PydanticAIACPAgent)
+
+    def test_run_acp_stdio_sync_forwards_model_resolver_and_usage_limits(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        served: list[PydanticAIACPAgent[None, str]] = []
+
+        async def fake_run_agent(agent: PydanticAIACPAgent[None, str], **kwargs: object) -> None:
+            served.append(agent)
+
+        async def stream(messages: list[ModelMessage], info: AgentInfo) -> AsyncIterator[dict[int, DeltaToolCall]]:
+            yield {0: DeltaToolCall(name='spin', json_args='{}')}
+
+        seen: list[str] = []
+
+        def resolve(model_id: str) -> FunctionModel:
+            seen.append(model_id)
+            return FunctionModel(stream_function=stream)
+
+        agent = Agent(TestModel())
+
+        @agent.tool_plain
+        def spin() -> str:
+            return 'again'
+
+        monkeypatch.setattr(acp, 'run_agent', fake_run_agent)
+        run_acp_stdio_sync(
+            agent,
+            models=['test', 'host:custom'],
+            model_resolver=resolve,
+            usage_limits=UsageLimits(request_limit=2),
+        )
+
+        # One drive proves both: the selected id goes through the resolver, whose endlessly
+        # tool-calling model is then cut off by the forwarded limits.
+        async def drive() -> schema.PromptResponse:
+            adapter = served[0]
+            session_id = await _start(adapter, FakeClient())
+            await adapter.set_config_option(config_id='model', value='host:custom', session_id=session_id)
+            return await adapter.prompt(prompt=[acp.text_block('go')], session_id=session_id)
+
+        response = asyncio.run(drive())
+        assert seen == ['host:custom']
+        assert response.stop_reason == 'max_turn_requests'
 
     async def test_end_to_end_over_stdio(self) -> None:
         """Drive the adapter as a real subprocess over ACP stdio, as a TUI client would."""
