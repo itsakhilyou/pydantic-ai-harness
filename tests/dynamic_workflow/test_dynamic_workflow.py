@@ -765,7 +765,8 @@ async def test_inherit_model_runs_sub_agents_on_parent_run_model() -> None:
 async def test_inherit_model_off_keeps_sub_agent_bound_model() -> None:
     parent_model_calls: list[str] = []
 
-    def parent_model_fn(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+    def parent_model_fn(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:  # pragma: no cover
+        # Never invoked: with inherit_model off the sub-agent keeps its own bound model.
         parent_model_calls.append(_user_prompt_text(messages))
         return ModelResponse(parts=[TextPart('FROM_PARENT')])
 
