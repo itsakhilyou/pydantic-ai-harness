@@ -159,6 +159,7 @@ def test_capability_provides_toolset_with_propagated_config() -> None:
         max_agent_calls=7,
         max_retries=1,
         forward_usage=False,
+        inherit_model=True,
         sub_agent_usage_limits=usage_limits,
         resource_limits=resource_limits,
         id='wf',
@@ -169,6 +170,7 @@ def test_capability_provides_toolset_with_propagated_config() -> None:
     assert toolset.max_agent_calls == 7
     assert toolset.max_retries == 1
     assert toolset.forward_usage is False
+    assert toolset.inherit_model is True
     assert toolset.sub_agent_usage_limits == usage_limits
     assert toolset.resource_limits == resource_limits
     # The toolset id derives from the capability id for durable execution.
@@ -737,6 +739,48 @@ async def test_forward_usage_false_isolates_usage() -> None:
     ctx = _ctx()
     await _run_script(ts, "await sub(task='x')", ctx)
     assert ctx.usage.requests == 0
+
+
+async def test_inherit_model_runs_sub_agents_on_parent_run_model() -> None:
+    parent_model_calls: list[str] = []
+
+    def parent_model_fn(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        parent_model_calls.append(_user_prompt_text(messages))
+        return ModelResponse(parts=[TextPart('FROM_PARENT')])
+
+    sub: Agent[object, str] = Agent(TestModel(custom_output_text='OWN'), name='sub')
+    ts = DynamicWorkflowToolset[object](agents=[WorkflowAgent(agent=sub)], inherit_model=True)
+    ctx = RunContext[object](
+        deps=None,
+        model=FunctionModel(parent_model_fn),
+        usage=RunUsage(),
+        prompt=None,
+        messages=[],
+        run_step=1,
+    )
+    assert await _run_script(ts, "await sub(task='x')", ctx) == 'FROM_PARENT'
+    assert parent_model_calls == ['x']
+
+
+async def test_inherit_model_off_keeps_sub_agent_bound_model() -> None:
+    parent_model_calls: list[str] = []
+
+    def parent_model_fn(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        parent_model_calls.append(_user_prompt_text(messages))
+        return ModelResponse(parts=[TextPart('FROM_PARENT')])
+
+    sub: Agent[object, str] = Agent(TestModel(custom_output_text='OWN'), name='sub')
+    ts = DynamicWorkflowToolset[object](agents=[WorkflowAgent(agent=sub)])
+    ctx = RunContext[object](
+        deps=None,
+        model=FunctionModel(parent_model_fn),
+        usage=RunUsage(),
+        prompt=None,
+        messages=[],
+        run_step=1,
+    )
+    assert await _run_script(ts, "await sub(task='x')", ctx) == 'OWN'
+    assert parent_model_calls == []
 
 
 async def test_deps_forwarded_to_sub_agents() -> None:

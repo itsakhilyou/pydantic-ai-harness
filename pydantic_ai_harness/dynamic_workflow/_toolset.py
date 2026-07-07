@@ -407,6 +407,10 @@ class DynamicWorkflowToolset(AbstractToolset[AgentDepsT]):
     """Share the parent run's `usage` accumulator with sub-agents. See
     `DynamicWorkflow.forward_usage` for what is and is not forwarded."""
 
+    inherit_model: bool = False
+    """Run every sub-agent with the parent run's resolved model instead of its constructed model.
+    See `DynamicWorkflow.inherit_model` for when to use this."""
+
     sub_agent_usage_limits: UsageLimits | None = None
     """`UsageLimits` applied to every sub-agent run, replacing pydantic-ai's default.
     See `DynamicWorkflow.sub_agent_usage_limits` for the budgeting semantics."""
@@ -607,6 +611,7 @@ class DynamicWorkflowToolset(AbstractToolset[AgentDepsT]):
                 result = await self._by_name[agent_name].agent.run(
                     task,
                     deps=ctx.deps,
+                    model=ctx.model if self.inherit_model else None,
                     usage=ctx.usage if self.forward_usage else None,
                     usage_limits=self.sub_agent_usage_limits,
                 )

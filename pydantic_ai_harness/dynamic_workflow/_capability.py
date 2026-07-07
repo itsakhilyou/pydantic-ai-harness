@@ -79,6 +79,16 @@ class DynamicWorkflow(AbstractCapability[AgentDepsT]):
     `max_agent_calls` for an exact ceiling on the number of runs.
     """
 
+    inherit_model: bool = False
+    """Run every sub-agent with the parent run's resolved model instead of its constructed model.
+
+    Use this when the host can switch models per run, such as a `/model` command that passes a
+    run-level model override to the parent agent. Without it, that per-run choice silently leaves
+    catalog sub-agents on the model they were bound to when constructed; `inherit_model=True` makes
+    the workflow crew follow the parent run's resolved model. Keep `False` to pin sub-agents to
+    their own configured models.
+    """
+
     sub_agent_usage_limits: UsageLimits | None = None
     """`UsageLimits` applied to every sub-agent run, replacing pydantic-ai's default.
 
@@ -144,6 +154,7 @@ class DynamicWorkflow(AbstractCapability[AgentDepsT]):
             max_agent_calls=self.max_agent_calls,
             max_retries=self.max_retries,
             forward_usage=self.forward_usage,
+            inherit_model=self.inherit_model,
             sub_agent_usage_limits=self.sub_agent_usage_limits,
             resource_limits=self.resource_limits,
             toolset_id=self.id,

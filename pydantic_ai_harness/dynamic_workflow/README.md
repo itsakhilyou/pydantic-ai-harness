@@ -258,6 +258,13 @@ happens when the script also prints for debugging, here they are:
 > `print()` is for debug logging. It stringifies, so it is the wrong tool for returning structured
 > data. Let the last expression carry the real result.
 
+## Choosing sub-agent models
+
+By default, each sub-agent uses the model it was constructed with. Set `inherit_model=True` when
+the host passes a per-run model override to the parent agent, for example from a `/model` command,
+and every sub-agent dispatch should follow that resolved parent model. Leave it `False` when a
+sub-agent is intentionally pinned to a different model.
+
 ## Keeping it safe: budgets
 
 A sub-agent is non-deterministic and costs tokens, and it can fan out into more sub-agents. So a
@@ -440,6 +447,7 @@ DynamicWorkflow(                  # all parameters are keyword-only
     max_agent_calls=50,
     max_retries=3,
     forward_usage=True,
+    inherit_model=False,          # True -> sub-agents run with the parent run's resolved model
     sub_agent_usage_limits=None,  # UsageLimits per sub-agent run; None -> pydantic-ai default
     resource_limits=None,         # None -> backstop (256 MB, 50M allocs, no time cap);
                                   # 'unlimited' -> off; a dict is merged onto the backstop
