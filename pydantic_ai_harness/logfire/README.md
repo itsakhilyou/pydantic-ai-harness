@@ -10,6 +10,11 @@ Each capability manages one surface of the agent, so you adopt exactly as much a
   description, parameter docs) of the agent's tools
 - [`ManagedSettings`](#managedsettings) -- the agent's model and model settings
 
+...or manage the whole shape at once:
+
+- [`ManagedAgentSpec`](#managedagentspec) -- the agent's instructions, model, settings, and
+  capabilities together, as one versioned `AgentSpec`
+
 They share one contract: **the code-defined agent is the fallback.** Every managed value is a
 patch on what's written in code -- unset fields keep their code values, and a missing, invalid,
 or unreachable remote value degrades to exactly the agent the developer wrote, never a crashed
@@ -345,3 +350,90 @@ counterpart):
 - `thinking` accepts `true`/`false` or an effort level (`'minimal'` ... `'xhigh'`), exactly like
   the unified `thinking` model setting; per-provider lowering (e.g. effort to budget tokens) is
   pydantic-ai's existing behavior.
+
+## `ManagedAgentSpec`
+
+Back a whole agent's shape -- instructions, model, model settings, and capabilities -- with a single
+Logfire-managed [`AgentSpec`](https://ai.pydantic.dev/api/agent/#pydantic_ai.agent.spec.AgentSpec).
+
+### The problem
+
+The per-surface capabilities above each manage one knob. Sometimes you want to steer the agent's
+whole configuration together -- swap the model *and* nudge the instructions *and* enable a
+capability -- and have that land as one atomic, versioned change you can roll out or roll back in a
+single step, rather than coordinating several variables.
+
+### The solution
+
+`ManagedAgentSpec` resolves an `agentspec__<name>` variable whose value is an entire `AgentSpec`.
+Its instructions, model, settings, and `capabilities` all layer onto the code-defined agent, so one
+managed value drives the whole shape. It composes with the per-surface capabilities and with your
+code-defined tools and capabilities -- the spec adds, it never removes.
+
+### Usage
+
+The name `checkout_assistant` is declared as the managed variable `agentspec__checkout_assistant`,
+matching the naming Logfire's "Agent Specs" surface uses:
+
+```python
+import logfire
+from pydantic_ai import Agent
+
+from pydantic_ai_harness.logfire import ManagedAgentSpec
+
+logfire.configure()
+
+agent = Agent(
+    'openai:gpt-5',
+    capabilities=[ManagedAgentSpec('checkout_assistant', label='production')],
+)
+```
+
+The value is a JSON `AgentSpec`: its `instructions` add to the agent's own, `model_settings` merge
+over the agent's (under per-run `model_settings=`), `model` overrides per request, and each entry in
+`capabilities` is materialized from the capability registry:
+
+```json
+{
+  "model": "openai:gpt-5",
+  "instructions": "Be concise and always confirm the order id before refunding.",
+  "model_settings": {"temperature": 0.3},
+  "capabilities": [{"Thinking": {"effort": "high"}}]
+}
+```
+
+Reference your own capability classes by name by passing them as `custom_capability_types`; built-in
+capability names (e.g. `Thinking`) are always available.
+
+For the common case -- an agent whose whole shape is managed -- the `ManagedAgent` sugar builds the
+agent for you in one call:
+
+```python
+import logfire
+
+from pydantic_ai_harness.logfire import ManagedAgent
+
+logfire.configure()
+
+agent = ManagedAgent('checkout_assistant', model='openai:gpt-5', label='production')
+result = agent.run_sync('Refund my last order.')
+```
+
+`ManagedAgent` returns a real `Agent` (not a builder); the managed values just flow in per run.
+Pass a fallback `model` so the agent can run before any spec is published -- the spec's `model`, when
+set, then overrides it per request.
+
+### Notes
+
+- **Additive, never destructive:** a missing, invalid, or unreachable value degrades to exactly the
+  agent the developer wrote. Local tools, toolsets, and code-defined capabilities always stay in code.
+- **Capabilities materialize per run:** an unknown capability name, or one whose construction fails,
+  is skipped with a warning rather than crashing the run.
+- **Model override limits (for now):** as with [`ManagedSettings`](#managedsettings), the managed
+  `model` overrides per request via `before_model_request`, so it needs a code-side (or `ManagedAgent`
+  fallback) model and can't yet distinguish a per-run `model=` argument from the agent default. A
+  forward-compatible `get_model` hook is already wired up for when pydantic-ai grows the framework
+  surface for it. Both limits are pending run-spec work in pydantic-ai.
+- The spec resolves **once per run**, in `for_run` (earlier than the per-surface capabilities, since
+  the resolved spec decides what the run is assembled from), and its label + version ride as baggage
+  on every span of the run. `ManagedAgentSpec.resolved` exposes the active run's `ResolvedVariable`.
