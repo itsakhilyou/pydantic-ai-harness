@@ -20,9 +20,8 @@ pytestmark = pytest.mark.anyio
 
 
 def test_all_known_model_names_are_strings() -> None:
-    # Guards the `KnownModelName.__value__` introspection: it relies on the alias staying one
-    # flat `Literal` of strings (pyai exposes no public enumeration API). If core recomposes it,
-    # this fails loudly instead of `models='all'` silently advertising non-string members.
+    # Guards `models='all'` advertising only string model ids from Pydantic AI's public
+    # enumeration API.
     names = _all_known_model_names()
     assert len(names) > 100
     assert all(isinstance(name, str) for name in names)

@@ -16,7 +16,7 @@ import logging
 from collections.abc import Hashable, Sequence
 from dataclasses import dataclass, field
 from inspect import isawaitable
-from typing import Generic, Literal, get_args
+from typing import Generic, Literal
 from uuid import uuid4
 
 import acp
@@ -40,7 +40,7 @@ from pydantic_ai.messages import (
     ToolCallPart,
     UserContent,
 )
-from pydantic_ai.models import KnownModelName
+from pydantic_ai.models import KnownModelName, known_model_names
 from pydantic_ai.output import OutputDataT
 from pydantic_ai.run import AgentRunResultEvent
 from pydantic_ai.tools import AgentDepsT
@@ -61,14 +61,8 @@ _logger = logging.getLogger(__name__)
 
 
 def _all_known_model_names() -> tuple[str, ...]:
-    """Every model name Pydantic AI knows -- the string members of the `KnownModelName` alias.
-
-    `KnownModelName` is a `TypeAliasType`, so the members are read from `__value__` (one flat
-    `Literal` of `'provider:model'` strings).
-    """
-    # Swap for `known_model_names()` (pydantic-ai#5803) once a released slim ships it and the
-    # floor is raised; it's unreleased now, so calling it would break the floor CI job.
-    return get_args(KnownModelName.__value__)
+    """Every model name Pydantic AI exposes through the public `known_model_names()` API."""
+    return known_model_names()
 
 
 def _finish_reason_to_stop_reason(finish_reason: FinishReason | None) -> schema.StopReason:
@@ -458,6 +452,13 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
                 # would settle it). Accepted residual; every wider window is covered below.
                 if turn.done() and state.cancel_requested:
                     return schema.PromptResponse(stop_reason='cancelled')
+                if state.cancel_requested:
+                    # `cancel()` already delivered cancellation to the turn. Do not inject a second
+                    # one while Pydantic AI's stream context is closing, or its internal event stream
+                    # can be interrupted before its receive side closes.
+                    with contextlib.suppress(asyncio.CancelledError, _TurnCancelled):
+                        await asyncio.shield(turn)
+                    raise
                 # The prompt coroutine itself was cancelled (e.g. connection teardown): stop the
                 # child turn before propagating, so it is not left running on a closing connection.
                 turn.cancel()
@@ -564,7 +565,7 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
 
                 assert result is not None, 'run_stream_events always yields a final result event'
                 history = result.all_messages()
-                usage += result.usage()
+                usage += result.usage  # pydantic-ai 2.0: `usage` is a property, not a method
                 output = result.output
                 if isinstance(output, DeferredToolRequests):
                     if not output.approvals and not output.calls:  # pragma: no cover
