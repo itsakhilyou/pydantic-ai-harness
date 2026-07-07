@@ -45,7 +45,7 @@ from pydantic_ai.output import OutputDataT
 from pydantic_ai.run import AgentRunResultEvent
 from pydantic_ai.tools import AgentDepsT
 from pydantic_ai.toolsets import AbstractToolset, FunctionToolset
-from pydantic_ai.usage import RunUsage
+from pydantic_ai.usage import RunUsage, UsageLimits
 
 from ._content import PromptContentBlock, prompt_blocks_to_user_content
 from ._permission import PermissionPolicy, ToolCallPermission, default_permission_scope
@@ -165,6 +165,7 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
         tool_presenter: ToolCallPresenter | None = None,
         session_store: SessionStore | None = None,
         models: Sequence[KnownModelName | str] | Literal['all'] | None = None,
+        usage_limits: UsageLimits | None = None,
     ) -> None:
         """Build the adapter.
 
@@ -207,6 +208,12 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
                 offer every model Pydantic AI knows (its default is then the first known model, so
                 the user should pick one). Defaults to `None`, advertising no models and rejecting
                 `session/set_model`.
+            usage_limits: Optional per-run ceilings (`request_limit`, `tool_calls_limit`, token
+                limits) applied to every agent run, equivalent to `Agent.run(..., usage_limits=...)`.
+                A turn that resumes after a tool approval starts a fresh run, so the limits bound
+                each approval-to-approval segment, not the whole turn. An exceeded limit ends the
+                turn with a `max_tokens`/`max_turn_requests` stop reason, never a request error.
+                Defaults to Pydantic AI's own defaults (50 requests per run).
         """
         self._agent = agent
         self._deps = deps
@@ -225,6 +232,7 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
         self._tool_presenter = tool_presenter or default_coding_presenter
         self._session_store = session_store
         self._models: tuple[str, ...] = _all_known_model_names() if models == 'all' else tuple(models) if models else ()
+        self._usage_limits = usage_limits
         self._client_capabilities: schema.ClientCapabilities | None = None
         self._conn: Client | None = None
         # All live sessions, keyed by session id. Each owns its own turn lock (the dispatcher
@@ -555,6 +563,7 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
                     # Per-run override for the client's `session/set_model` choice; `None` uses the agent's
                     # own model, never mutating the shared agent.
                     model=state.model,
+                    usage_limits=self._usage_limits,
                 ) as stream:
                     event: AgentStreamEvent | AgentRunResultEvent[object]
                     async for event in stream:

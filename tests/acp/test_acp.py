@@ -46,6 +46,7 @@ from pydantic_ai.messages import (
 from pydantic_ai.models.function import AgentInfo, DeltaToolCall, FunctionModel
 from pydantic_ai.models.test import TestModel
 from pydantic_ai.toolsets import FunctionToolset
+from pydantic_ai.usage import UsageLimits
 
 from pydantic_ai_harness import FileSystem, Shell
 from pydantic_ai_harness.acp import (
@@ -702,6 +703,61 @@ class TestStopReason:
         # cancellation: no persisted-message claim and no committed history.
         assert response.user_message_id is None
         assert adapter._sessions[session_id].history == []  # pyright: ignore[reportPrivateUsage]
+
+    async def test_configured_usage_limits_end_the_turn_with_max_turn_requests(self) -> None:
+        request_count = 0
+
+        async def stream(messages: list[ModelMessage], info: AgentInfo) -> AsyncIterator[dict[int, DeltaToolCall]]:
+            nonlocal request_count
+            request_count += 1
+            yield {0: DeltaToolCall(name='spin', json_args='{}')}
+
+        agent = Agent(FunctionModel(stream_function=stream))
+
+        @agent.tool_plain
+        def spin() -> str:
+            return 'again'
+
+        adapter: PydanticAIACPAgent[None, str] = PydanticAIACPAgent(agent, usage_limits=UsageLimits(request_limit=2))
+        client = FakeClient()
+        session_id = await _start(adapter, client)
+
+        response = await adapter.prompt(prompt=[acp.text_block('go')], session_id=session_id, message_id='m1')
+
+        assert response.stop_reason == 'max_turn_requests'
+        assert response.user_message_id is None
+        assert request_count == 2
+        assert adapter._sessions[session_id].history == []  # pyright: ignore[reportPrivateUsage]
+
+    async def test_default_usage_limits_allow_normal_tool_resume(self) -> None:
+        request_count = 0
+
+        async def stream(
+            messages: list[ModelMessage], info: AgentInfo
+        ) -> AsyncIterator[str | dict[int, DeltaToolCall]]:
+            nonlocal request_count
+            request_count += 1
+            if _has_tool_return(messages):
+                yield 'done'
+            else:
+                yield {0: DeltaToolCall(name='spin', json_args='{}')}
+
+        agent = Agent(FunctionModel(stream_function=stream))
+
+        @agent.tool_plain
+        def spin() -> str:
+            return 'again'
+
+        adapter: PydanticAIACPAgent[None, str] = PydanticAIACPAgent(agent)
+        client = FakeClient()
+        session_id = await _start(adapter, client)
+
+        response = await adapter.prompt(prompt=[acp.text_block('go')], session_id=session_id, message_id='m1')
+
+        assert response.stop_reason == 'end_turn'
+        assert response.user_message_id == 'm1'
+        assert request_count == 2
+        assert len(adapter._sessions[session_id].history) >= 2  # pyright: ignore[reportPrivateUsage]
 
 
 class TestChunkText:
