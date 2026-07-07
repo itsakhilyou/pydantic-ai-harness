@@ -2,6 +2,21 @@
 
 Let one agent coordinate a whole team of sub-agents by writing a small Python script.
 
+> **Experimental**
+>
+> Importing `pydantic_ai_harness.experimental.dynamic_workflow` emits a
+> `HarnessExperimentalWarning`. The API can change in any release: the extensions planned in
+> [What is coming](#what-is-coming) -- structured sub-agent inputs and durable workflows -- touch
+> the sub-agent call contract itself, so the capability stays experimental until they settle.
+> When you have accepted that, silence the warning with:
+>
+> ```python
+> import warnings
+> from pydantic_ai_harness.experimental import HarnessExperimentalWarning
+>
+> warnings.filterwarnings('ignore', category=HarnessExperimentalWarning)
+> ```
+
 ## The idea
 
 Say you have a few specialist agents. One reviews code, one summarizes findings, one writes the
@@ -22,9 +37,25 @@ The choreography moves out of the conversation and into code.
 
 > **Tip**
 >
-> If you have met [Code Mode](../code_mode/README.md), this will feel familiar. It is the same
+> If you have met [Code Mode](../../code_mode/README.md), this will feel familiar. It is the same
 > sandbox and the same "write a script instead of many tool calls" idea. The difference is what the
 > script gets to call: in Code Mode it calls the agent's own tools, here it calls whole sub-agents.
+
+## How this relates to SubAgents
+
+The harness has two delegation capabilities, and they trade in the same currency -- named,
+isolated sub-agent runs -- at different altitudes:
+
+- [`SubAgents`](../subagents/README.md) exposes one `delegate_task(agent_name, task)` tool. Each
+  delegation is its own tool call and its own model turn: the parent calls, waits, reads the
+  result into context, then decides the next step. Simple to reason about, and the right fit when
+  delegations are occasional or each result needs the parent's judgment before the next one.
+- `DynamicWorkflow` moves the choreography into a script. Fan-out, chaining, voting, and retry
+  loops run inside one tool call, and intermediate results never enter the parent's context.
+  The right fit when the coordination between sub-agents is the work.
+
+Start with `SubAgents` if you are unsure; a `delegate_task` orchestrator converts to a workflow
+catalog without changing the sub-agents themselves.
 
 ## Install
 
@@ -40,7 +71,7 @@ Let's build the smallest thing that works. Two sub-agents, one orchestrator.
 
 ```python
 from pydantic_ai import Agent
-from pydantic_ai_harness.dynamic_workflow import DynamicWorkflow
+from pydantic_ai_harness.experimental.dynamic_workflow import DynamicWorkflow
 
 reviewer = Agent('openai:gpt-5', name='reviewer', description='Reviews code for bugs.')
 summarizer = Agent('openai:gpt-5', name='summarizer', description='Summarizes findings.')
@@ -151,7 +182,7 @@ from pydantic import BaseModel
 from pydantic_ai import Agent
 from pydantic_ai.usage import UsageLimits
 
-from pydantic_ai_harness.dynamic_workflow import DynamicWorkflow
+from pydantic_ai_harness.experimental.dynamic_workflow import DynamicWorkflow
 
 # With Logfire configured, the trace shows the orchestrator turn, the run_workflow call (including
 # the exact script the model wrote), and every sub-agent run nested underneath it.
@@ -351,7 +382,7 @@ want a different name or a different description for one particular workflow, wi
 agent itself. Wrap it in a `WorkflowAgent`:
 
 ```python
-from pydantic_ai_harness.dynamic_workflow import WorkflowAgent
+from pydantic_ai_harness.experimental.dynamic_workflow import WorkflowAgent
 
 DynamicWorkflow(
     agents=[
@@ -416,7 +447,7 @@ for the full picture.
 
 ## Using with CodeMode
 
-[`CodeMode`](../code_mode/README.md) puts the agent's regular tools behind the same kind of
+[`CodeMode`](../../code_mode/README.md) puts the agent's regular tools behind the same kind of
 sandbox: the model writes one script that calls tools as functions. Put both capabilities on one
 agent and they merge: `run_workflow` disappears, and every sub-agent becomes a typed async
 function inside `run_code`, next to the tools.
@@ -450,6 +481,11 @@ and CodeMode's `os_access`/`mount`/`resource_limits` govern the sandbox, so `too
 `resource_limits` on `DynamicWorkflow` have no effect there. Everything about the sub-agents
 still applies -- isolated runs, `max_agent_calls`, `forward_usage`, `sub_agent_usage_limits`,
 `reveal()`, and the no-nesting rule -- enforced on each sub-agent call, not per script.
+
+In merged mode each sub-agent becomes a tool, so its name must not collide with any of the
+agent's existing tools. A sub-agent named `fetch_data` next to a `fetch_data` tool raises
+`UserError` when the run starts -- rename the sub-agent (`WorkflowAgent(name=...)`) if that
+happens. Standalone mode has no such constraint: sub-agent names live only inside the script.
 
 ## What runs in the sandbox
 
@@ -514,8 +550,10 @@ WorkflowAgent(
 
 ## Further reading
 
-- [Code Mode](../code_mode/README.md), the same sandbox, calling the agent's own tools instead of
+- [Code Mode](../../code_mode/README.md), the same sandbox, calling the agent's own tools instead of
   sub-agents.
+- [SubAgents](../subagents/README.md), one-delegation-per-tool-call sub-agents, without the
+  scripted choreography.
 - [Tool use via code](https://www.anthropic.com/engineering/code-execution-with-mcp) (Anthropic),
   the mechanism this applies to sub-agents.
 - [Building Effective Agents](https://www.anthropic.com/engineering/building-effective-agents)

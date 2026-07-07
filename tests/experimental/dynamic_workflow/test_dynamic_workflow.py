@@ -30,7 +30,7 @@ from pydantic_ai.usage import RunUsage, UsageLimits
 from pydantic_core import core_schema
 
 from pydantic_ai_harness.code_mode import CodeMode
-from pydantic_ai_harness.dynamic_workflow import (
+from pydantic_ai_harness.experimental.dynamic_workflow import (
     DynamicWorkflow,
     DynamicWorkflowToolset,
     WorkflowAgent,
@@ -996,7 +996,7 @@ async def test_sandbox_panic_after_budget_exhaustion_returns_terminal_result(
                 await self.dispatch('counted', {'task': 'second'})
             raise PanicException('sandbox panic')
 
-    monkeypatch.setattr('pydantic_ai_harness.dynamic_workflow._toolset.MontyExecutor', FakeExecutor)
+    monkeypatch.setattr('pydantic_ai_harness.experimental.dynamic_workflow._toolset.MontyExecutor', FakeExecutor)
     ts = DynamicWorkflowToolset[object](agents=[_wf_agent('counted-result', 'counted')], max_agent_calls=1)
     out = await _run_script(ts, '1 + 1')
     assert isinstance(out, dict)

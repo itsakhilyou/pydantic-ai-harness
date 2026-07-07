@@ -4,14 +4,12 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from .code_mode import CodeMode
-    from .dynamic_workflow import DynamicWorkflow
     from .filesystem import FileSystem
     from .logfire import ManagedPrompt
     from .shell import LLM_API_KEY_ENV_PATTERNS, Shell
 
 __all__ = [
     'CodeMode',
-    'DynamicWorkflow',
     'FileSystem',
     'LLM_API_KEY_ENV_PATTERNS',
     'ManagedPrompt',
@@ -24,10 +22,6 @@ def __getattr__(name: str) -> object:
         from .code_mode import CodeMode
 
         return CodeMode
-    if name == 'DynamicWorkflow':
-        from .dynamic_workflow import DynamicWorkflow
-
-        return DynamicWorkflow
     if name == 'FileSystem':
         from .filesystem import FileSystem
 
