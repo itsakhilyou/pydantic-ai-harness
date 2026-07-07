@@ -4,9 +4,19 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from .code_mode import CodeMode
-    from .sql_mode import SQLMode, SQLModeToolset
+    from .filesystem import FileSystem
+    from .logfire import ManagedPrompt
+    from .shell import LLM_API_KEY_ENV_PATTERNS, Shell
+    from .sql_mode import SQLMode
 
-__all__ = ['CodeMode', 'SQLMode', 'SQLModeToolset']
+__all__ = [
+    'CodeMode',
+    'FileSystem',
+    'LLM_API_KEY_ENV_PATTERNS',
+    'ManagedPrompt',
+    'SQLMode',
+    'Shell',
+]
 
 
 def __getattr__(name: str) -> object:
@@ -14,8 +24,24 @@ def __getattr__(name: str) -> object:
         from .code_mode import CodeMode
 
         return CodeMode
-    if name in ('SQLMode', 'SQLModeToolset'):
-        from . import sql_mode
+    if name == 'FileSystem':
+        from .filesystem import FileSystem
 
-        return getattr(sql_mode, name)
+        return FileSystem
+    if name == 'ManagedPrompt':
+        from .logfire import ManagedPrompt
+
+        return ManagedPrompt
+    if name == 'Shell':
+        from .shell import Shell
+
+        return Shell
+    if name == 'LLM_API_KEY_ENV_PATTERNS':
+        from .shell import LLM_API_KEY_ENV_PATTERNS
+
+        return LLM_API_KEY_ENV_PATTERNS
+    if name == 'SQLMode':
+        from .sql_mode import SQLMode
+
+        return SQLMode
     raise AttributeError(f'module {__name__!r} has no attribute {name!r}')

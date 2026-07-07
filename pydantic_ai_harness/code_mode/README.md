@@ -88,17 +88,39 @@ Tools that match the selector are wrapped inside `run_code`. Non-matching tools 
 
 ### Tool Search
 
-When you mark tools or whole toolsets `defer_loading=True` ([Tool Search](https://ai.pydantic.dev/tools-advanced/#tool-search)), `CodeMode` keeps them out of `run_code` while they're undiscovered — they pass straight through, so Tool Search drives them as usual (sent on the wire with `defer_loading` on providers with native tool search; otherwise dropped until discovered, with a `search_tools` tool alongside `run_code`). Once the model discovers a tool it comes back with `defer_loading=False`, and from then on `CodeMode` folds it into `run_code` like any other tool, so it's callable from generated code.
+When you mark tools or whole toolsets `defer_loading=True` ([Tool Search](https://ai.pydantic.dev/tools-advanced/#tool-search)), `CodeMode` keeps them out of `run_code` while they're undiscovered -- they pass straight through, so Tool Search drives them as usual (sent on the wire with `defer_loading` on providers with native tool search; otherwise dropped until discovered, with a `search_tools` tool alongside `run_code`). Once the model discovers a tool it comes back with `defer_loading=False`, and from then on `CodeMode` folds it into `run_code` like any other tool, so it's callable from generated code.
 
-That fold-in grows `run_code`'s description, which invalidates the prompt-cache prefix once at the moment of discovery (turns with no discovery stay cache-warm). To instead keep a Tool Search corpus fully native — never folded into `run_code`, fully cache-stable, but not callable from inside it — exclude it with a `tools` selector; corpus members carry `with_native` set to the managing native tool:
+That fold-in grows `run_code`'s description, which invalidates the prompt-cache prefix once at the moment of discovery (turns with no discovery stay cache-warm). Two ways to avoid the bust:
+
+- Pass `dynamic_catalog=True` to keep `run_code.description` static across discoveries -- the catalog of sandboxed-tool signatures moves into agent instructions (as a dynamic [`InstructionPart`](https://ai.pydantic.dev/api/messages/#pydantic_ai.messages.InstructionPart)) and newly-discovered tools are announced via [`ctx.enqueue`](https://ai.pydantic.dev/api/tools/#pydantic_ai.tools.RunContext.enqueue) instead of by rebuilding the description:
+
+```python
+CodeMode(dynamic_catalog=True)
+```
+
+  This pays off when paired with Tool Search: the tool-definitions block stays byte-stable so the prefix cache survives discoveries, at the cost of a larger (but cache-friendly) system prompt. With a fixed toolset and no Tool Search, the default keeps the system prompt shorter and is the better choice.
+
+- To instead keep a Tool Search corpus fully native -- never folded into `run_code`, but not callable from inside it -- exclude it with a `tools` selector; corpus members carry `with_native` set to the managing native tool:
 
 ```python
 CodeMode(tools=lambda ctx, td: td.with_native is None)
 ```
 
-A future Pydantic AI change will let `run_code`'s description stay static — newly discovered tools announced separately — so the fold-in costs nothing; until then, the selector above is the escape hatch.
 
 ### Metadata-based selection
+
+Use metadata when the decision should travel with a tool or toolset, rather than
+with one `CodeMode` instance. This is useful for shared toolsets: the toolset
+author can tag the tools that are safe and useful to call from generated code,
+and each agent can opt into that tag with `CodeMode(tools={...})`.
+
+`CodeMode(tools={'code_mode': True})` uses the standard Pydantic AI
+`ToolSelector` metadata form. A tool is sandboxed when its
+`ToolDefinition.metadata` contains all of the selector's key-value pairs. Extra
+metadata on the tool is fine, and nested dictionaries are matched by deep
+inclusion.
+
+The common pattern is to tag an entire toolset with `.with_metadata(...)`:
 
 ```python
 from pydantic_ai import Agent
@@ -113,6 +135,10 @@ agent = Agent(
     capabilities=[CodeMode(tools={'code_mode': True})],
 )
 ```
+
+Here `search` and `fetch` are removed from the model-facing tool list and
+become callable functions inside `run_code`. Tools without
+`metadata['code_mode'] == True` stay visible as regular tool calls.
 
 ## Return values
 
@@ -140,22 +166,92 @@ for msg in result.all_messages():
             tool_returns = part.metadata['tool_returns'] # dict[str, ToolReturnPart]
 ```
 
+## Filesystem and OS access
+
+Sandboxed code runs with no access to the host's files, environment, or clock. Two parameters grant
+it -- reach for them when the agent's task genuinely needs the host.
+
+**`mount` -- share host directories.** Reach for this when the agent works with real files: analyzing
+a dataset you've dropped in a folder and writing a report back, editing a checkout, or processing a
+batch of documents. Sandboxed `pathlib` code reads and writes under the mounted path. (For
+environment variables or the clock, use `os_access` instead.)
+
+```python
+from pydantic_monty import MountDir
+
+from pydantic_ai_harness import CodeMode
+
+# The agent can read /work/data.csv and write /work/summary.md back to the host:
+CodeMode(mount=MountDir('/work', '/tmp/agent-workspace', mode='read-write'))
+```
+
+**`os_access` -- answer the sandbox's OS calls yourself.** Reach for this when the agent needs
+environment variables, the current date and time, or filesystem behavior you control. Hand it a
+ready-made OS implementation, or a callback that decides each call -- so you can inject just the
+secrets it needs, pin "now" for reproducible runs, or route file access to your own store.
+
+```python
+from pydantic_monty import NOT_HANDLED, OSAccess
+
+from pydantic_ai_harness import CodeMode
+
+# Give the agent a fixed set of environment values:
+CodeMode(os_access=OSAccess(environ={'API_BASE': 'https://api.example.com'}))
+
+
+# ...or intercept each call to decide what the agent may see:
+allowed_env = {'API_KEY': 'sk-...'}
+
+
+def my_os(fn, args, kwargs):
+    if fn == 'os.getenv':
+        # Answer the call: allow-listed keys resolve, every other key reads back
+        # as None -- absent, exactly like a real unset variable.
+        return allowed_env.get(args[0])
+    # Refuse everything else: NOT_HANDLED makes the call fail in the sandbox.
+    return NOT_HANDLED
+
+
+CodeMode(os_access=my_os)
+```
+
+Your callback's return value decides the call's fate, and the two outcomes are easy to confuse:
+
+- **Return any value** -- including `None`, `''`, or `0` -- and that becomes the result the sandbox
+  sees. `os.getenv` returning `None` looks exactly like a normal unset variable, so the agent's code
+  keeps running. This is how you *hide* something: answer with an empty value.
+- **Return `NOT_HANDLED`** and the call is treated as unsupported: it raises inside the sandbox and
+  the model gets a retry. This *refuses* a capability outright -- use it to block, not to say "no
+  value". Returning `NOT_HANDLED` for a key the agent reasonably expects will burn retries.
+
+Both expose the real host to model-written code, so grant only what the task needs. Access is fixed
+when the capability is built, so construct `CodeMode` per request to scope it.
+
+A `MountDir` defaults to copy-on-write `mode='overlay'`: the sandbox reads host files and sees its
+own writes, but those writes do **not** reach the host. Pass `mode='read-write'` to persist them, or
+`mode='read-only'` to forbid writes.
+
+> Monty-specific: these hooks use Monty's `AbstractOS`/`MountDir` types.
+
 ## Sandbox restrictions
 
 Code runs inside [Monty](https://github.com/pydantic/monty), a sandboxed Python subset. Key restrictions:
 
 - No class definitions
 - No third-party imports (allowed stdlib: `sys`, `typing`, `asyncio`, `math`, `json`, `re`, `datetime`, `os`, `pathlib`)
-- No wall-clock or timing primitives: `asyncio.sleep`, `datetime.datetime.now()`/`datetime.date.today()`, and the `time` module are unavailable
+- No wall-clock or timing primitives by default (`asyncio.sleep`, `datetime.now()`, `date.today()`, `time`) -- `datetime.now()`/`date.today()` become available with an `os_access` handler (above); `asyncio.sleep`/`time` never do
 - No `import *`
+- Filesystem I/O needs an `os_access` handler or a `mount`; `os.getenv`/`os.environ` need an `os_access` handler
 - Tools requiring approval or with deferred execution are excluded from the sandbox
 
 ## API
 
 ```python
 CodeMode(
-    tools: ToolSelector = 'all',   # 'all', list[str], callable, or dict
-    max_retries: int = 3,          # retries on sandbox execution errors
+    tools: ToolSelector = 'all',        # 'all', list[str], callable, or dict
+    max_retries: int = 3,               # retries on sandbox execution errors
+    os_access: CodeModeOS | None = None,   # host handler for env vars, clock, and file I/O
+    mount: CodeModeMount | None = None,    # host directories to share with the sandbox
 )
 ```
 

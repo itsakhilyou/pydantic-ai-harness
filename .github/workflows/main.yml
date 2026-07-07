@@ -8,8 +8,14 @@ on:
       - 'v*'
   pull_request: {}
 
+# UV_LOCKED (not UV_FROZEN): both keep uv from rewriting the lockfile, but
+# frozen installs the lock blindly while locked validates it against
+# pyproject.toml first and fails the job on drift. Frozen also turns
+# resolution flags into silent no-ops, which left the lowest-versions job
+# testing the locked (latest) versions for months. Jobs that intentionally
+# deviate from the lock opt out per step with `UV_LOCKED: '0'` or `env -u`.
 env:
-  UV_FROZEN: '1'
+  UV_LOCKED: '1'
 
 permissions:
   contents: read
@@ -28,7 +34,7 @@ jobs:
           enable-cache: true # zizmor: ignore[cache-poisoning] -- Job does not produce release artifacts and does not have sensitive permissions
           cache-suffix: lint
 
-      - run: uv sync --frozen --all-groups --all-extras
+      - run: uv sync --locked --all-groups --all-extras
 
       - uses: pre-commit/action@646c83fcd040023954eafda54b4db0192ce70507 # v3.0.0
         with:
@@ -40,6 +46,7 @@ jobs:
 
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
@@ -62,7 +69,7 @@ jobs:
           python-version: ${{ matrix.python-version }}
           enable-cache: true # zizmor: ignore[cache-poisoning] -- Job does not produce release artifacts and does not have sensitive permissions
 
-      - run: uv sync --frozen --group dev ${{ matrix.install.extras }}
+      - run: uv sync --locked --group dev ${{ matrix.install.extras }}
       - run: mkdir -p coverage-data
       - run: uv run coverage run -m pytest
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -82,7 +89,44 @@ jobs:
   # `harness compat` job (see https://github.com/pydantic/pydantic-ai/blob/main/.github/workflows/harness-compat.yml).
   test-floor:
     runs-on: ubuntu-latest
-    name: test on lowest direct-dep versions
+    name: test on ${{ matrix.python-version }} (lowest-versions)
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.10', '3.11', '3.12', '3.13', '3.14']
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@cec208311dfd045dd5311c1add060b2062131d57 # v8.0.0
+        with:
+          python-version: ${{ matrix.python-version }}
+          enable-cache: true # zizmor: ignore[cache-poisoning] -- Job does not produce release artifacts and does not have sensitive permissions
+          cache-suffix: floor
+
+      # The lock validation must be off here: this job deviates from the lock
+      # on purpose, and under UV_LOCKED=1 the lowest-direct resolution fails
+      # because uv refuses to write the lowest-resolved lockfile it produces.
+      - run: uv sync --resolution lowest-direct --group dev --all-extras
+        env:
+          UV_LOCKED: '0'
+      - run: uv run --no-sync pytest
+
+  # Verify the harness works against the latest published pydantic-ai packages,
+  # not just the lock. The `test` matrix resolves against the lock, so harness
+  # code merged after the last lock refresh is never exercised against newer
+  # pydantic-ai releases until someone bumps. pydantic-ai's `harness compat`
+  # job doesn't cover that window either: it tests harness main as it exists
+  # when a pydantic-ai PR merges, not harness code added afterwards. With this
+  # job, the pydantic-ai-slim `>=` floor in pyproject.toml can stay an honest,
+  # test-verified floor (exercised by `test-floor`) instead of chasing the
+  # latest release.
+  test-latest:
+    runs-on: ubuntu-latest
+    name: test on latest pydantic-ai
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
@@ -92,10 +136,80 @@ jobs:
         with:
           python-version: '3.14'
           enable-cache: true # zizmor: ignore[cache-poisoning] -- Job does not produce release artifacts and does not have sensitive permissions
-          cache-suffix: floor
+          cache-suffix: latest
 
-      - run: uv sync --resolution lowest-direct --group dev --all-extras
+      # `env -u`: under the workflow-level `UV_LOCKED=1`, `uv lock` asserts the
+      # lockfile is up to date instead of applying the upgrade, so the moment a
+      # newer pydantic-ai exists this step would fail rather than test it.
+      - run: |
+          env -u UV_LOCKED uv lock \
+            --upgrade-package pydantic-ai-slim \
+            --upgrade-package pydantic-graph
+      - run: uv sync --locked --group dev --all-extras
       - run: uv run --no-sync pytest
+
+  # Early-warning signal for the pydantic-ai v2 beta line. The harness targets
+  # the v1 line today (the `>=1.105.0` floor and the lock both resolve to v1),
+  # but that `>=` constraint also admits the v2 prereleases once prerelease
+  # resolution is enabled. This job pins the latest v2 beta so we see v2
+  # breakage as it lands -- e.g. v2 dropped the `calls` argument from
+  # `ToolManager.get_parallel_execution_mode`, which CodeMode still calls with
+  # the v1 signature -- rather than discovering it the day v2 is released.
+  #
+  # Deliberately absent from the `check` gate below: v2 is unreleased and the
+  # harness does not yet claim to support it, so a red result here is expected
+  # and must not block merges. It is a visible signal, not a required check.
+  test-v2-beta:
+    runs-on: ubuntu-latest
+    name: test on pydantic-ai v2 beta
+    timeout-minutes: 20
+    # The whole point of the job is to resolve v2 prereleases; allow them for
+    # every uv invocation in this job rather than threading flags per step.
+    env:
+      UV_PRERELEASE: allow
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@cec208311dfd045dd5311c1add060b2062131d57 # v8.0.0
+        with:
+          python-version: '3.14'
+          enable-cache: true # zizmor: ignore[cache-poisoning] -- Job does not produce release artifacts and does not have sensitive permissions
+          cache-suffix: v2-beta
+
+      # `env -u UV_LOCKED`: same as `test-latest` -- under the workflow-level
+      # `UV_LOCKED=1`, `uv lock` would assert the lockfile is current instead of
+      # applying the upgrade, so this step would fail the moment a newer v2 beta
+      # exists rather than testing it.
+      - run: |
+          env -u UV_LOCKED uv lock \
+            --prerelease allow \
+            --upgrade-package pydantic-ai-slim \
+            --upgrade-package pydantic-graph
+      - run: uv sync --locked --group dev --all-extras
+      # A v2 break can hang instead of failing cleanly: e.g. an unhandled
+      # exception raised inside a DBOS workflow leaves DBOS's background
+      # (non-daemon) recovery thread alive, so the Python process never exits
+      # and the step would otherwise ride to the 20-minute job timeout. The
+      # `timeout` wrapper caps the step so any such hang fails fast (exit 124)
+      # rather than burning a full runner slot. `-k 30` escalates to SIGKILL if
+      # pytest ignores the initial SIGTERM. A per-test plugin (pytest-timeout)
+      # would not catch this -- the hang happens after the test body finishes,
+      # during interpreter shutdown -- so the cap has to be on the process.
+      #
+      # Two instrumentation assertions depend on pydantic-ai v1's OpenTelemetry
+      # attribute and span names (`gen_ai.usage.*`, span `agent run`). v2 deliberately
+      # renamed these (aggregated-usage attributes, and GenAI-semconv span names
+      # such as `invoke_agent {name}`), so they are expected-red on v2 and carry
+      # no signal here. Deselect them so this job stays a meaningful early-warning
+      # for capability breakage (e.g. code mode) rather than documented
+      # instrumentation drift. If either test is renamed the deselect stops
+      # matching and the job goes red, which is the right prompt to revisit.
+      - run: |
+          timeout -k 30 300 uv run --no-sync pytest \
+            --deselect "tests/logfire_variables/test_managed_prompt.py::test_baggage_propagates_to_run_and_child_spans" \
+            --deselect "tests/logfire_variables/test_managed_prompt.py::test_provider_backed_resolution_tags_v1_instrumentation_spans"
 
   coverage:
     needs: [test]
@@ -116,13 +230,13 @@ jobs:
           path: coverage-data
           merge-multiple: true
 
-      - run: uv sync --frozen --group dev --all-extras
+      - run: uv sync --locked --group dev --all-extras
       - run: uv run coverage combine coverage-data
       - run: uv run coverage report
 
   check:
     if: always()
-    needs: [lint, test, test-floor, coverage]
+    needs: [lint, test, test-floor, test-latest, coverage]
     runs-on: ubuntu-latest
     steps:
       - uses: re-actors/alls-green@05ac9388f0aebcb5727afa17fcccfecd6f8ec5fe # v1.2.2
