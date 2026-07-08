@@ -11,9 +11,9 @@ requires-python = '>=3.11'
 license = 'MIT'
 authors = [{ name = 'Pydantic', email = 'engineering@pydantic.dev' }]
 dependencies = [
-    # The agent and its capabilities. Uses the local checkout when run from the
-    # monorepo; pins the published floor otherwise.
-    'pydantic-ai-harness>=0.0.1',
+    # The agent and its capabilities. Unpinned: the monorepo installs the local
+    # checkout editable (a pre-release dev version), and the harness is pre-1.0.
+    'pydantic-ai-harness',
     'pydantic-ai-slim>=2.1.0',
     # Harbor: the Terminal-Bench harness. Heavy (it pulls a web/DB stack), which
     # is exactly why this project is kept out of the root package's install.
