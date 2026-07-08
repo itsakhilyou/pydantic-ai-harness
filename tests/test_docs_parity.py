@@ -28,7 +28,8 @@ def _capability_packages() -> list[Path]:
         for child in sorted(parent.iterdir()):
             if not child.is_dir() or child.name.startswith(('_', '.')):
                 continue
-            if not (child / '__init__.py').exists():
+            # A non-package dir under the capability roots does not occur in a clean tree, so this guard stays uncovered.
+            if not (child / '__init__.py').exists():  # pragma: no cover
                 continue
             if child in _NAMESPACE_PACKAGES:
                 continue
