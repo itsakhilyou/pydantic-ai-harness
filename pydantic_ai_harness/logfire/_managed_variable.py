@@ -32,6 +32,20 @@ if TYPE_CHECKING:
 # parameter list. Subclasses always bind it explicitly, so the default is never actually used.
 ValueT = TypeVar('ValueT', default=object)
 
+
+def resolution_reason(resolved: ResolvedVariable[Any]) -> str | None:
+    """The reason a variable resolved the way it did (`'unrecognized_variable'`, `'code_default'`, ...).
+
+    Reads the public `reason` attribute where the logfire SDK exposes it, falling back to the private
+    `_reason` on older versions that predate it. Kept in one place so callers (and the demo) don't
+    each reimplement the compatibility shim.
+    """
+    reason = getattr(resolved, 'reason', None)
+    if reason is not None:
+        return reason
+    return getattr(resolved, '_reason', None)
+
+
 # Names of variables we have already attempted to auto-create in this process, guarded by a lock.
 # The contract is one attempt per process per name: we mark a name when spawning the creation thread
 # (not on success), so a failed create -- e.g. a read-only token -- does not retry on every run.
@@ -189,10 +203,9 @@ class ManagedVariableCapability(AbstractCapability[AgentDepsT], Generic[AgentDep
 
         `'unrecognized_variable'` means a provider is configured but doesn't know this name yet --
         the case auto-create is for. Reasons like `'no_provider'`/`'missing_config'` mean there's
-        no provider (or config) to create into, so they must not trigger. `ResolvedVariable` only
-        exposes the reason privately today (a known SDK gap we're flagging upstream).
+        no provider (or config) to create into, so they must not trigger.
         """
-        if self.auto_create and resolved._reason == 'unrecognized_variable':  # pyright: ignore[reportPrivateUsage]
+        if self.auto_create and resolution_reason(resolved) == 'unrecognized_variable':
             self._maybe_auto_create()
 
     def _resolve(self, ctx: RunContext[AgentDepsT]) -> ResolvedVariable[ValueT]:

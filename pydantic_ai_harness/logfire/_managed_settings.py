@@ -33,15 +33,33 @@ _AGENT_SETTINGS_VARIABLE_PREFIX = 'agent__'
 _FRAMEWORK_HAS_GET_MODEL = 'get_model' in vars(AbstractCapability)
 
 
-class ManagedModelSettings(BaseModel):
-    """The cross-framework subset of model settings that can be managed from Logfire.
+class ManagedSettingsValue(BaseModel):
+    """The value backing a [`ManagedSettings`][pydantic_ai_harness.logfire.ManagedSettings] capability.
 
-    Every field name matches a key in [`pydantic_ai.settings.ModelSettings`][pydantic_ai.settings.ModelSettings]
-    so the payload lowers to it with no translation. `extra='allow'` lets forward-compatible
-    canonical keys (added to `ModelSettings` in a newer pydantic-ai) flow through untouched.
+    The model and every model setting sit at the **top level** -- `model` alongside `temperature`,
+    `max_tokens`, and the rest -- so the JSON reads flat, e.g.
+    `{"model": "openai:gpt-5", "temperature": 0.4, "thinking": "high"}`. This matches how prompt- and
+    agent-config platforms conventionally shape a managed config, and it's the shape Logfire's
+    "agent settings" surface edits.
+
+    Every setting field name matches a key in
+    [`pydantic_ai.settings.ModelSettings`][pydantic_ai.settings.ModelSettings] so the payload lowers
+    to it with no translation. `extra='allow'` lets forward-compatible canonical keys (added to
+    `ModelSettings` in a newer pydantic-ai) flow through untouched. `model` is a first-class field,
+    not a setting -- pydantic-ai keeps the model id separate from `ModelSettings`, and `ModelSettings`
+    has no `model` key, so there's no collision putting them side by side.
+
+    An empty value (the default when nothing is configured in Logfire yet) leaves the agent's
+    code-defined model and settings untouched.
     """
 
-    model_config = ConfigDict(extra='allow')
+    # `model` collides with Pydantic's protected `model_` namespace; opt out so the field name can
+    # mirror the pydantic-ai model string exactly without a spurious warning. `extra='allow'` keeps
+    # forward-compatible `ModelSettings` keys flowing through as settings.
+    model_config = ConfigDict(protected_namespaces=(), extra='allow')
+
+    model: str | None = None
+    """A pydantic-ai model string (e.g. `'openai:gpt-5'`) to run with. `None` keeps the code model."""
 
     max_tokens: int | None = None
     temperature: float | None = None
@@ -61,35 +79,18 @@ class ManagedModelSettings(BaseModel):
     the canonical fields so a provider-specific value wins over its canonical counterpart."""
 
 
-class ManagedSettingsValue(BaseModel):
-    """The value backing a [`ManagedSettings`][pydantic_ai_harness.logfire.ManagedSettings] capability.
-
-    An empty value (the default when nothing is configured in Logfire yet) leaves the agent's
-    code-defined model and settings untouched.
-    """
-
-    # `model` collides with Pydantic's protected `model_` namespace; opt out so the field name
-    # can mirror the pydantic-ai model string exactly without a spurious warning.
-    model_config = ConfigDict(protected_namespaces=())
-
-    model: str | None = None
-    """A pydantic-ai model string (e.g. `'openai:gpt-5'`) to run with. `None` keeps the code model."""
-
-    settings: ManagedModelSettings | None = None
-    """Model settings to patch on top of the agent's code-defined settings. `None` changes nothing."""
-
-
-def _lower_settings(value: ManagedModelSettings) -> ModelSettings:
+def _lower_settings(value: ManagedSettingsValue) -> ModelSettings:
     """Lower a managed settings payload to a `pydantic_ai.settings.ModelSettings` dict.
 
-    Only fields that are actually set are included, so unset fields keep the agent's code-defined
+    `model` and `provider_options` are handled separately (they aren't `ModelSettings` keys), and
+    only fields that are actually set are included, so unset fields keep the agent's code-defined
     values once the result is merged. `provider_options[provider][key]` is flattened to the
     `<provider>_<key>` key and applied after the canonical fields, so a provider-specific value
     wins over its canonical counterpart (matching pydantic-ai's documented precedence).
     """
     # `ModelSettings` is a `TypedDict` with fixed keys, so build a plain dict for the dynamic
     # provider-prefixed keys and cast at the end.
-    settings: dict[str, Any] = value.model_dump(exclude_none=True, exclude={'provider_options'})
+    settings: dict[str, Any] = value.model_dump(exclude_none=True, exclude={'model', 'provider_options'})
 
     if value.provider_options:
         for provider, options in value.provider_options.items():
@@ -186,10 +187,10 @@ class ManagedSettings(ManagedVariableCapability[AgentDepsT, ManagedSettingsValue
 
         def model_settings(ctx: RunContext[AgentDepsT]) -> ModelSettings:
             resolved = self.resolved
-            if resolved is None or resolved.value.settings is None:
-                # No active run, or nothing managed -- contribute no settings.
+            if resolved is None:
+                # No active run -- contribute no settings.
                 return ModelSettings()
-            return _lower_settings(resolved.value.settings)
+            return _lower_settings(resolved.value)
 
         return model_settings
 

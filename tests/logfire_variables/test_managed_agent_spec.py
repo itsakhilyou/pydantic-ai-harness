@@ -34,6 +34,7 @@ from pydantic_ai_harness.logfire import ManagedAgent as ManagedAgentFromPackage
 from pydantic_ai_harness.logfire import ManagedAgentSpec as ManagedAgentSpecFromPackage
 from pydantic_ai_harness.logfire import _managed_agent_spec
 from pydantic_ai_harness.logfire._managed_agent_spec import _ResolvedAgentSpec
+from pydantic_ai_harness.logfire._managed_variable import resolution_reason
 
 from ._helpers import variables_provider
 
@@ -368,7 +369,7 @@ async def test_invalid_payload_falls_back_to_code(capfire: CaptureLogfire) -> No
     def respond(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
         seen['instructions'] = [m.instructions for m in messages if isinstance(m, ModelRequest) and m.instructions]
         resolved = capability.resolved
-        reasons.append(resolved._reason if resolved is not None else None)  # pyright: ignore[reportPrivateUsage]
+        reasons.append(resolution_reason(resolved) if resolved is not None else None)
         return ModelResponse(parts=[TextPart('from-function')])
 
     config = VariablesConfig(

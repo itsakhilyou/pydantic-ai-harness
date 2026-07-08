@@ -19,7 +19,10 @@ They share one contract: **the code-defined agent is the fallback.** Every manag
 patch on what's written in code -- unset fields keep their code values, and a missing, invalid,
 or unreachable remote value degrades to exactly the agent the developer wrote, never a crashed
 run. Values resolve **once per run** and the resolved label + version ride as baggage on every
-span of the run, so traces always show which version produced which behavior.
+span of the run, so traces always show which version produced which behavior. Each capability's
+`resolved` exposes the active run's `ResolvedVariable`; pass it to `resolution_reason` (exported
+from `pydantic_ai_harness.logfire`) to read *why* it resolved the way it did (e.g. a
+`'code_default'` fallback), across logfire SDK versions.
 
 **Auto-create on first use:** when the backing variable doesn't exist in Logfire yet, it is
 created in the background on first use -- from the code default, with the payload's JSON schema
@@ -320,25 +323,28 @@ agent = Agent(
 )
 ```
 
-The value patches the model and any of the canonical, cross-framework settings keys (they match
-`pydantic_ai.settings.ModelSettings`), with a nested `provider_options` escape hatch for
-provider-specific settings (`provider_options.openai.reasoning_effort` lowers to the
-`openai_reasoning_effort` model setting, and a provider-specific value wins over its canonical
-counterpart):
+The `model` and every setting sit at the **top level** -- `model` alongside `temperature`,
+`max_tokens`, and the rest -- so the JSON reads flat. The setting keys are the canonical,
+cross-framework ones (they match `pydantic_ai.settings.ModelSettings`), with a nested
+`provider_options` escape hatch for provider-specific settings
+(`provider_options.openai.reasoning_effort` lowers to the `openai_reasoning_effort` model setting,
+and a provider-specific value wins over its canonical counterpart):
 
 ```json
 {
   "model": "openai:gpt-5",
-  "settings": {
-    "temperature": 0.4,
-    "max_tokens": 2048,
-    "thinking": "high",
-    "provider_options": {
-      "anthropic": {"thinking": {"type": "enabled", "budget_tokens": 16384}}
-    }
+  "temperature": 0.4,
+  "max_tokens": 2048,
+  "thinking": "high",
+  "provider_options": {
+    "anthropic": {"thinking": {"type": "enabled", "budget_tokens": 16384}}
   }
 }
 ```
+
+`model` is a first-class field, not a setting: pydantic-ai keeps the model id separate from
+`ModelSettings` (which has no `model` key), so there's no collision putting it alongside the
+settings, and it's excluded when the payload is lowered to `ModelSettings`.
 
 ### Notes
 

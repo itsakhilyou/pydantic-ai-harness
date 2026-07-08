@@ -21,11 +21,11 @@ from pydantic_ai.profiles import ModelProfile
 from pydantic_ai.settings import ModelSettings
 
 from pydantic_ai_harness.logfire._managed_settings import (
-    ManagedModelSettings,
     ManagedSettings,
     ManagedSettingsValue,
     _lower_settings,
 )
+from pydantic_ai_harness.logfire._managed_variable import resolution_reason
 
 from ._helpers import variables_provider
 
@@ -46,7 +46,11 @@ def capture_settings(seen: list[ModelSettings | None]) -> FunctionModel:
 
 
 def test_lower_settings_all_canonical_fields() -> None:
-    value = ManagedModelSettings(
+    # `model` sits alongside the settings in the flat payload but is not a `ModelSettings` key, so
+    # it (and `provider_options`) are excluded from the lowered settings; the canonical fields pass
+    # through unchanged.
+    value = ManagedSettingsValue(
+        model='openai:gpt-5',
         max_tokens=2048,
         temperature=0.4,
         top_p=0.9,
@@ -79,29 +83,30 @@ def test_lower_settings_all_canonical_fields() -> None:
 
 def test_lower_settings_omits_unset_fields() -> None:
     # Only fields that are actually set land in the dict, so a merge keeps code values elsewhere.
-    assert _lower_settings(ManagedModelSettings(temperature=0.5)) == {'temperature': 0.5}
+    assert _lower_settings(ManagedSettingsValue(temperature=0.5)) == {'temperature': 0.5}
 
 
 @pytest.mark.parametrize('thinking', [True, False, 'minimal', 'high'])
 def test_lower_settings_thinking_scalar_union(thinking: Any) -> None:
     # The scalar union round-trips verbatim, including the `False` case (not dropped as "unset").
-    assert _lower_settings(ManagedModelSettings(thinking=thinking)) == {'thinking': thinking}
+    assert _lower_settings(ManagedSettingsValue(thinking=thinking)) == {'thinking': thinking}
 
 
 def test_lower_settings_extra_canonical_key_passthrough() -> None:
-    # A forward-compatible canonical key (unknown to this pydantic-ai version) flows through.
-    value = ManagedModelSettings.model_validate({'temperature': 0.3, 'future_setting': 'x'})
-    assert _lower_settings(value) == {'temperature': 0.3, 'future_setting': 'x'}
+    # A forward-compatible canonical key (unknown to this pydantic-ai version) flows through via
+    # `extra='allow'`.
+    value = ManagedSettingsValue.model_validate({'temperature': 0.3, 'some_future_key': 1})
+    assert _lower_settings(value) == {'temperature': 0.3, 'some_future_key': 1}
 
 
 def test_lower_settings_provider_options_flattened() -> None:
-    value = ManagedModelSettings(provider_options={'openai': {'reasoning_effort': 'high'}})
+    value = ManagedSettingsValue(provider_options={'openai': {'reasoning_effort': 'high'}})
     assert _lower_settings(value) == {'openai_reasoning_effort': 'high'}
 
 
 def test_lower_settings_provider_option_beats_canonical() -> None:
     # Provider-specific options are applied after canonical/extra keys, so they win on collision.
-    value = ManagedModelSettings.model_validate(
+    value = ManagedSettingsValue.model_validate(
         {'openai_reasoning_effort': 'low', 'provider_options': {'openai': {'reasoning_effort': 'high'}}}
     )
     assert _lower_settings(value) == {'openai_reasoning_effort': 'high'}
@@ -168,7 +173,7 @@ async def test_settings_patch_overrides_and_keeps_unset() -> None:
         capabilities=[capability],
     )
 
-    with capability._variable.override(ManagedSettingsValue(settings=ManagedModelSettings(temperature=0.7))):
+    with capability._variable.override(ManagedSettingsValue(temperature=0.7)):
         await agent.run('hello')
 
     # Managed `temperature` wins over the agent default; `top_p` is unset in the managed value
@@ -181,7 +186,7 @@ async def test_run_settings_win_over_managed() -> None:
     capability = ManagedSettings('run_wins')
     agent = Agent(capture_settings(seen), capabilities=[capability])
 
-    with capability._variable.override(ManagedSettingsValue(settings=ManagedModelSettings(temperature=0.7))):
+    with capability._variable.override(ManagedSettingsValue(temperature=0.7)):
         await agent.run('hello', model_settings=ModelSettings(temperature=0.1))
 
     # Run-level `model_settings=` is merged last, so it beats the managed value.
@@ -193,9 +198,7 @@ async def test_provider_options_reach_model_settings() -> None:
     capability = ManagedSettings('provider_opts')
     agent = Agent(capture_settings(seen), capabilities=[capability])
 
-    value = ManagedSettingsValue(
-        settings=ManagedModelSettings(provider_options={'openai': {'reasoning_effort': 'high'}})
-    )
+    value = ManagedSettingsValue(provider_options={'openai': {'reasoning_effort': 'high'}})
     with capability._variable.override(value):
         await agent.run('hello')
 
@@ -218,7 +221,7 @@ async def test_thinking_scalar_union_round_trips(thinking: Any) -> None:
         capabilities=[capability],
     )
 
-    with capability._variable.override(ManagedSettingsValue(settings=ManagedModelSettings(thinking=thinking))):
+    with capability._variable.override(ManagedSettingsValue(thinking=thinking)):
         await agent.run('hello')
 
     assert seen == [thinking]
@@ -373,18 +376,14 @@ async def test_invalid_remote_value_falls_back_to_code(capfire: CaptureLogfire) 
     def respond(_messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
         seen.append(info.model_settings)
         resolved = capability.resolved
-        reasons.append(resolved._reason if resolved is not None else None)  # pyright: ignore[reportPrivateUsage]
+        reasons.append(resolution_reason(resolved) if resolved is not None else None)
         return ModelResponse(parts=[TextPart('from-function')])
 
     config = VariablesConfig(
         variables={
             'agent__invalid_remote': VariableConfig(
                 name='agent__invalid_remote',
-                labels={
-                    'production': LabeledValue(
-                        version=1, serialized_value='{"settings": {"temperature": "not-a-number"}}'
-                    )
-                },
+                labels={'production': LabeledValue(version=1, serialized_value='{"temperature": "not-a-number"}')},
                 rollout=Rollout(labels={'production': 1.0}),
                 overrides=[],
             )
