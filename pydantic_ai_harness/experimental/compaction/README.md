@@ -202,6 +202,85 @@ harness-specific. Token counts use the strategy's `tokenizer` when set, otherwis
 ~4-chars-per-token heuristic.
 Raw message content is not recorded.
 
+## Compaction receipts
+
+Compaction is a memory wipe the model cannot veto and often cannot detect, which invites
+*resumption drift* -- the model confabulates continuity with history it no longer has. A
+receipt makes the wipe legible: after a boundary-crossing strategy rewrites history it can
+append a short, deterministic note recording how much was compacted, warning that what
+survives is secondhand, and -- when a transcript store is attached -- a handle to the full
+pre-compaction transcript.
+
+```python
+SummarizingCompaction(max_messages=60, keep_messages=20, receipts=True)
+SlidingWindow(max_messages=80, keep_messages=40, receipts=True)
+```
+
+- **Deterministic by construction.** The receipt carries no timestamp; its bytes are a pure
+  function of the compaction, so it is safe to assert on and does not churn the cache.
+- **Honest wording.** `SummarizingCompaction` leaves a summary, so its receipt says the summary
+  above is secondhand; `SlidingWindow` drops history outright, so its receipt says that context
+  is gone. The blank-in-place strategies (`ClearToolResults`, `DeduplicateFileReads`,
+  `ClampOversizedMessages`) keep every message and cross no boundary, so they emit no receipt.
+- **Transcript handle.** Attach any capability exposing `compaction_transcript_handle() -> str | None`
+  (the `TranscriptStore` protocol) and the receipt gains a `Full transcript: <handle>` pointer.
+  `StepPersistence` implements it (returning its `run_id`), so attaching it is enough.
+- **Observability.** Each receipt is also emitted as a `compaction.receipt` event on the
+  `compact_messages` span.
+
+> The receipt *text* is content, so it is opt-in (`receipts=False` by default) and its exact
+> wording is provisional pending the benchmark eval-rig pass; the mechanism is structural.
+
+## Pinning: content that survives compaction
+
+Mark content that every shipped strategy must preserve verbatim with `pin`:
+
+```python
+from pydantic_ai_harness.experimental.compaction import pin
+
+# In a ModelRequest placed in the run's message history (by a capability or the user):
+pinned = pin('Durable task state the model must never lose across compaction.')
+```
+
+A pinned part is never summarized away or dropped; if a strategy would have discarded it, the
+strategy re-injects it verbatim near the top of the surviving history. This is the least
+invasive marking available today: message-part types share no universal `metadata` field (only
+`ToolReturnPart` has one), so pins use a sentinel-in-content envelope -- the same shape the
+existing warning/summary markers use. **Core gap:** if pydantic-ai core later grows a
+part-level `metadata`/`pinned` seam, the marker should migrate onto it.
+
+`Planning` does **not** need pinning: its plan is re-injected ephemerally every request in
+`wrap_model_request`, so it already survives compaction by construction. Pinning is for durable
+task state and scratchpads that live *in* the history.
+
+## Keeping user messages verbatim (`keep_user_messages`)
+
+User turns are the highest signal-per-token content in a conversation, and losing them is the
+main driver of resumption drift. `SummarizingCompaction(keep_user_messages=True)` preserves
+every prior user message verbatim alongside the summary, each truncated to
+`keep_user_messages_max_chars` (default 20k) with an explicit truncation marker. This supersedes
+`preserve_first_user_message` (which keeps only the first).
+
+```python
+SummarizingCompaction(max_tokens=120_000, keep_messages=20, keep_user_messages=True)
+```
+
+## Anchored incremental summarization and the cross-model bridge
+
+With `incremental=True` (the default), a prior summary is not re-summarized (which decays over
+successive compactions). It is fed back as an anchored `<previous-summary>` block with an
+*update* instruction -- preserve still-true details, remove stale ones, merge in new facts --
+so the summary is a living document updated in place under a fixed structure.
+
+`bridge_prefix=True` (default) prepends a one-line note to the summary **only** when the
+summarizer's model family differs from the family that produced the history (derived from the
+history's `model_name` and the summarizer config), marking the summary as a cross-model
+handoff so the resuming model builds on it rather than confabulating that it did the work
+itself. It never fires in the common same-model case, so it is cheap.
+
+> The update instruction and bridge-prefix wording are content, shipped minimal/neutral and
+> flagged pending the eval-rig pass; the anchoring and family-gating mechanisms are structural.
+
 ## Out of scope
 
 These strategies compress or drop context *inside* the window. Moving large tool outputs *out* of the

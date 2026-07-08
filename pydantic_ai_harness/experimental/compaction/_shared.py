@@ -26,6 +26,13 @@ from pydantic_ai.messages import (
 )
 from pydantic_ai.tools import RunContext
 
+from pydantic_ai_harness.experimental.compaction._receipts import (
+    RECEIPT_EVENT_NAME,
+    drain_receipts,
+    open_receipt_scope,
+    reset_receipt_scope,
+)
+
 # ---------------------------------------------------------------------------
 # Token estimation
 # ---------------------------------------------------------------------------
@@ -153,7 +160,12 @@ async def compact_with_span(
         tokenizer: Optional tokenizer for the `compaction.tokens_*` estimates. When `None`,
             uses the same ~4 characters-per-token heuristic as `estimate_token_count`.
     """
-    compacted = await compact()
+    token = open_receipt_scope()
+    try:
+        compacted = await compact()
+        receipts = drain_receipts()
+    finally:
+        reset_receipt_scope(token)
     if not _history_changed(messages, compacted):
         return messages
     with ctx.tracer.start_as_current_span(_SPAN_NAME) as span:
@@ -169,6 +181,16 @@ async def compact_with_span(
                     'compaction.tokens_after': estimate_token_count(compacted, tokenizer),
                 }
             )
+            for receipt in receipts:
+                attributes = {
+                    'compaction.strategy': receipt.strategy,
+                    'compaction.receipt.messages': receipt.dropped_messages,
+                    'compaction.receipt.tokens': receipt.dropped_tokens,
+                    'compaction.receipt.by': receipt.by,
+                }
+                if receipt.handle is not None:
+                    attributes['compaction.receipt.handle'] = receipt.handle
+                span.add_event(RECEIPT_EVENT_NAME, attributes)
     return compacted
 
 

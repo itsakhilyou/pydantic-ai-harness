@@ -1256,7 +1256,7 @@ class TestIncrementalSummarization:
         # Verify the summarization prompt included the previous summary.
         call_args = mock_agent_instance.run.call_args
         prompt_text = call_args[0][0]
-        assert '<previous_summary>' in prompt_text
+        assert '<previous-summary>' in prompt_text
         assert 'Previous context here.' in prompt_text
 
     @pytest.mark.anyio
@@ -1290,7 +1290,7 @@ class TestIncrementalSummarization:
 
         call_args = mock_agent_instance.run.call_args
         prompt_text = call_args[0][0]
-        assert '<previous_summary>' not in prompt_text
+        assert '<previous-summary>' not in prompt_text
 
     @pytest.mark.anyio
     async def test_incremental_disabled(self):
@@ -1324,7 +1324,7 @@ class TestIncrementalSummarization:
 
         call_args = mock_agent_instance.run.call_args
         prompt_text = call_args[0][0]
-        assert '<previous_summary>' not in prompt_text
+        assert '<previous-summary>' not in prompt_text
 
     @pytest.mark.anyio
     async def test_incremental_output_contains_summary(self):
@@ -2390,3 +2390,570 @@ class TestCompactWithSpan:
         )
         assert result is after
         assert called is False
+
+
+# ---------------------------------------------------------------------------
+# Pin contract (survives_compaction)
+# ---------------------------------------------------------------------------
+
+from pydantic_ai_harness.experimental.compaction import format_receipt, is_pinned, pin  # noqa: E402
+from pydantic_ai_harness.experimental.compaction._pinning import (  # noqa: E402
+    _leading_context_len,
+    collect_pinned,
+    reinject_pinned,
+)
+from pydantic_ai_harness.experimental.compaction._receipts import (  # noqa: E402
+    ReceiptInfo,
+    TranscriptStore,
+    discover_transcript_handle,
+    is_receipt_part,
+    make_receipt_part,
+    record_receipt,
+)
+from pydantic_ai_harness.experimental.compaction._summarizing_compaction import (  # noqa: E402
+    _BRIDGE_PREFIX,
+    _INCREMENTAL_UPDATE_INSTRUCTION,
+    _history_model_name,
+    _model_family,
+    _model_name,
+)
+
+
+def _pinned_msg(text: str) -> ModelRequest:
+    return ModelRequest(parts=[pin(text)])
+
+
+def _receipt_parts(messages: list[ModelMessage]) -> list[str]:
+    out: list[str] = []
+    for m in messages:
+        if isinstance(m, ModelRequest):
+            for p in m.parts:
+                if is_receipt_part(p):
+                    assert isinstance(p, UserPromptPart) and isinstance(p.content, str)
+                    out.append(p.content)
+    return out
+
+
+class TestPinning:
+    def test_pin_wraps_and_is_detected(self):
+        part = pin('keep me')
+        assert isinstance(part, UserPromptPart)
+        assert 'keep me' in part.content
+        assert is_pinned(part)
+
+    def test_is_pinned_system_part(self):
+        assert is_pinned(SystemPromptPart(content='<pinned>\nx\n</pinned>'))
+
+    def test_is_pinned_false_cases(self):
+        assert not is_pinned(UserPromptPart(content='plain'))
+        assert not is_pinned(UserPromptPart(content=['list', 'content']))
+        assert not is_pinned(TextPart(content='<pinned>'))
+
+    def test_collect_pinned(self):
+        msgs: list[ModelMessage] = [_pinned_msg('a'), _user('b'), _assistant('c'), _pinned_msg('d')]
+        collected = collect_pinned(msgs)
+        assert len(collected) == 2
+
+    def test_leading_context_len(self):
+        msgs: list[ModelMessage] = [
+            ModelRequest(parts=[SystemPromptPart(content='sys')]),
+            ModelRequest(parts=[SystemPromptPart(content='summary')]),
+            _user('conversation'),
+        ]
+        assert _leading_context_len(msgs) == 2
+        assert _leading_context_len([_user('a')]) == 0
+        # A run of only system-only requests: the loop completes without breaking.
+        all_system: list[ModelMessage] = [
+            ModelRequest(parts=[SystemPromptPart(content='s1')]),
+            ModelRequest(parts=[SystemPromptPart(content='s2')]),
+        ]
+        assert _leading_context_len(all_system) == 2
+
+    def test_reinject_no_pins_passthrough(self):
+        compacted: list[ModelMessage] = [_user('a')]
+        assert reinject_pinned([_user('orig')], compacted) is compacted
+
+    def test_reinject_all_surviving_passthrough(self):
+        pinned = _pinned_msg('keep')
+        original: list[ModelMessage] = [pinned, _user('x')]
+        compacted: list[ModelMessage] = [pinned]
+        assert reinject_pinned(original, compacted) is compacted
+
+    def test_reinject_missing_pin_reinserted_after_system(self):
+        pinned = _pinned_msg('keep me across compaction')
+        original: list[ModelMessage] = [_user('old'), pinned, _assistant('a'), _user('recent')]
+        compacted: list[ModelMessage] = [
+            ModelRequest(parts=[SystemPromptPart(content='summary')]),
+            _user('recent'),
+        ]
+        result = reinject_pinned(original, compacted)
+        # Pin re-injected right after the leading summary message.
+        assert isinstance(result[1], ModelRequest)
+        assert is_pinned(result[1].parts[0])
+
+
+# ---------------------------------------------------------------------------
+# Receipts -- formatting, handle discovery, span plumbing
+# ---------------------------------------------------------------------------
+
+
+class _FakeTranscriptStore:
+    def __init__(self, handle: str | None) -> None:
+        self._handle = handle
+
+    def compaction_transcript_handle(self) -> str | None:
+        return self._handle
+
+
+class _NotAStore:
+    pass
+
+
+class TestReceiptFormatting:
+    def test_summary_with_handle(self):
+        text = format_receipt(dropped_messages=12, dropped_tokens=3400, by='claude', handle='run-abc')
+        assert text == (
+            '[History before this point (12 messages, ~3400 tokens) was summarized by claude. '
+            'The summary above is secondhand; re-verify critical facts against primary sources. '
+            'Full transcript: run-abc.]'
+        )
+
+    def test_summary_without_handle(self):
+        text = format_receipt(dropped_messages=1, dropped_tokens=2, by='the harness', handle=None)
+        assert 'Full transcript' not in text
+        assert text.endswith('primary sources.]')
+
+    def test_drop_variant(self):
+        text = format_receipt(dropped_messages=5, dropped_tokens=9, by='the harness', handle=None, has_summary=False)
+        assert 'was dropped by the harness' in text
+        assert 'no longer in the window' in text
+
+    def test_make_and_detect_receipt_part(self):
+        part = make_receipt_part(format_receipt(dropped_messages=1, dropped_tokens=1, by='x', handle=None))
+        assert is_receipt_part(part)
+        assert not is_receipt_part(UserPromptPart(content='not a receipt'))
+        assert not is_receipt_part(TextPart(content='[History before this point ...'))
+
+
+class TestTranscriptHandleDiscovery:
+    def test_no_capabilities_attr(self):
+        assert discover_transcript_handle(_make_ctx()) is None
+
+    def test_empty_capabilities(self):
+        ctx = _make_ctx()
+        ctx.capabilities = {}
+        assert discover_transcript_handle(ctx) is None
+
+    def test_capability_without_method_skipped(self):
+        ctx = _make_ctx()
+        ctx.capabilities = {'x': _NotAStore()}
+        assert discover_transcript_handle(ctx) is None
+
+    def test_capability_returning_none_continues(self):
+        ctx = _make_ctx()
+        ctx.capabilities = {'a': _FakeTranscriptStore(None), 'b': _FakeTranscriptStore('found')}
+        assert discover_transcript_handle(ctx) == 'found'
+
+    def test_isinstance_protocol(self):
+        assert isinstance(_FakeTranscriptStore('h'), TranscriptStore)
+        assert not isinstance(_NotAStore(), TranscriptStore)
+
+
+class TestReceiptRecording:
+    def test_record_receipt_no_scope_is_noop(self):
+        # Called outside an open receipt scope: silently drops, no error.
+        record_receipt(ReceiptInfo('S', 1, 1, 'x', None))
+
+
+# ---------------------------------------------------------------------------
+# SummarizingCompaction receipts
+# ---------------------------------------------------------------------------
+
+
+def _patched_summary_agent(output: str) -> Any:
+    mock_result = AsyncMock()
+    mock_result.output = output
+    mock_agent_instance = AsyncMock()
+    mock_agent_instance.run.return_value = mock_result
+    return mock_agent_instance
+
+
+class TestSummarizingReceipts:
+    @pytest.mark.anyio
+    async def test_receipt_present_and_after_summary(self):
+        comp = SummarizingCompaction(
+            model='openai:gpt-4o-mini',
+            max_messages=3,
+            keep_messages=1,
+            receipts=True,
+            bridge_prefix=False,
+            preserve_first_user_message=False,
+        )
+        messages: list[ModelMessage] = [_user('a'), _assistant('b'), _user('c'), _assistant('d')]
+        rc = _make_request_context(messages)
+        ctx = _make_ctx()
+        with patch('pydantic_ai.Agent', return_value=_patched_summary_agent('SUMMARY')):
+            result = await comp.before_model_request(ctx, rc)
+        receipts = _receipt_parts(result.messages)
+        assert len(receipts) == 1
+        assert 'was summarized by gpt' in receipts[0]
+        assert 'Full transcript' not in receipts[0]
+
+    @pytest.mark.anyio
+    async def test_receipt_is_byte_deterministic(self):
+        def _run() -> str:
+            return 'SUMMARY'
+
+        async def _once() -> str:
+            comp = SummarizingCompaction(
+                model='openai:gpt-4o-mini',
+                max_messages=3,
+                keep_messages=1,
+                receipts=True,
+                bridge_prefix=False,
+                preserve_first_user_message=False,
+            )
+            messages: list[ModelMessage] = [_user('a'), _assistant('b'), _user('c'), _assistant('d')]
+            rc = _make_request_context(messages)
+            with patch('pydantic_ai.Agent', return_value=_patched_summary_agent(_run())):
+                result = await comp.before_model_request(_make_ctx(), rc)
+            return _receipt_parts(result.messages)[0]
+
+        first = await _once()
+        second = await _once()
+        assert first == second
+        assert first.encode('utf-8') == second.encode('utf-8')
+
+    @pytest.mark.anyio
+    async def test_receipt_handle_when_transcript_store_attached(self):
+        comp = SummarizingCompaction(
+            model='openai:gpt-4o-mini',
+            max_messages=3,
+            keep_messages=1,
+            receipts=True,
+            bridge_prefix=False,
+            preserve_first_user_message=False,
+        )
+        messages: list[ModelMessage] = [_user('a'), _assistant('b'), _user('c'), _assistant('d')]
+        rc = _make_request_context(messages)
+        ctx = _make_ctx()
+        ctx.capabilities = {'sp': _FakeTranscriptStore('librarian-42')}
+        with patch('pydantic_ai.Agent', return_value=_patched_summary_agent('SUMMARY')):
+            result = await comp.before_model_request(ctx, rc)
+        assert 'Full transcript: librarian-42.' in _receipt_parts(result.messages)[0]
+
+    @pytest.mark.anyio
+    async def test_receipts_do_not_accumulate(self):
+        comp = SummarizingCompaction(
+            model='openai:gpt-4o-mini',
+            max_messages=3,
+            keep_messages=2,
+            receipts=True,
+            bridge_prefix=False,
+            preserve_first_user_message=False,
+        )
+        messages: list[ModelMessage] = [_user('a'), _assistant('b'), _user('c'), _assistant('d')]
+        with patch('pydantic_ai.Agent', return_value=_patched_summary_agent('S1')):
+            first = await comp.compact(messages, _make_ctx())
+        # Feed the compacted history back through another compaction.
+        extended = [*first, _user('e'), _assistant('f')]
+        with patch('pydantic_ai.Agent', return_value=_patched_summary_agent('S2')):
+            second = await comp.compact(extended, _make_ctx())
+        assert len(_receipt_parts(second)) == 1
+
+
+class TestSlidingWindowReceipts:
+    @pytest.mark.anyio
+    async def test_receipt_prepended_with_drop_wording(self):
+        sw = SlidingWindow(max_messages=3, keep_messages=1, receipts=True, preserve_first_user_message=False)
+        messages: list[ModelMessage] = [_user('a'), _assistant('b'), _user('c'), _assistant('d')]
+        rc = _make_request_context(messages)
+        result = await sw.before_model_request(_make_ctx(), rc)
+        first = result.messages[0]
+        assert isinstance(first, ModelRequest)
+        receipt = first.parts[0]
+        assert is_receipt_part(receipt)
+        assert isinstance(receipt, UserPromptPart)
+        assert isinstance(receipt.content, str)
+        assert 'was dropped by the harness' in receipt.content
+
+
+@pytest.mark.skipif(not logfire_installed, reason='logfire not installed')
+class TestReceiptSpanEvent:
+    @pytest.fixture
+    def anyio_backend(self) -> str:
+        return 'asyncio'
+
+    @pytest.mark.anyio
+    async def test_sliding_window_emits_receipt_event(self, capfire: CaptureLogfire) -> None:
+        sw = SlidingWindow(max_messages=3, keep_messages=1, receipts=True, preserve_first_user_message=False)
+        messages: list[ModelMessage] = [_user('a'), _assistant('b'), _user('c'), _assistant('d')]
+        await sw.before_model_request(_make_ctx_with_tracer(), _make_request_context(messages))
+        spans = _compact_spans(capfire)
+        assert len(spans) == 1
+        events: list[dict[str, Any]] = spans[0].get('events') or []
+        receipt_events = [e for e in events if e['name'] == 'compaction.receipt']
+        assert len(receipt_events) == 1
+        attrs = receipt_events[0]['attributes']
+        assert attrs['compaction.strategy'] == 'SlidingWindow'
+        assert attrs['compaction.receipt.by'] == 'the harness'
+        assert 'compaction.receipt.handle' not in attrs
+
+    @pytest.mark.anyio
+    async def test_receipt_event_carries_handle(self, capfire: CaptureLogfire) -> None:
+        sw = SlidingWindow(max_messages=3, keep_messages=1, receipts=True, preserve_first_user_message=False)
+        ctx = _make_ctx_with_tracer()
+        ctx.capabilities = {'sp': _FakeTranscriptStore('run-77')}
+        messages: list[ModelMessage] = [_user('a'), _assistant('b'), _user('c'), _assistant('d')]
+        await sw.before_model_request(ctx, _make_request_context(messages))
+        events: list[dict[str, Any]] = _compact_spans(capfire)[0].get('events') or []
+        receipt_events = [e for e in events if e['name'] == 'compaction.receipt']
+        assert receipt_events[0]['attributes']['compaction.receipt.handle'] == 'run-77'
+
+
+# ---------------------------------------------------------------------------
+# keep_user_messages
+# ---------------------------------------------------------------------------
+
+
+class TestKeepUserMessages:
+    def test_validation_bad_max_chars(self):
+        with pytest.raises(ValueError, match='keep_user_messages_max_chars must be positive'):
+            SummarizingCompaction(model='test', max_messages=10, keep_user_messages_max_chars=0)
+
+    @pytest.mark.anyio
+    async def test_all_user_messages_preserved_and_truncated(self):
+        comp = SummarizingCompaction(
+            model='test:m',
+            max_messages=3,
+            keep_messages=1,
+            keep_user_messages=True,
+            keep_user_messages_max_chars=10,
+            bridge_prefix=False,
+        )
+        long_text = 'x' * 40
+        messages: list[ModelMessage] = [
+            _user('short one'),
+            _assistant('a'),
+            _user(long_text),
+            _assistant('b'),
+            _user('recent'),
+        ]
+        rc = _make_request_context(messages)
+        with patch('pydantic_ai.Agent', return_value=_patched_summary_agent('SUMMARY')):
+            result = await comp.before_model_request(_make_ctx(), rc)
+        kept = _user_texts(result.messages)
+        assert any('short one' in t for t in kept)
+        assert any('[truncated: showing first' in t for t in kept)
+
+    @pytest.mark.anyio
+    async def test_keeps_non_string_user_content_and_skips_non_user(self):
+        from pydantic_ai.messages import TextContent
+
+        comp = SummarizingCompaction(
+            model='test:m',
+            max_messages=2,
+            keep_messages=1,
+            keep_user_messages=True,
+            bridge_prefix=False,
+        )
+        to_summarize: list[ModelMessage] = [
+            _assistant('an assistant turn is skipped'),
+            ModelRequest(parts=[SystemPromptPart(content='no user here')]),
+            ModelRequest(parts=[UserPromptPart(content=[TextContent(content='multimodal')])]),
+        ]
+        kept = comp._kept_user_messages(to_summarize)
+        # Only the one message carrying a user part survives; its list content is untouched.
+        assert len(kept) == 1
+        assert isinstance(kept[0], ModelRequest)
+        assert isinstance(kept[0].parts[0], UserPromptPart)
+
+
+# ---------------------------------------------------------------------------
+# Anchored incremental summarization (opencode mechanism)
+# ---------------------------------------------------------------------------
+
+
+class TestAnchoredIncremental:
+    @pytest.fixture
+    def anyio_backend(self) -> str:
+        # A real FunctionModel run only needs asyncio; trio hits a core event-loop quirk
+        # unrelated to compaction (same reason as TestCompactionSpan).
+        return 'asyncio'
+
+    @pytest.mark.anyio
+    async def test_previous_summary_fed_as_anchor_with_update_instruction(self):
+        from pydantic_ai.messages import ModelResponse as _MR
+        from pydantic_ai.messages import TextPart as _TP
+        from pydantic_ai.models.function import AgentInfo, FunctionModel
+
+        captured: list[str] = []
+
+        def summarize_fn(messages: list[ModelMessage], _info: AgentInfo) -> _MR:
+            captured.extend(_user_texts(messages))
+            return _MR(parts=[_TP(content='UPDATED SUMMARY')])
+
+        comp = SummarizingCompaction(
+            model=FunctionModel(summarize_fn),
+            max_messages=3,
+            keep_messages=1,
+            incremental=True,
+            bridge_prefix=False,
+            preserve_first_user_message=False,
+        )
+        messages: list[ModelMessage] = [
+            ModelRequest(parts=[SystemPromptPart(content=f'{_SUMMARY_PREFIX}Anchored prior summary.')]),
+            _user('new work 1'),
+            _assistant('r1'),
+            _user('new work 2'),
+            _assistant('r2'),
+        ]
+        rc = _make_request_context(messages)
+        result = await comp.before_model_request(_make_ctx(), rc)
+        prompt = '\n'.join(captured)
+        assert _INCREMENTAL_UPDATE_INSTRUCTION in prompt
+        assert '<previous-summary>' in prompt
+        assert 'Anchored prior summary.' in prompt
+        # The updated anchor lands in the new summary message.
+        first = result.messages[0]
+        assert isinstance(first, ModelRequest)
+        assert any('UPDATED SUMMARY' in p.content for p in first.parts if isinstance(p, SystemPromptPart))
+
+
+# ---------------------------------------------------------------------------
+# Cross-model bridge prefix
+# ---------------------------------------------------------------------------
+
+
+class TestBridgePrefix:
+    def test_model_helpers(self):
+        assert _model_name(None) is None
+        assert _model_name('openai:gpt-4o') == 'openai:gpt-4o'
+        assert _model_family('openai:gpt-4o-mini') == 'gpt'
+        assert _model_family('anthropic:claude-sonnet-4') == 'claude'
+        assert _model_family(None) is None
+        assert _model_family('') is None
+
+    def test_history_model_name(self):
+        msgs: list[ModelMessage] = [
+            ModelResponse(parts=[TextPart(content='x')], model_name='anthropic:claude-sonnet'),
+            _user('later'),
+        ]
+        assert _history_model_name(msgs) == 'anthropic:claude-sonnet'
+        assert _history_model_name([_user('none')]) is None
+
+    async def _compact_with(self, *, bridge_prefix: bool, run_model: str, summarizer: str) -> str:
+        comp = SummarizingCompaction(
+            model=summarizer,
+            max_messages=3,
+            keep_messages=1,
+            bridge_prefix=bridge_prefix,
+            preserve_first_user_message=False,
+        )
+        messages: list[ModelMessage] = [
+            _user('a'),
+            ModelResponse(parts=[TextPart(content='b')], model_name=run_model),
+            _user('c'),
+            ModelResponse(parts=[TextPart(content='d')], model_name=run_model),
+        ]
+        rc = _make_request_context(messages)
+        with patch('pydantic_ai.Agent', return_value=_patched_summary_agent('BASE')):
+            result = await comp.before_model_request(_make_ctx(), rc)
+        first = result.messages[0]
+        assert isinstance(first, ModelRequest)
+        return next(
+            p.content for p in first.parts if isinstance(p, SystemPromptPart) and p.content.startswith(_SUMMARY_PREFIX)
+        )
+
+    @pytest.mark.anyio
+    async def test_prefix_added_on_family_mismatch(self):
+        summary = await self._compact_with(
+            bridge_prefix=True, run_model='anthropic:claude-sonnet', summarizer='openai:gpt-4o-mini'
+        )
+        assert _BRIDGE_PREFIX in summary
+
+    @pytest.mark.anyio
+    async def test_no_prefix_same_family(self):
+        summary = await self._compact_with(
+            bridge_prefix=True, run_model='openai:gpt-4o', summarizer='openai:gpt-4o-mini'
+        )
+        assert _BRIDGE_PREFIX not in summary
+
+    @pytest.mark.anyio
+    async def test_no_prefix_when_disabled(self):
+        summary = await self._compact_with(
+            bridge_prefix=False, run_model='anthropic:claude-sonnet', summarizer='openai:gpt-4o-mini'
+        )
+        assert _BRIDGE_PREFIX not in summary
+
+
+# ---------------------------------------------------------------------------
+# Pins survive every shipped strategy
+# ---------------------------------------------------------------------------
+
+
+class TestPinsSurviveStrategies:
+    @pytest.mark.anyio
+    async def test_sliding_window(self):
+        sw = SlidingWindow(max_messages=3, keep_messages=1, preserve_first_user_message=False)
+        messages: list[ModelMessage] = [_pinned_msg('PINNED STATE'), _assistant('a'), _user('b'), _assistant('c')]
+        result = await sw.compact(messages, _make_ctx())
+        assert any(is_pinned(p) for m in result if isinstance(m, ModelRequest) for p in m.parts)
+
+    @pytest.mark.anyio
+    async def test_summarizing(self):
+        comp = SummarizingCompaction(
+            model='test:m', max_messages=3, keep_messages=1, bridge_prefix=False, preserve_first_user_message=False
+        )
+        messages: list[ModelMessage] = [_pinned_msg('PINNED STATE'), _assistant('a'), _user('b'), _assistant('c')]
+        with patch('pydantic_ai.Agent', return_value=_patched_summary_agent('S')):
+            result = await comp.compact(messages, _make_ctx())
+        assert any(is_pinned(p) for m in result if isinstance(m, ModelRequest) for p in m.parts)
+
+    @pytest.mark.anyio
+    async def test_clear_tool_results(self):
+        ctr = ClearToolResults(max_tokens=1, keep_pairs=0)
+        messages: list[ModelMessage] = [_pinned_msg('PINNED STATE'), *_pair('fn', 'c1', 'big result')]
+        result = await ctr.compact(messages, _make_ctx())
+        assert any(is_pinned(p) for m in result if isinstance(m, ModelRequest) for p in m.parts)
+
+    @pytest.mark.anyio
+    async def test_deduplicate_file_reads(self):
+        dfr = DeduplicateFileReads(file_key=_file_key)
+        messages: list[ModelMessage] = [
+            _pinned_msg('PINNED STATE'),
+            _tool_call('read_file', 'c1'),
+            ModelRequest(parts=[ToolReturnPart(tool_name='read_file', content='v1', tool_call_id='c1')]),
+        ]
+        result = await dfr.compact(messages, _make_ctx())
+        assert any(is_pinned(p) for m in result if isinstance(m, ModelRequest) for p in m.parts)
+
+    @pytest.mark.anyio
+    async def test_clamp_oversized(self):
+        clamp = ClampOversizedMessages(max_part_chars=4, keep_head_chars=1, keep_tail_chars=1)
+        messages: list[ModelMessage] = [_pinned_msg('PINNED STATE'), _assistant('y' * 40)]
+        result = await clamp.compact(messages, _make_ctx())
+        assert any(is_pinned(p) for m in result if isinstance(m, ModelRequest) for p in m.parts)
+
+
+# ---------------------------------------------------------------------------
+# StepPersistence transcript handle integration
+# ---------------------------------------------------------------------------
+
+
+class TestStepPersistenceHandle:
+    def test_handle_is_run_id_and_discoverable(self):
+        from pydantic_ai_harness.experimental.step_persistence import InMemoryStepStore, StepPersistence
+
+        sp: StepPersistence[None] = StepPersistence(store=InMemoryStepStore(), run_id='libr-1')
+        assert isinstance(sp, TranscriptStore)
+        assert sp.compaction_transcript_handle() == 'libr-1'
+        ctx = _make_ctx()
+        ctx.capabilities = {'sp': sp}
+        assert discover_transcript_handle(ctx) == 'libr-1'
+
+    def test_handle_none_before_materialization(self):
+        from pydantic_ai_harness.experimental.step_persistence import InMemoryStepStore, StepPersistence
+
+        sp: StepPersistence[None] = StepPersistence(store=InMemoryStepStore())
+        assert sp.compaction_transcript_handle() is None

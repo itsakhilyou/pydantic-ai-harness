@@ -9,6 +9,8 @@ from pydantic_ai_harness.experimental.compaction._clamp_oversized_messages impor
 from pydantic_ai_harness.experimental.compaction._clear_tool_results import ClearToolResults
 from pydantic_ai_harness.experimental.compaction._deduplicate_file_reads import DeduplicateFileReads
 from pydantic_ai_harness.experimental.compaction._limit_warner import LimitWarner, WarningKind
+from pydantic_ai_harness.experimental.compaction._pinning import is_pinned, pin
+from pydantic_ai_harness.experimental.compaction._receipts import TranscriptStore, format_receipt
 from pydantic_ai_harness.experimental.compaction._shared import CompactionStrategy, estimate_token_count
 from pydantic_ai_harness.experimental.compaction._sliding_window import SlidingWindow
 from pydantic_ai_harness.experimental.compaction._summarizing_compaction import SummarizingCompaction
@@ -25,6 +27,10 @@ __all__ = [
     'SlidingWindow',
     'SummarizingCompaction',
     'TieredCompaction',
+    'TranscriptStore',
     'WarningKind',
     'estimate_token_count',
+    'format_receipt',
+    'is_pinned',
+    'pin',
 ]

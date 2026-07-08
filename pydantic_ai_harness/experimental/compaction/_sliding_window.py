@@ -8,11 +8,20 @@ from typing import TYPE_CHECKING
 
 from pydantic_ai._run_context import AgentDepsT
 from pydantic_ai.capabilities import AbstractCapability
-from pydantic_ai.messages import ModelMessage
+from pydantic_ai.messages import ModelMessage, ModelRequest
 from pydantic_ai.tools import RunContext
 
+from pydantic_ai_harness.experimental.compaction._pinning import reinject_pinned
+from pydantic_ai_harness.experimental.compaction._receipts import (
+    ReceiptInfo,
+    discover_transcript_handle,
+    format_receipt,
+    make_receipt_part,
+    record_receipt,
+)
 from pydantic_ai_harness.experimental.compaction._shared import (
     compact_with_span,
+    estimate_token_count,
     exceeds,
     find_safe_cutoff,
     find_token_cutoff,
@@ -73,6 +82,14 @@ class SlidingWindow(AbstractCapability[AgentDepsT]):
     is always kept after trimming, in addition to system prompts.
     """
 
+    receipts: bool = False
+    """When ``True``, prepend a deterministic compaction receipt recording how much history
+    was dropped, with a transcript handle when a ``TranscriptStore`` capability is attached.
+
+    Opt-in for now: the receipt text is content, so defaulting it on is deferred to the
+    benchmark eval-rig pass.  The mechanism itself is structural.
+    """
+
     def __post_init__(self) -> None:
         if self.max_messages is None and self.max_tokens is None:
             raise ValueError('At least one of max_messages or max_tokens must be set.')
@@ -102,7 +119,32 @@ class SlidingWindow(AbstractCapability[AgentDepsT]):
         trimmed = messages[cutoff:]
         if self.preserve_first_user_message:
             trimmed = prepend_first_user_message(messages, cutoff, trimmed)
+        trimmed = reinject_pinned(messages, trimmed)
+        if self.receipts:
+            trimmed = [self._receipt_message(messages[:cutoff], ctx), *trimmed]
         return trimmed
+
+    def _receipt_message(self, dropped: list[ModelMessage], ctx: RunContext[AgentDepsT]) -> ModelRequest:
+        """Build (and record for tracing) a receipt for the *dropped* prefix."""
+        dropped_tokens = estimate_token_count(dropped, self.tokenizer)
+        handle = discover_transcript_handle(ctx)
+        record_receipt(
+            ReceiptInfo(
+                strategy='SlidingWindow',
+                dropped_messages=len(dropped),
+                dropped_tokens=dropped_tokens,
+                by='the harness',
+                handle=handle,
+            )
+        )
+        text = format_receipt(
+            dropped_messages=len(dropped),
+            dropped_tokens=dropped_tokens,
+            by='the harness',
+            handle=handle,
+            has_summary=False,
+        )
+        return ModelRequest(parts=[make_receipt_part(text)])
 
     async def before_model_request(
         self,
