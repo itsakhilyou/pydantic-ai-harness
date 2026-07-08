@@ -1900,7 +1900,7 @@ class TestToolSearchIntegration:
             ModelRequest(
                 parts=[
                     ToolSearchReturnPart(
-                        content={'discovered_tools': [{'name': 'later', 'description': 'A deferred-loading tool.'}]},
+                        content={'discovered_tools': [{'name': 'later'}]},
                         tool_call_id='search-1',
                     )
                 ]
@@ -2186,7 +2186,7 @@ class TestDynamicCatalog:
             parts=[
                 NativeToolSearchReturnPart(
                     tool_name='tool_search',
-                    content={'discovered_tools': [{'name': 'weather', 'description': 'Get the weather.'}]},
+                    content={'discovered_tools': [{'name': 'weather'}]},
                     tool_call_id='c1',
                 )
             ],
