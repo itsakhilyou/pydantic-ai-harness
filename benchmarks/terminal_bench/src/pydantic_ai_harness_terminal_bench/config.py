@@ -33,13 +33,65 @@ DEFAULT_TOOL_TIMEOUT_SEC = 120
 DEFAULT_COMPACTION_TARGET_TOKENS = 150_000
 
 
-def build_usage_limits() -> UsageLimits:
-    """The default per-task usage envelope."""
+def build_usage_limits(
+    *,
+    request_limit: int = DEFAULT_REQUEST_LIMIT,
+    tool_calls_limit: int = DEFAULT_TOOL_CALLS_LIMIT,
+    total_tokens_limit: int = DEFAULT_TOTAL_TOKENS_LIMIT,
+) -> UsageLimits:
+    """The per-task usage envelope.
+
+    Defaults are the safety-envelope values above. A cost-sensitive run (the
+    live CI slice) tightens them through the agent's `--ak` kwargs so a single
+    task cannot run away with the budget.
+    """
     return UsageLimits(
-        request_limit=DEFAULT_REQUEST_LIMIT,
-        tool_calls_limit=DEFAULT_TOOL_CALLS_LIMIT,
-        total_tokens_limit=DEFAULT_TOTAL_TOKENS_LIMIT,
+        request_limit=request_limit,
+        tool_calls_limit=tool_calls_limit,
+        total_tokens_limit=total_tokens_limit,
     )
+
+
+GATEWAY_ENV_VAR = 'PYDANTIC_AI_GATEWAY_API_KEY'
+"""When set, the live agent routes the model through the Pydantic AI Gateway
+(so traces land in Logfire) instead of calling the provider directly."""
+
+
+def resolve_model_name(name: str | None, *, use_gateway: bool) -> str:
+    """Map a Harbor model id to a Pydantic AI model string.
+
+    When `use_gateway` is set, the provider is prefixed with `gateway/` so the
+    request is routed through the Pydantic AI Gateway (see
+    `pydantic_ai.providers.gateway`). `anthropic:claude-sonnet-4-6` becomes
+    `gateway/anthropic:claude-sonnet-4-6`; the direct path is unchanged.
+
+    Examples:
+        >>> resolve_model_name('anthropic/claude-sonnet-4-6', use_gateway=False)
+        'anthropic:claude-sonnet-4-6'
+        >>> resolve_model_name('anthropic/claude-sonnet-4-6', use_gateway=True)
+        'gateway/anthropic:claude-sonnet-4-6'
+    """
+    base = DEFAULT_MODEL if name is None else convert_model_name(name)
+    return f'gateway/{base}' if use_gateway else base
+
+
+def parse_trial_ids(session_id: str) -> tuple[str, str]:
+    """Derive `(task, trial)` from a Harbor `session_id`.
+
+    Harbor names a session `{trial_name}__{role}`, where `trial_name` is
+    `{task}__{suffix}` -- e.g. `fix-git__bZZeEkw__env`. The task is the first
+    segment; the trial is everything up to the role. Used to tag observability
+    spans (VStorm's `tb.task` / `tb.trial` convention). An empty or role-less id
+    degrades to `(session_id, session_id)` rather than raising.
+    """
+    if not session_id:
+        return session_id, session_id
+    parts = session_id.split('__')
+    if len(parts) < 2:
+        return session_id, session_id
+    task = parts[0]
+    trial = '__'.join(parts[:-1])
+    return task, trial
 
 
 def convert_model_name(name: str) -> str:

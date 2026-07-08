@@ -30,7 +30,10 @@ from pydantic_ai_harness_terminal_bench.agent import build_agent
 from pydantic_ai_harness_terminal_bench.config import (
     DEFAULT_COMPACTION_TARGET_TOKENS,
     DEFAULT_MODEL,
+    DEFAULT_REQUEST_LIMIT,
+    DEFAULT_TOOL_CALLS_LIMIT,
     DEFAULT_TOOL_TIMEOUT_SEC,
+    DEFAULT_TOTAL_TOKENS_LIMIT,
     build_usage_limits,
     convert_model_name,
 )
@@ -59,6 +62,9 @@ class PydanticAITerminalBenchAgent(BaseAgent):
         workdir: str | None = None,
         compaction_target_tokens: int = DEFAULT_COMPACTION_TARGET_TOKENS,
         summarizer_model: str | None = None,
+        request_limit: int = DEFAULT_REQUEST_LIMIT,
+        tool_calls_limit: int = DEFAULT_TOOL_CALLS_LIMIT,
+        total_tokens_limit: int = DEFAULT_TOTAL_TOKENS_LIMIT,
         **kwargs: Any,
     ) -> None:
         super().__init__(*args, **kwargs)
@@ -66,6 +72,9 @@ class PydanticAITerminalBenchAgent(BaseAgent):
         self._workdir = workdir
         self._compaction_target_tokens = compaction_target_tokens
         self._summarizer_model = summarizer_model
+        self._request_limit = request_limit
+        self._tool_calls_limit = tool_calls_limit
+        self._total_tokens_limit = total_tokens_limit
 
     @staticmethod
     def name() -> str:
@@ -121,7 +130,11 @@ class PydanticAITerminalBenchAgent(BaseAgent):
             result = await agent.run(
                 instruction,
                 deps=deps,
-                usage_limits=build_usage_limits(),
+                usage_limits=build_usage_limits(
+                    request_limit=self._request_limit,
+                    tool_calls_limit=self._tool_calls_limit,
+                    total_tokens_limit=self._total_tokens_limit,
+                ),
             )
         finally:
             self._populate_context(context, result)
