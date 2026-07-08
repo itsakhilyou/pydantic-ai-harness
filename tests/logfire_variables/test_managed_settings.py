@@ -224,10 +224,12 @@ async def test_thinking_scalar_union_round_trips(thinking: Any) -> None:
     assert seen == [thinking]
 
 
-# --- model override ---------------------------------------------------------------------------
+# --- model override (via the `get_model` hook on current pydantic-ai) -------------------------
 
 
-async def test_model_override_replaces_model() -> None:
+async def test_managed_model_beats_constructor_model() -> None:
+    # The managed model is sourced at run setup via `get_model`, slotting in above the agent's
+    # constructor model, so it replaces the code-side `FunctionModel`.
     seen: list[ModelSettings | None] = []
     capability = ManagedSettings('model_override')
     agent = Agent(capture_settings(seen), capabilities=[capability])
@@ -237,6 +239,32 @@ async def test_model_override_replaces_model() -> None:
 
     # `model='test'` -> served by `TestModel`, not the code-side `FunctionModel`.
     assert result.output == 'success (no tool calls)'
+
+
+async def test_model_less_agent_runs_via_get_model() -> None:
+    # A fully model-less agent runs entirely off the managed model, now that `get_model` sources it.
+    capability = ManagedSettings('model_less')
+    agent = Agent(capabilities=[capability])
+
+    with capability._variable.override(ManagedSettingsValue(model='test')):
+        result = await agent.run('hello')
+
+    assert result.output == 'success (no tool calls)'
+
+
+async def test_run_model_beats_managed_model() -> None:
+    # The wart fix: `get_model` slots the managed model *below* a call-site `run(model=...)`, so the
+    # run argument now wins (before the hook, `before_model_request` clobbered it every request).
+    def respond(_messages: list[ModelMessage], _info: AgentInfo) -> ModelResponse:
+        return ModelResponse(parts=[TextPart('from-run-model')])
+
+    capability = ManagedSettings('run_model_wins')
+    agent = Agent(capabilities=[capability])
+
+    with capability._variable.override(ManagedSettingsValue(model='test')):
+        result = await agent.run('hello', model=FunctionModel(respond))
+
+    assert result.output == 'from-run-model'
 
 
 async def test_model_none_keeps_code_model() -> None:
@@ -251,8 +279,67 @@ async def test_model_none_keeps_code_model() -> None:
     assert result.output == 'from-function'
 
 
+async def test_callable_targeting_still_resolves_model() -> None:
+    # Model selection happens before the run exists, so callable `targeting_key`/`attributes` can't
+    # run; `get_model` uses the static path (callables -> None) rather than crashing.
+    capability = ManagedSettings(
+        'callable_target',
+        targeting_key=lambda ctx: 'user-key',
+        attributes=lambda ctx: {'tier': 'gold'},
+    )
+    agent = Agent(capabilities=[capability])
+
+    with capability._variable.override(ManagedSettingsValue(model='test')):
+        result = await agent.run('hello')
+
+    assert result.output == 'success (no tool calls)'
+
+
+# --- model override fallback (older pydantic-ai without the `get_model` hook) ------------------
+#
+# On older pydantic-ai the framework doesn't source a capability model, so the model is swapped per
+# request in `before_model_request` instead. We simulate that by forcing the module gate off and
+# stubbing `get_model` to `None` (so the framework contributes no model and the agent falls back to
+# its code-side model, which the per-request swap then overrides).
+
+
+async def test_before_model_request_swaps_model_on_old_pydantic_ai(monkeypatch: pytest.MonkeyPatch) -> None:
+    import pydantic_ai_harness.logfire._managed_settings as module
+
+    monkeypatch.setattr(module, '_FRAMEWORK_HAS_GET_MODEL', False)
+    capability = ManagedSettings('old_swap')
+    monkeypatch.setattr(capability, 'get_model', lambda: None)
+    agent = Agent(capture_settings([]), capabilities=[capability])
+
+    with capability._variable.override(ManagedSettingsValue(model='test')):
+        result = await agent.run('hello')
+
+    # The per-request swap replaces the code-side `FunctionModel` with `TestModel`.
+    assert result.output == 'success (no tool calls)'
+
+
+async def test_before_model_request_no_managed_model_keeps_code_on_old_pydantic_ai(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import pydantic_ai_harness.logfire._managed_settings as module
+
+    monkeypatch.setattr(module, '_FRAMEWORK_HAS_GET_MODEL', False)
+    capability = ManagedSettings('old_no_model')
+    monkeypatch.setattr(capability, 'get_model', lambda: None)
+    agent = Agent(capture_settings([]), capabilities=[capability])
+
+    with capability._variable.override(ManagedSettingsValue(model=None)):
+        result = await agent.run('hello')
+
+    # No managed model -> the fallback swap leaves the code-side model in place.
+    assert result.output == 'from-function'
+
+
 async def test_inferred_model_cached_across_runs(monkeypatch: pytest.MonkeyPatch) -> None:
     import pydantic_ai_harness.logfire._managed_settings as module
+
+    # The inferred-model cache lives on the fallback swap path, so exercise it with the gate off.
+    monkeypatch.setattr(module, '_FRAMEWORK_HAS_GET_MODEL', False)
 
     calls: list[str] = []
     real_infer = module.infer_model
@@ -264,6 +351,7 @@ async def test_inferred_model_cached_across_runs(monkeypatch: pytest.MonkeyPatch
     monkeypatch.setattr(module, 'infer_model', counting_infer)
 
     capability = ManagedSettings('model_cache')
+    monkeypatch.setattr(capability, 'get_model', lambda: None)
     agent = Agent(capture_settings([]), capabilities=[capability])
 
     with capability._variable.override(ManagedSettingsValue(model='test')):

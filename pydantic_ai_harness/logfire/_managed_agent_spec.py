@@ -44,6 +44,16 @@ if TYPE_CHECKING:
 # for these system-managed agent-spec variables. One variable holds the whole agent shape.
 _AGENT_SPEC_VARIABLE_PREFIX = 'agentspec__'
 
+# pydantic-ai#6333 added `AbstractCapability.get_model()`, which the framework calls at run setup to
+# let a capability source the agent's model with the right precedence (a call-site `run(model=...)`
+# beats the managed model, and a fully model-less agent can be driven from Logfire). When the hook is
+# present we supply the model through `ManagedAgentSpec.get_model` below, and the per-request
+# `before_model_request` swap on `_ResolvedAgentSpec` must stand down -- swapping again would
+# re-apply the managed model over a per-run `model=`, re-breaking the precedence the hook exists to
+# fix. On older pydantic-ai without the hook, the per-request swap remains the only way to override
+# the model, so it stays active there.
+_FRAMEWORK_HAS_GET_MODEL = 'get_model' in vars(AbstractCapability)
+
 
 @dataclass
 class ManagedAgentSpec(ManagedVariableCapability[AgentDepsT, AgentSpec]):
@@ -94,14 +104,16 @@ class ManagedAgentSpec(ManagedVariableCapability[AgentDepsT, AgentSpec]):
     capability name, or one whose construction fails, is skipped with a warning rather than crashing
     the run -- a bad managed value must never break a run.
 
-    **Model, two layers:** when the spec sets `model`, it overrides the model per request via
-    [`before_model_request`][pydantic_ai.capabilities.AbstractCapability.before_model_request], for
-    agents that already have a code-side model. Two known limits, both pending future pydantic-ai
-    (run-spec) work: a fully model-less agent still requires a code-side model today, and a managed
-    model currently overrides even a per-run `model=` passed at the call site -- the hook can't
-    distinguish a run argument from the agent default, so the run-arguments-win precedence that
-    settings enjoy doesn't yet hold for the model itself. (A forward-compatible `get_model` hook is
-    already wired up for the day pydantic-ai grows the framework-level surface for it.)
+    **Model:** when the spec sets `model`, the capability sources it at run setup via
+    [`get_model`][pydantic_ai.capabilities.AbstractCapability.get_model], so it slots in with the
+    right precedence: a call-site `run(model=...)` beats the managed model, the managed model beats
+    the agent's constructor model, and a fully model-less agent can be driven entirely from Logfire.
+    Model selection happens before the run starts, so callable `targeting_key`/`attributes` can't
+    participate in it (they need a `RunContext`); only the static `label` and static targeting inputs
+    do. On older pydantic-ai without the `get_model` hook, the model is instead swapped per request
+    via [`before_model_request`][pydantic_ai.capabilities.AbstractCapability.before_model_request],
+    which requires a code-side model and can't distinguish a per-run `model=` from the agent default
+    -- the two limits that `get_model` fixes.
 
     **Fallback semantics:** if the remote value is missing, invalid, or unreachable, the logfire SDK
     falls back to the code default (an empty [`AgentSpec`][pydantic_ai.agent.spec.AgentSpec] when
@@ -140,6 +152,23 @@ class ManagedAgentSpec(ManagedVariableCapability[AgentDepsT, AgentSpec]):
             value_type=AgentSpec,
             default=self.default or AgentSpec(),
         )
+
+    def get_model(self) -> str | None:
+        """Supply the managed spec's model at run setup, so it slots in with the right precedence.
+
+        pydantic-ai calls this on the construction-time capability (before any run exists, and so
+        before [`for_run`][pydantic_ai_harness.logfire.ManagedAgentSpec.for_run] materializes the
+        per-run capability) to source the agent's model, so a call-site `run(model=...)` wins over the
+        managed model and a model-less agent can be driven entirely from Logfire. Because there is no
+        `RunContext` here, callable `targeting_key`/`attributes` can't run -- model selection happens
+        before the run starts, so only the static `label` and static targeting inputs participate
+        (callables fall back to `None`). The per-run `for_run` resolution still runs its own `.get()`
+        (for baggage, and the callable inputs); that second resolve is a cheap in-memory lookup that
+        returns a consistent value via the SDK's cached config.
+        """
+        targeting_key = None if callable(self.targeting_key) else self.targeting_key
+        attributes = None if callable(self.attributes) else self.attributes
+        return self._variable.get(targeting_key=targeting_key, attributes=attributes, label=self.label).value.model
 
     async def for_run(self, ctx: RunContext[AgentDepsT]) -> AbstractCapability[AgentDepsT]:
         """Resolve the managed spec and assemble the per-run capability from it.
@@ -256,18 +285,20 @@ class _ResolvedAgentSpec(AbstractCapability[AgentDepsT]):
             return None
         return cast(ModelSettings, self.spec.model_settings)
 
-    def get_model(self) -> str | None:
-        """Return the spec's model string.
-
-        Forward-compatible: pydantic-ai does not call a capability-level `get_model` hook yet, so this
-        is inert until it grows one. Today the model override happens via `before_model_request` below.
-        """
-        return self.spec.model
-
     async def before_model_request(
         self, ctx: RunContext[AgentDepsT], request_context: ModelRequestContext
     ) -> ModelRequestContext:
-        """Override the request's model when the resolved spec sets one."""
+        """Override the request's model when the resolved spec sets one (older pydantic-ai only).
+
+        On pydantic-ai with the `get_model` hook,
+        [`ManagedAgentSpec.get_model`][pydantic_ai_harness.logfire.ManagedAgentSpec.get_model] already
+        sourced the managed model at run setup with the correct precedence, so this stands down --
+        swapping again here would re-apply it over a per-run `model=`. Only older versions without the
+        hook fall through to the per-request swap.
+        """
+        if _FRAMEWORK_HAS_GET_MODEL:
+            return request_context
+
         model_string = self.spec.model
         if model_string is None:
             return request_context
@@ -321,9 +352,11 @@ def ManagedAgent(
     result = agent.run_sync('Refund my last order.')
     ```
 
-    Until pydantic-ai ships a framework-level `get_model` hook, pass a fallback `model` so the agent
-    can run before any spec is published; the managed spec's `model`, when set, then overrides it per
-    request (see [`ManagedAgentSpec`][pydantic_ai_harness.logfire.ManagedAgentSpec] for the model-override limits).
+    On pydantic-ai with the `get_model` hook, the managed spec sources the agent's model, so `model`
+    here is an optional fallback for before any spec is published (and a call-site `run(model=...)`
+    still wins over the managed model). On older pydantic-ai without the hook, pass a fallback `model`
+    so the agent has a code-side model to override per request (see
+    [`ManagedAgentSpec`][pydantic_ai_harness.logfire.ManagedAgentSpec] for the model-override details).
 
     Args:
         name: The Agent Specs name (declared as `agentspec__<name>`), or a pre-built `logfire.Variable`.

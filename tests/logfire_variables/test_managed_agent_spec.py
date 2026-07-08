@@ -162,7 +162,9 @@ async def test_spec_model_settings_merge_and_run_args_win() -> None:
         assert seen['settings'] == {'temperature': 0.1, 'top_p': 0.9, 'max_tokens': 512}
 
 
-async def test_spec_model_swaps_per_request() -> None:
+async def test_managed_model_beats_constructor_model() -> None:
+    # The spec's model is sourced at run setup via `get_model`, slotting in above the agent's
+    # constructor model, so it replaces the code-side `FunctionModel`.
     seen: dict[str, Any] = {}
     capability = ManagedAgentSpec('model_swap')
     agent = Agent(capture(seen), capabilities=[capability])
@@ -172,6 +174,32 @@ async def test_spec_model_swaps_per_request() -> None:
 
     # `model='test'` -> served by `TestModel`, not the code-side `FunctionModel`.
     assert result.output == 'success (no tool calls)'
+
+
+async def test_model_less_agent_runs_via_get_model() -> None:
+    # A fully model-less agent runs entirely off the spec's model, now that `get_model` sources it.
+    capability = ManagedAgentSpec('model_less')
+    agent = Agent(capabilities=[capability])
+
+    with capability._variable.override(AgentSpec(model='test')):
+        result = await agent.run('hello')
+
+    assert result.output == 'success (no tool calls)'
+
+
+async def test_run_model_beats_managed_model() -> None:
+    # The wart fix: `get_model` slots the spec's model *below* a call-site `run(model=...)`, so the
+    # run argument now wins (before the hook, `before_model_request` clobbered it every request).
+    def respond(_messages: list[ModelMessage], _info: AgentInfo) -> ModelResponse:
+        return ModelResponse(parts=[TextPart('from-run-model')])
+
+    capability = ManagedAgentSpec('run_model_wins')
+    agent = Agent(capabilities=[capability])
+
+    with capability._variable.override(AgentSpec(model='test')):
+        result = await agent.run('hello', model=FunctionModel(respond))
+
+    assert result.output == 'from-run-model'
 
 
 async def test_spec_model_none_keeps_code_model() -> None:
@@ -185,7 +213,72 @@ async def test_spec_model_none_keeps_code_model() -> None:
     assert result.output == 'from-function'
 
 
+async def test_callable_targeting_still_resolves_model() -> None:
+    # Model selection happens before the run exists, so callable `targeting_key`/`attributes` can't
+    # run; `get_model` uses the static path (callables -> None) rather than crashing.
+    capability = ManagedAgentSpec(
+        'callable_target',
+        targeting_key=lambda ctx: 'user-key',
+        attributes=lambda ctx: {'tier': 'gold'},
+    )
+    agent = Agent(capabilities=[capability])
+
+    with capability._variable.override(AgentSpec(model='test')):
+        result = await agent.run('hello')
+
+    assert result.output == 'success (no tool calls)'
+
+
+def test_get_model_reads_spec_model() -> None:
+    # `get_model` is called on the construction-time capability (before any run), returning the
+    # spec's model string, or `None` for an empty spec.
+    capability = ManagedAgentSpec('get_model_unit')
+    with capability._variable.override(AgentSpec(model='some-model')):
+        assert capability.get_model() == 'some-model'
+    with capability._variable.override(AgentSpec()):
+        assert capability.get_model() is None
+
+
+# --- model override fallback (older pydantic-ai without the `get_model` hook) ------------------
+#
+# On older pydantic-ai the framework doesn't source a capability model, so the spec's model is
+# swapped per request in `_ResolvedAgentSpec.before_model_request` instead. We simulate that by
+# forcing the module gate off and stubbing `get_model` to `None` (so the framework contributes no
+# model and the agent falls back to its code-side model, which the per-request swap then overrides).
+
+
+async def test_before_model_request_swaps_model_on_old_pydantic_ai(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(_managed_agent_spec, '_FRAMEWORK_HAS_GET_MODEL', False)
+    capability = ManagedAgentSpec('old_swap')
+    monkeypatch.setattr(capability, 'get_model', lambda: None)
+    agent = Agent(capture({}), capabilities=[capability])
+
+    with capability._variable.override(AgentSpec(model='test')):
+        result = await agent.run('hello')
+
+    # The per-request swap replaces the code-side `FunctionModel` with `TestModel`.
+    assert result.output == 'success (no tool calls)'
+
+
+async def test_before_model_request_no_managed_model_keeps_code_on_old_pydantic_ai(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(_managed_agent_spec, '_FRAMEWORK_HAS_GET_MODEL', False)
+    capability = ManagedAgentSpec('old_no_model')
+    monkeypatch.setattr(capability, 'get_model', lambda: None)
+    agent = Agent(capture({}), capabilities=[capability])
+
+    with capability._variable.override(AgentSpec(model=None, instructions='x')):
+        result = await agent.run('hello')
+
+    # No spec model -> the fallback swap leaves the code-side model in place.
+    assert result.output == 'from-function'
+
+
 async def test_inferred_model_cached_across_runs(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The inferred-model cache lives on the fallback swap path, so exercise it with the gate off.
+    monkeypatch.setattr(_managed_agent_spec, '_FRAMEWORK_HAS_GET_MODEL', False)
+
     calls: list[str] = []
 
     def counting_infer(model: Any, *args: Any, **kwargs: Any) -> Any:
@@ -195,6 +288,7 @@ async def test_inferred_model_cached_across_runs(monkeypatch: pytest.MonkeyPatch
     monkeypatch.setattr(_managed_agent_spec, 'infer_model', counting_infer)
 
     capability = ManagedAgentSpec('model_cache')
+    monkeypatch.setattr(capability, 'get_model', lambda: None)
     agent = Agent(capture({}), capabilities=[capability])
 
     with capability._variable.override(AgentSpec(model='test')):
@@ -325,14 +419,19 @@ async def test_resolved_property_exposes_active_resolution() -> None:
 
 
 async def test_records_resolution_span(capfire: CaptureLogfire) -> None:
-    # The resolution still records a Logfire span (resolved in `for_run`), carrying the value/reason.
+    # The resolution records a Logfire span carrying the value/reason. There are two per run: one
+    # from `get_model` (sourcing the model at run setup) and one from the per-run `for_run` resolve
+    # (baggage + callable targeting inputs). The second `.get()` is a cheap in-memory lookup.
     agent = Agent(TestModel(), capabilities=[ManagedAgentSpec('span_slug')])
     await agent.run('hello')
 
     resolve_spans = [
         s['name'] for s in capfire.exporter.exported_spans_as_dict() if s['name'].startswith('Resolve variable')
     ]
-    assert resolve_spans == ['Resolve variable agentspec__span_slug']
+    assert resolve_spans == [
+        'Resolve variable agentspec__span_slug',
+        'Resolve variable agentspec__span_slug',
+    ]
 
 
 async def test_per_run_isolation_across_concurrent_runs() -> None:
@@ -362,8 +461,8 @@ async def test_per_run_isolation_across_concurrent_runs() -> None:
 
 
 def test_resolved_agent_spec_get_methods() -> None:
-    # Cover the per-run capability's `get_*` surfaces directly, including the forward-compatible
-    # `get_model` hook that pydantic-ai does not call yet, and the empty-spec `None` branches.
+    # Cover the per-run capability's `get_*` surfaces directly, including the empty-spec `None`
+    # branches. (The model is sourced by `ManagedAgentSpec.get_model`, not the per-run capability.)
     capability = ManagedAgentSpec('unit')
     resolution = capability._variable.get()
 
@@ -374,7 +473,6 @@ def test_resolved_agent_spec_get_methods() -> None:
         model_cache={},
         trigger_auto_create=lambda _resolution: None,
     )
-    assert populated.get_model() == 'some-model'
     assert populated.get_instructions() == ['hi']
     assert populated.get_model_settings() == {'temperature': 0.5}
 
@@ -385,7 +483,6 @@ def test_resolved_agent_spec_get_methods() -> None:
         model_cache={},
         trigger_auto_create=lambda _resolution: None,
     )
-    assert empty.get_model() is None
     assert empty.get_instructions() is None
     assert empty.get_model_settings() is None
 

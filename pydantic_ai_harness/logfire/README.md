@@ -342,11 +342,11 @@ counterpart):
 
 ### Notes
 
-- **Model override limits (for now):** the managed `model` overrides per request via
-  `before_model_request`, which requires the agent to have a code-side model and cannot yet
-  distinguish a per-run `model=` argument from the agent default -- so unlike settings, the
-  run-arguments-win precedence doesn't yet hold for the model itself. Both limits are pending
-  run-spec work in pydantic-ai.
+- **Model precedence:** the managed `model` is sourced at run setup via the capability's `get_model`
+  hook, so it slots in with the right precedence -- a call-site `run(model=...)` beats it, it beats
+  the agent's constructor model, and a fully model-less agent can be driven entirely from Logfire.
+  (On older pydantic-ai without the `get_model` hook, the model is instead swapped per request, which
+  requires a code-side model and can't beat a per-run `model=`.)
 - `thinking` accepts `true`/`false` or an effort level (`'minimal'` ... `'xhigh'`), exactly like
   the unified `thinking` model setting; per-provider lowering (e.g. effort to budget tokens) is
   pydantic-ai's existing behavior.
@@ -390,8 +390,9 @@ agent = Agent(
 ```
 
 The value is a JSON `AgentSpec`: its `instructions` add to the agent's own, `model_settings` merge
-over the agent's (under per-run `model_settings=`), `model` overrides per request, and each entry in
-`capabilities` is materialized from the capability registry:
+over the agent's (under per-run `model_settings=`), `model` is sourced at run setup (below a per-run
+`model=`, above the constructor model), and each entry in `capabilities` is materialized from the
+capability registry:
 
 ```json
 {
@@ -419,9 +420,10 @@ agent = ManagedAgent('checkout_assistant', model='openai:gpt-5', label='producti
 result = agent.run_sync('Refund my last order.')
 ```
 
-`ManagedAgent` returns a real `Agent` (not a builder); the managed values just flow in per run.
-Pass a fallback `model` so the agent can run before any spec is published -- the spec's `model`, when
-set, then overrides it per request.
+`ManagedAgent` returns a real `Agent` (not a builder); the managed values just flow in per run. The
+spec's `model` is sourced at run setup, so `model` here is an optional fallback for before any spec
+is published (and a call-site `run(model=...)` still wins). On older pydantic-ai without the
+`get_model` hook, pass a fallback `model` so the agent has a code-side model to override per request.
 
 ### Notes
 
@@ -429,11 +431,12 @@ set, then overrides it per request.
   agent the developer wrote. Local tools, toolsets, and code-defined capabilities always stay in code.
 - **Capabilities materialize per run:** an unknown capability name, or one whose construction fails,
   is skipped with a warning rather than crashing the run.
-- **Model override limits (for now):** as with [`ManagedSettings`](#managedsettings), the managed
-  `model` overrides per request via `before_model_request`, so it needs a code-side (or `ManagedAgent`
-  fallback) model and can't yet distinguish a per-run `model=` argument from the agent default. A
-  forward-compatible `get_model` hook is already wired up for when pydantic-ai grows the framework
-  surface for it. Both limits are pending run-spec work in pydantic-ai.
+- **Model precedence:** as with [`ManagedSettings`](#managedsettings), the spec's `model` is sourced
+  at run setup via the capability's `get_model` hook, so it slots in with the right precedence -- a
+  call-site `run(model=...)` beats it, it beats the agent's constructor model, and a fully model-less
+  agent (or `ManagedAgent` with no fallback `model`) can be driven entirely from Logfire. (On older
+  pydantic-ai without the `get_model` hook, the model is instead swapped per request, which requires a
+  code-side or `ManagedAgent` fallback model and can't beat a per-run `model=`.)
 - The spec resolves **once per run**, in `for_run` (earlier than the per-surface capabilities, since
   the resolved spec decides what the run is assembled from), and its label + version ride as baggage
   on every span of the run. `ManagedAgentSpec.resolved` exposes the active run's `ResolvedVariable`.

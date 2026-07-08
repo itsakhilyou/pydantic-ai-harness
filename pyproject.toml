@@ -79,6 +79,15 @@ lint = [
     'pyright>=1.1.408',
 ]
 
+[tool.uv.sources]
+# TEMPORARY PIN — remove when pydantic-ai#6333 is released.
+# pydantic-ai#6333 (branch `capability-run-spec`) adds the `AbstractCapability.get_model()` hook that
+# `ManagedSettings` and `ManagedAgentSpec` use to source the agent's model with correct precedence
+# (fixing the model-less-agent and `run(model=...)`-loses-to-managed-model limits). Once that PR is
+# released to PyPI, drop this source so we resolve `pydantic-ai-slim` from the `>=` floor above.
+# NOTE: `pydantic-ai-slim` lives in the `pydantic_ai_slim/` subdirectory of the monorepo.
+pydantic-ai-slim = { git = 'https://github.com/pydantic/pydantic-ai.git', branch = 'capability-run-spec', subdirectory = 'pydantic_ai_slim' }
+
 [tool.hatch.version]
 source = 'uv-dynamic-versioning'
 
