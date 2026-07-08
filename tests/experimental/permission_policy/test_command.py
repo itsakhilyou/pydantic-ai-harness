@@ -19,14 +19,6 @@ with warnings.catch_warnings():
         prepare_command,
     )
 
-pytestmark = pytest.mark.anyio
-
-
-@pytest.fixture
-def anyio_backend() -> str:
-    """Run async tests on the asyncio backend (matching upstream pydantic-ai)."""
-    return 'asyncio'
-
 
 def _verdict(command: str) -> str | None:
     return analyze_command(prepare_command(command)).verdict

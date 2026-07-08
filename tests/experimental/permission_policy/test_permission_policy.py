@@ -234,7 +234,7 @@ class TestComposition:
         @agent.tool_plain(requires_approval=True)
         def danger() -> str:  # pyright: ignore[reportUnusedFunction]
             """A tool that always needs approval."""
-            return 'ran'
+            return 'ran'  # pragma: no cover - approval halts before execution
 
         result = await agent.run('go')
         assert isinstance(result.output, DeferredToolRequests)
@@ -267,7 +267,7 @@ class TestMisc:
         @agent.tool_plain
         def lookup(key: str) -> str:  # pyright: ignore[reportUnusedFunction]
             """Look something up."""
-            return f'VALUE:{key}'
+            return f'VALUE:{key}'  # pragma: no cover - denied before execution
 
         result = await agent.run('go')
         assert 'Permission denied for `lookup`' in result.output

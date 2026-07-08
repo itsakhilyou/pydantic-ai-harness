@@ -4,8 +4,6 @@ from __future__ import annotations
 
 import warnings
 
-import pytest
-
 with warnings.catch_warnings():
     warnings.simplefilter('ignore')
     from pydantic_ai_harness.experimental.permission_policy._command import prepare_command
@@ -15,14 +13,6 @@ with warnings.catch_warnings():
         last_matching_rule,
         resolve,
     )
-
-pytestmark = pytest.mark.anyio
-
-
-@pytest.fixture
-def anyio_backend() -> str:
-    """Run async tests on the asyncio backend (matching upstream pydantic-ai)."""
-    return 'asyncio'
 
 
 def _resolve(rules: list[Rule], tool: str, command: str | None = None, *, default: str = 'ask', analyze: bool = True):
