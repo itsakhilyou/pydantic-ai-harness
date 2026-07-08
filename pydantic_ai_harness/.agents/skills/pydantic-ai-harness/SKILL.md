@@ -49,9 +49,8 @@ The rest ship today and each has its own README with API and examples.
 `Planning`, a compaction family (`SlidingWindow`, `SummarizingCompaction`, ...), `OverflowingToolOutput`,
 `RepoContext`, `StepPersistence`, `PyaiDocs`, `RuntimeAuthoring`, and an ACP server adapter.
 
-The full, current list with links is in
-[What's available today](https://github.com/pydantic/pydantic-ai-harness#whats-available-today); unshipped
-work is in the [Roadmap](https://github.com/pydantic/pydantic-ai-harness#roadmap).
+The full, current list with links and status is in the
+[capability matrix](https://github.com/pydantic/pydantic-ai-harness#capability-matrix).
 
 ## Install
 
