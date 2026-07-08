@@ -129,7 +129,6 @@ await summarizer(task="Summarize these findings:\n" + "\n\n".join(reports))
 
 It composes with the rest of the harness:
 
-- **With `CodeMode`**, the two merge automatically: sub-agents become typed async functions inside the same `run_code` sandbox as the agent's tools, so one script can fetch data with a tool, fan it out to sub-agents, and combine the results.
 - **Budgets**: `max_agent_calls` is an exact, host-enforced ceiling on sub-agent runs (it holds even under concurrent fan-out), and by default the whole tree's token spend lands on the parent run's `usage`.
 - **On-demand**: `defer_loading=True` keeps the catalog out of the prompt until the model loads the capability, and `reveal()` adds a sub-agent mid-run without disturbing the prompt cache.
 
@@ -160,7 +159,7 @@ We studied leading coding agents, agent frameworks, and Claw-style assistants to
 | **Memory &&nbsp;persistence** | **Memory** | Persistent key-value memory across sessions | :construction: [PR&nbsp;#179](https://github.com/pydantic/pydantic-ai-harness/pull/179) | [pydantic-deep](https://github.com/vstorm-co/pydantic-deepagents) (vstorm&#8209;co) |
 | | **Session persistence** | Save and restore full conversation state | :construction: [PR&nbsp;#176](https://github.com/pydantic/pydantic-ai-harness/pull/176) | |
 | | **Checkpointing** | Save, rewind, and fork conversation state | :memo: [#196](https://github.com/pydantic/pydantic-ai-harness/issues/196) | [pydantic-deep](https://github.com/vstorm-co/pydantic-deepagents) (vstorm&#8209;co) |
-| **Agent orchestration** | **Dynamic workflow** | Orchestrate sub-agents from a model-written Python script -- fan-out, chaining, voting in one tool call; merges into `run_code` when CodeMode is present | :white_check_mark: [Docs](pydantic_ai_harness/experimental/dynamic_workflow/) (experimental) | |
+| **Agent orchestration** | **Dynamic workflow** | Orchestrate sub-agents from a model-written Python script -- fan-out, chaining, voting in one tool call | :white_check_mark: [Docs](pydantic_ai_harness/experimental/dynamic_workflow/) (experimental) | |
 | | **Sub-agents** | Delegate subtasks to specialized child agents | :construction: [PR&nbsp;#178](https://github.com/pydantic/pydantic-ai-harness/pull/178) | [subagents-pydantic-ai](https://github.com/vstorm-co/subagents-pydantic-ai) (vstorm&#8209;co) |
 | | **Skills** | Progressive tool loading -- search, activate, deactivate | :construction: [PR&nbsp;#183](https://github.com/pydantic/pydantic-ai-harness/pull/183) | [pydantic-ai-skills](https://github.com/DougTrajano/pydantic-ai-skills) (DougTrajano), [pydantic-deep](https://github.com/vstorm-co/pydantic-deepagents) (vstorm&#8209;co) |
 | | **Planning** | Break complex tasks into structured plans before execution | :construction: [PR&nbsp;#180](https://github.com/pydantic/pydantic-ai-harness/pull/180) | |

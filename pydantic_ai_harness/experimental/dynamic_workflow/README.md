@@ -445,48 +445,6 @@ DynamicWorkflow(
 [on-demand capabilities](https://pydantic.dev/docs/ai/core-concepts/capabilities/#on-demand-capabilities)
 for the full picture.
 
-## Using with CodeMode
-
-[`CodeMode`](../../code_mode/README.md) puts the agent's regular tools behind the same kind of
-sandbox: the model writes one script that calls tools as functions. Put both capabilities on one
-agent and they merge: `run_workflow` disappears, and every sub-agent becomes a typed async
-function inside `run_code`, next to the tools.
-
-```python
-from pydantic_ai import Agent
-from pydantic_ai_harness import CodeMode, DynamicWorkflow
-
-agent = Agent(
-    'anthropic:claude-sonnet-4-6',
-    capabilities=[CodeMode(), DynamicWorkflow(agents=[reviewer, summarizer])],
-)
-```
-
-One script can now gather data with a tool, fan it out to sub-agents, and post-process the
-results, in a single tool call:
-
-```python
-import asyncio
-
-diff = await read_file(path="src/auth.py")
-reviews = await asyncio.gather(
-    reviewer(task="Review for bugs:\n" + diff),
-    reviewer(task="Review for style:\n" + diff),
-)
-await summarizer(task="Merge these reviews:\n" + "\n\n".join(reviews))
-```
-
-In merged mode the sandbox is CodeMode's: state persists between `run_code` calls (REPL-style),
-and CodeMode's `os_access`/`mount`/`resource_limits` govern the sandbox, so `tool_name` and
-`resource_limits` on `DynamicWorkflow` have no effect there. Everything about the sub-agents
-still applies -- isolated runs, `max_agent_calls`, `forward_usage`, `sub_agent_usage_limits`,
-`reveal()`, and the no-nesting rule -- enforced on each sub-agent call, not per script.
-
-In merged mode each sub-agent becomes a tool, so its name must not collide with any of the
-agent's existing tools. A sub-agent named `fetch_data` next to a `fetch_data` tool raises
-`UserError` when the run starts -- rename the sub-agent (`WorkflowAgent(name=...)`) if that
-happens. Standalone mode has no such constraint: sub-agent names live only inside the script.
-
 ## What runs in the sandbox
 
 The script runs in Monty, a subset of Python. The subset is what makes the sandbox safe, so it is

@@ -284,13 +284,6 @@ capabilities:
       max_retries: 5
 ```
 
-## Using with DynamicWorkflow
-
-Put [`DynamicWorkflow`](../experimental/dynamic_workflow/README.md) on the same agent and its sub-agents
-become typed async functions inside `run_code`, callable alongside the sandboxed tools in one
-script -- gather data with a tool, fan it out to sub-agents, combine the results, all in a single
-tool call. See "Using with CodeMode" in the DynamicWorkflow README.
-
 ## Further reading
 
 - [Tool use via code](https://www.anthropic.com/engineering/code-execution-with-mcp) (Anthropic)

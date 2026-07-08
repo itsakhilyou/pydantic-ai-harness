@@ -46,12 +46,6 @@ class DynamicWorkflow(AbstractCapability[AgentDepsT]):
     one place. Use `max_agent_calls` for a hard, host-enforced ceiling on sub-agent runs. Workflows
     do not nest. Set `defer_loading=True` (with a stable `id`) to keep the tool out of the prompt
     until the model loads the capability.
-
-    When a `CodeMode` capability is on the same agent, the two merge: instead of a separate
-    `run_workflow` tool, each sub-agent becomes a typed async function inside the one `run_code`
-    sandbox, callable alongside the agent's regular tools in a single script. The call budget,
-    usage forwarding, and nesting guard apply unchanged; `tool_name`, `max_retries` (per-tool),
-    and `resource_limits` are CodeMode's to govern in that mode.
     """
 
     agents: Sequence[AbstractAgent[AgentDepsT, object] | WorkflowAgent[AgentDepsT]]

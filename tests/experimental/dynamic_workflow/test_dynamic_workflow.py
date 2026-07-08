@@ -14,7 +14,6 @@ from pydantic_ai import Agent, RunContext, capture_run_messages
 from pydantic_ai.capabilities import AbstractCapability, PrefixTools
 from pydantic_ai.exceptions import ModelRetry, UnexpectedModelBehavior, UserError
 from pydantic_ai.messages import (
-    InstructionPart,
     ModelMessage,
     ModelRequest,
     ModelResponse,
@@ -1526,94 +1525,42 @@ async def test_reveal_end_to_end_via_agent_run() -> None:
     assert result.output == 'final: extra-done'  # and the revealed sub-agent actually ran
 
 
-# --- CodeMode merge ----------------------------------------------------------
+# --- Coexistence with CodeMode -----------------------------------------------
+# DynamicWorkflow and CodeMode are independent. `run_workflow` is its own code-execution
+# sandbox, so CodeMode leaves it native (a peer of `run_code`) rather than folding it in.
 
 
-def _code_mode_ctx(*capabilities: AbstractCapability[object]) -> RunContext[object]:
-    """A `RunContext` whose registry holds a `CodeMode` plus any extra capabilities."""
-    registry: dict[str, AbstractCapability[object]] = {'code_mode': CodeMode[object]()}
-    for index, capability in enumerate(capabilities):
-        registry[f'cap_{index}'] = capability
-    return _registry_ctx(registry, loaded=set())
-
-
-async def test_merged_mode_exposes_sub_agent_tools_instead_of_run_workflow() -> None:
-    # With CodeMode registered, the toolset trades `run_workflow` for one `(task)` tool per
-    # sub-agent, each carrying the return schema CodeMode needs to render a typed function.
-    ts = DynamicWorkflowToolset[object](agents=[_wf_agent(description='Reviews code.')])
-    tools = await ts.get_tools(_code_mode_ctx())
-    assert set(tools) == {'sub'}
-    tool_def = tools['sub'].tool_def
-    assert tool_def.description == 'Reviews code.'
-    assert tool_def.parameters_json_schema['required'] == ['task']
-    assert tool_def.return_schema == {'type': 'string'}
-    assert tool_def.sequential is False
-
-
-async def test_merged_mode_detects_wrapped_code_mode() -> None:
-    # A CodeMode inside a wrapper capability still triggers the merge (registry walk unwraps).
-    wrapper = PrefixTools[object](wrapped=CodeMode[object](), prefix='cm')
-    ts = DynamicWorkflowToolset[object](agents=[_wf_agent()])
-    tools = await ts.get_tools(_registry_ctx({'cm': wrapper}, loaded=set()))
-    assert set(tools) == {'sub'}
-
-
-async def test_merged_mode_renders_sub_agents_in_run_code_catalog() -> None:
-    # End to end: the model sees a single `run_code` tool whose catalog lists the sub-agent as
-    # a typed async function, with the structured output type rendered as a TypedDict.
+async def test_run_workflow_stays_native_alongside_code_mode() -> None:
+    # Both capabilities on one agent expose two separate tools; `run_workflow` is not folded into
+    # `run_code`, and its sub-agent catalog is not leaked into `run_code`'s description.
     model = TestModel(call_tools=[])
     agent: Agent[object, str] = Agent(
         model,
-        capabilities=[CodeMode[object](), DynamicWorkflow[object](agents=[_review_agent()])],
+        capabilities=[CodeMode[object](), DynamicWorkflow[object](agents=[_sub_agent('ok', 'reviewer')])],
     )
     await agent.run('hi')
     params = model.last_model_request_parameters
     assert params is not None
-    assert [td.name for td in params.function_tools] == ['run_code']
-    description = params.function_tools[0].description or ''
-    assert 'async def reviewer(*, task: str) -> Review:' in description
-    assert 'class Review(TypedDict):' in description
-    assert 'run_workflow' not in description
+    assert sorted(td.name for td in params.function_tools) == ['run_code', 'run_workflow']
+    run_code = next(td for td in params.function_tools if td.name == 'run_code')
+    assert 'run_workflow' not in (run_code.description or '')
 
 
-async def test_merged_mode_instructions_carry_budget_and_isolation_guidance() -> None:
-    # The guidance `run_workflow`'s description used to carry (isolated runs, shared budget)
-    # moves into instructions; standalone mode contributes none.
-    ts = DynamicWorkflowToolset[object](agents=[_wf_agent()], max_agent_calls=9)
-    part = await ts.get_instructions(_code_mode_ctx())
-    assert isinstance(part, InstructionPart)
-    assert '`sub`' in part.content
-    assert 'at most 9 sub-agent calls' in part.content
-    assert part.dynamic is True
-    assert await ts.get_instructions(_ctx()) is None
-
-
-async def test_merged_mode_end_to_end_mixes_tools_and_sub_agents() -> None:
-    # The point of the merge: one `run_code` script calls a regular tool and fans out
-    # sub-agents, composing both results without a model round-trip in between.
+async def test_run_workflow_orchestrates_alongside_code_mode_end_to_end() -> None:
+    # The native `run_workflow` still drives its own sub-agent sandbox while CodeMode is present.
     reviewer = _sub_agent('LGTM', 'reviewer')
-    script = (
-        'import asyncio\n'
-        'data = await fetch_data(url="https://example.com")\n'
-        'reviews = await asyncio.gather(reviewer(task="A: " + data), reviewer(task="B: " + data))\n'
-        '{"data": data, "reviews": reviews}'
-    )
 
     def model_fn(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
         if len(messages) == 1:
-            return ModelResponse(parts=[ToolCallPart(tool_name='run_code', args={'code': script})])
+            return ModelResponse(
+                parts=[ToolCallPart(tool_name='run_workflow', args={'code': 'await reviewer(task="x")'})]
+            )
         return ModelResponse(parts=[TextPart('done')])
 
     agent: Agent[object, str] = Agent(
         FunctionModel(model_fn),
         capabilities=[CodeMode[object](), DynamicWorkflow[object](agents=[reviewer])],
     )
-
-    @agent.tool_plain
-    def fetch_data(url: str) -> str:
-        """Fetch a URL."""
-        return f'data-from-{url}'
-
     result = await agent.run('go')
     assert result.output == 'done'
     returns = [
@@ -1621,84 +1568,6 @@ async def test_merged_mode_end_to_end_mixes_tools_and_sub_agents() -> None:
         for m in result.all_messages()
         if isinstance(m, ModelRequest)
         for p in m.parts
-        if isinstance(p, ToolReturnPart) and p.tool_name == 'run_code'
+        if isinstance(p, ToolReturnPart) and p.tool_name == 'run_workflow'
     ]
-    assert returns[-1].content == {'data': 'data-from-https://example.com', 'reviews': ['LGTM', 'LGTM']}
-
-
-async def test_merged_mode_budget_shared_and_exhaustion_raises() -> None:
-    # The same per-run budget applies to sub-agents called as tools; the call after the
-    # ceiling raises, which inside CodeMode's sandbox surfaces as a `run_code` retry.
-    ts = DynamicWorkflowToolset[object](agents=[_wf_agent()], max_agent_calls=2)
-    ctx = _code_mode_ctx()
-    tool = (await ts.get_tools(ctx))['sub']
-    assert await ts.call_tool('sub', {'task': 'a'}, ctx, tool) == 'ok'
-    assert await ts.call_tool('sub', {'task': 'b'}, ctx, tool) == 'ok'
-    with pytest.raises(RuntimeError, match=r'sub-agent call budget \(2\) exhausted'):
-        await ts.call_tool('sub', {'task': 'c'}, ctx, tool)
-
-
-async def test_merged_mode_structured_output_returned_as_dict() -> None:
-    ts = DynamicWorkflowToolset[object](agents=[WorkflowAgent(_review_agent())])
-    ctx = _code_mode_ctx()
-    tool = (await ts.get_tools(ctx))['reviewer']
-    out = await ts.call_tool('reviewer', {'task': 'rate this'}, ctx, tool)
-    assert out == {'score': 9, 'note': 'great'}
-
-
-async def test_merged_mode_reveal_adds_tool_without_announcement() -> None:
-    # In merged mode a reveal needs no enqueued announcement: the new function simply appears
-    # in the `run_code` catalog, which CodeMode re-renders each step.
-    workflow = DynamicWorkflow[object](agents=[_sub_agent('b', 'base')])
-    ts = workflow.get_toolset()
-    ctx = _code_mode_ctx(workflow)
-    assert set(await ts.get_tools(ctx)) == {'base'}
-    workflow.reveal(_sub_agent('e', 'extra'))
-    assert set(await ts.get_tools(ctx)) == {'base', 'extra'}
-    assert _enqueued_text(ctx) == ''
-
-
-async def test_merged_mode_nesting_refused_end_to_end() -> None:
-    # A sub-agent invoked through the merged path must not delegate further: its own merged
-    # sub-agent tool returns the refusal as a value the inner script can observe.
-    leaf = _sub_agent('leaf-done', 'leaf')
-    inner_returns: list[Any] = []
-
-    def inner_fn(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
-        returns = [
-            p
-            for m in messages
-            if isinstance(m, ModelRequest)
-            for p in m.parts
-            if isinstance(p, ToolReturnPart) and p.tool_name == 'run_code'
-        ]
-        if returns:
-            inner_returns.append(returns[-1].content)
-            return ModelResponse(parts=[TextPart('inner saw refusal')])
-        return ModelResponse(parts=[ToolCallPart(tool_name='run_code', args={'code': "await leaf(task='x')"})])
-
-    inner: Agent[object, str] = Agent(
-        FunctionModel(inner_fn),
-        name='inner',
-        capabilities=[CodeMode[object](), DynamicWorkflow[object](agents=[leaf])],
-    )
-
-    def outer_fn(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
-        if len(messages) == 1:
-            return ModelResponse(parts=[ToolCallPart(tool_name='run_code', args={'code': "await inner(task='go')"})])
-        return ModelResponse(parts=[TextPart('done')])
-
-    outer: Agent[object, str] = Agent(
-        FunctionModel(outer_fn),
-        capabilities=[CodeMode[object](), DynamicWorkflow[object](agents=[inner])],
-    )
-    result = await outer.run('start')
-    assert result.output == 'done'
-    assert inner_returns == [
-        {
-            'error': (
-                'Sub-agent delegation does not nest: this agent was itself invoked as a sub-agent. '
-                'Return your result to the caller instead.'
-            )
-        }
-    ]
+    assert returns[-1].content == 'LGTM'

@@ -745,6 +745,34 @@ class TestCodeMode:
         assert 'load_capability' in tools
         assert tools['load_capability'].tool_def.tool_kind == 'capability-load'
 
+    async def test_code_execution_tool_not_sandboxed(self) -> None:
+        """A tool that is itself a code sandbox (carries `code_arg_name` metadata) stays native.
+
+        Folding one code-execution tool into `run_code` would make the model pass a script as a
+        string argument to a function inside another script. Such a tool (e.g. DynamicWorkflow's
+        `run_workflow`) is a peer of `run_code`, exposed alongside it, not inside it.
+        """
+        td_run_workflow = ToolDefinition(
+            name='run_workflow',
+            description='Run an orchestration script.',
+            parameters_json_schema={'type': 'object', 'properties': {'code': {'type': 'string'}}, 'required': ['code']},
+            return_schema={'type': 'string'},
+            metadata={'code_arg_name': 'code', 'code_arg_language': 'python'},
+        )
+        static = _StaticToolset([_make_address_tool_def('get_user', 'Get a user.', 'street'), td_run_workflow])
+        wrapper = CodeMode[object]().get_wrapper_toolset(static)
+        assert isinstance(wrapper, CodeModeToolset)
+
+        tools = await wrapper.get_tools(build_run_context(None))
+
+        description = tools['run_code'].tool_def.description
+        assert description is not None
+        # Ordinary tools are still sandboxed...
+        assert 'async def get_user' in description
+        # ...but the code-execution tool stays native and is not folded into run_code.
+        assert 'run_workflow' not in description
+        assert 'run_workflow' in tools
+
     async def test_unless_native_tool_not_sandboxed(self) -> None:
         """Tools annotated with `unless_native` stay native so `Model.prepare_request` can filter them."""
         td_fallback = ToolDefinition(
