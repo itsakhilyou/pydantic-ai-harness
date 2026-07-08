@@ -25,7 +25,7 @@ import shutil
 import subprocess
 from collections.abc import Sequence
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 __all__ = ['Checkpoint', 'CheckpointError', 'CheckpointStore']
@@ -219,14 +219,16 @@ class CheckpointStore:
         self._git('checkout', sha, '--', *targets)
 
     def _checkpoint(self, sha: str) -> Checkpoint:
-        info = self._git('show', '-s', '--format=%h%n%cI%n%B', sha).stdout
-        short, iso, body = info.split('\n', 2)
+        # `%ct` is the committer date as a Unix timestamp: parsing it is independent of
+        # the git version's ISO rendering (some emit a `Z` suffix that Python < 3.11 rejects).
+        info = self._git('show', '-s', '--format=%h%n%ct%n%B', sha).stdout
+        short, timestamp, body = info.split('\n', 2)
         # `--root` makes the first (parentless) checkpoint list every file it captured
         # instead of an empty diff.
         files = self._git('diff-tree', '--root', '--no-commit-id', '--name-only', '-r', sha).stdout.split('\n')
         return Checkpoint(
             id=short.strip(),
-            time=datetime.fromisoformat(iso.strip()),
+            time=datetime.fromtimestamp(int(timestamp.strip()), tz=timezone.utc),
             tool_name=_parse_trailer(body, _TOOL_TRAILER),
             files_changed=[f for f in (line.strip() for line in files) if f],
         )
