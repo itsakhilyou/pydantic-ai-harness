@@ -60,7 +60,8 @@ checkpoints.restore(cp.id, paths=['src/auth.py'])
 The snapshots live in a repository at `<state_dir>/checkpoints/<project-slug>/`, used with
 `GIT_DIR` pointing at that directory and `GIT_WORK_TREE` pointing at the project root. It has
 its own committer identity, gpg signing off, and no hooks, and it is isolated from the user's
-git config (`GIT_CONFIG_GLOBAL`/`GIT_CONFIG_SYSTEM` are unset for shadow commands).
+git config (`GIT_CONFIG_GLOBAL`/`GIT_CONFIG_SYSTEM` point at `os.devnull` for shadow commands,
+so global and system git config never apply).
 
 - **Never touches the user's `.git`.** The shadow repo has its own `GIT_DIR`; git also refuses
   to add a nested `.git` directory, and `info/exclude` lists `.git/` as a second guard.
@@ -73,7 +74,9 @@ git config (`GIT_CONFIG_GLOBAL`/`GIT_CONFIG_SYSTEM` are unset for shadow command
   previous checkpoint is reused.
 
 `state_dir` defaults to `~/.pydantic-ai-harness`. Point it elsewhere for a project-local or
-ephemeral store.
+ephemeral store. Keep it outside `project_root` (or add it to the project's `.gitignore`): a
+`state_dir` nested under the work tree would be picked up by `git add -A` and snapshotted into
+every checkpoint.
 
 ## When snapshots are taken
 
