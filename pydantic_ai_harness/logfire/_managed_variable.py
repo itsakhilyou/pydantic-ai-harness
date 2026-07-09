@@ -358,3 +358,56 @@ class ManagedVariableCapability(AbstractCapability[AgentDepsT], Generic[AgentDep
                 return await handler()
             finally:
                 self._resolved.reset(token)
+
+    def _resolved_holder(self, resolved: ResolvedVariable[ValueT]) -> _ResolvedVariableHolder[AgentDepsT, ValueT]:
+        """Build the per-run sibling that holds `resolved`'s baggage open for the run.
+
+        For capabilities whose [`for_run`][pydantic_ai.capabilities.AbstractCapability.for_run]
+        resolves the value early and materializes child capabilities from it (e.g.
+        [`ManagedMCP`][pydantic_ai_harness.logfire.ManagedMCP] and
+        [`ManagedSkills`][pydantic_ai_harness.logfire.ManagedSkills]): the children carry the
+        behavior, while this holder does exactly what the base's `wrap_run` does for the simple
+        capabilities -- enter the resolution as baggage, mirror it onto the owner's `resolved`
+        property, and trigger auto-create -- so both flow through the run as siblings.
+        """
+        return _ResolvedVariableHolder[AgentDepsT, ValueT](
+            resolution=resolved,
+            resolution_holder=self._resolved,
+            trigger_auto_create=self._maybe_auto_create_for,
+        )
+
+
+@dataclass
+class _ResolvedVariableHolder(AbstractCapability[AgentDepsT], Generic[AgentDepsT, ValueT]):
+    """Per-run capability that holds a resolved managed variable's baggage open for the run.
+
+    Built by [`ManagedVariableCapability._resolved_holder`][] for capabilities that resolve their
+    value in `for_run` (rather than `wrap_run`) to materialize child capabilities from it. It keeps
+    the [`ResolvedVariable`][logfire.variables.ResolvedVariable] open as a context manager for the
+    whole run, sets the owner's per-run resolution context variable so `resolved` reflects it, and
+    triggers auto-create -- the same plumbing the base's `wrap_run` performs for the simple
+    per-surface capabilities, factored out here so `ManagedMCP` and `ManagedSkills` share it.
+    """
+
+    resolution: ResolvedVariable[ValueT] = field(repr=False, compare=False)
+    """The resolved variable for this run (resolved in the owner's `for_run`, entered here)."""
+
+    resolution_holder: ContextVar[ResolvedVariable[ValueT] | None] = field(repr=False, compare=False)
+    """The owner's per-run context variable, set for the run so the owner's `resolved` reflects it."""
+
+    trigger_auto_create: Callable[[ResolvedVariable[ValueT]], None] = field(repr=False, compare=False)
+    """The owner's auto-create hook, invoked when the provider doesn't recognize the variable yet."""
+
+    def get_ordering(self) -> CapabilityOrdering:
+        """Run outermost so the resolution's baggage envelops the whole run, including the run span."""
+        return CapabilityOrdering(position='outermost', wraps=[Instrumentation])
+
+    async def wrap_run(self, ctx: RunContext[AgentDepsT], *, handler: WrapRunHandler) -> AgentRunResult[Any]:
+        """Keep the (already-resolved) variable's baggage active for the run, and auto-create if new."""
+        self.trigger_auto_create(self.resolution)
+        with self.resolution:
+            token = self.resolution_holder.set(self.resolution)
+            try:
+                return await handler()
+            finally:
+                self.resolution_holder.reset(token)

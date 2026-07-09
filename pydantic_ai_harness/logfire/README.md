@@ -9,6 +9,8 @@ Each capability manages one surface of the agent, so you adopt exactly as much a
 - [`ManagedToolDefinitions`](#managedtooldefinitions) -- the LLM-facing definitions (name,
   description, parameter docs) of the agent's tools
 - [`ManagedSettings`](#managedsettings) -- the agent's model and model settings
+- [`ManagedMCP`](#managedmcp) -- the connection to an MCP server, and which of its tools the agent uses
+- [`ManagedSkills`](#managedskills) -- a catalog of instructions-only skills the model loads on demand
 
 ...or manage the whole shape at once:
 
@@ -484,3 +486,139 @@ is published (and a call-site `run(model=...)` still wins). On older pydantic-ai
 - The spec resolves **once per run**, in `for_run` (earlier than the per-surface capabilities, since
   the resolved spec decides what the run is assembled from), and its label + version ride as baggage
   on every span of the run. `ManagedAgentSpec.resolved` exposes the active run's `ResolvedVariable`.
+
+## `ManagedMCP`
+
+Point the agent at an [MCP](https://ai.pydantic.dev/mcp/client/) server -- and steer which of its
+tools the agent uses, how they're namespaced, and how the server is framed -- from one managed
+variable.
+
+### The problem
+
+Which MCP server an agent talks to, and which of that server's tools it's allowed to use, is
+deployment configuration that tends to be baked into code: swapping a staging endpoint for
+production, rotating a token, or narrowing a noisy server down to the two tools you actually want
+all mean a redeploy.
+
+### The solution
+
+Drop `ManagedMCP` onto the agent and the *connection* becomes manageable from Logfire: the URL, the
+auth, a tool filter, a namespace prefix, and a description. The server still runs its own tools --
+**nothing executable is ever downloaded from Logfire.** The managed value only decides *which
+already-trusted server* the agent connects to and *how*; the server is connected locally (via the
+[`MCP`](https://ai.pydantic.dev/capabilities/) capability), so credentials, hooks, and tracing stay
+under your control.
+
+### Usage
+
+The name `github` is declared as the managed variable `mcp__github`, holding a `ManagedMCPValue`
+(omit `name` to default it to the agent's own `name`, `mcp__<agent name>`):
+
+```python
+import logfire
+from pydantic_ai import Agent
+
+from pydantic_ai_harness.logfire import ManagedMCP
+
+logfire.configure()
+
+agent = Agent(
+    'openai:gpt-5',
+    capabilities=[ManagedMCP('github', label='production')],
+)
+```
+
+The value carries the connection and the knobs around it -- every field but `url` is optional:
+
+```json
+{
+  "url": "https://mcp.example.com/github",
+  "authorization": "Bearer ghp_...",
+  "headers": {"X-Env": "prod"},
+  "tools": ["search_issues", "create_issue"],
+  "tool_prefix": "gh",
+  "description": "GitHub issue tools."
+}
+```
+
+### Notes
+
+- **Connection, not code:** the managed value only ever configures a connection to a server you
+  already trust; it can't introduce runnable code. Connecting a server locally needs the `mcp` extra
+  (`pip install 'pydantic-ai-slim[mcp]'`); the requirement surfaces only once a `url` is published.
+- **No URL, no server:** with no `url` published (the empty code default), the capability contributes
+  nothing and the agent runs exactly as coded -- the same additive-fallback contract as the others.
+- `tools` filters the server's tools by their own names *before* `tool_prefix` namespaces them, so
+  `tools=["search"]` with `tool_prefix="gh"` advertises just `gh_search`.
+- **Optional `name`:** omit `name` to default the backing variable to the agent's own `name`
+  (`mcp__<agent name>`). Resolves **once per run**, in `for_run` (the connection decides what toolset
+  the run is assembled from), with its label + version riding as baggage on every span of the run.
+
+## `ManagedSkills`
+
+Publish a catalog of **skills** -- named, described bundles of instructions the model pulls in on
+demand -- from one managed variable.
+
+### The problem
+
+A capable agent often needs a lot of situational guidance: how to handle refunds, how shipping
+works, what the escalation policy is. Pasting all of it into the system prompt bloats every request
+(and its cost), and editing any of it means a redeploy.
+
+### The solution
+
+Drop `ManagedSkills` onto the agent and publish skills from Logfire. Each skill is **instructions
+only** -- a `name`, a `description`, and `instructions` -- and carries no tool code, so a managed
+skill can only ever add guidance, never run code. That's a deliberate safety limit: downloading
+runnable tools from a remote UI is unsafe, so skills stop at instructions.
+
+Skills use the framework's **progressive disclosure** (`defer_loading`): the model first sees only a
+short catalog -- each skill's `name` and `description` -- next to a `load_capability` tool the
+framework provides. A skill's `instructions` are added only after the model loads it, so a large
+skill library costs a short catalog rather than a bloated prompt.
+
+### Usage
+
+The name `support_agent` is declared as the managed variable `skill__support_agent`, holding a list
+of `ManagedSkill`s (omit `name` to default it to the agent's own `name`, `skill__<agent name>`):
+
+```python
+import logfire
+from pydantic_ai import Agent
+
+from pydantic_ai_harness.logfire import ManagedSkills
+
+logfire.configure()
+
+agent = Agent(
+    'openai:gpt-5',
+    capabilities=[ManagedSkills('support_agent', label='production')],
+)
+```
+
+Each entry is a `ManagedSkill` -- the `description` is the catalog blurb the model routes on; the
+`instructions` are revealed only once it loads the skill:
+
+```json
+[
+  {
+    "name": "refunds",
+    "description": "How to handle refund requests.",
+    "instructions": "Refunds are allowed within 30 days of purchase. Always confirm the order id first."
+  }
+]
+```
+
+### Notes
+
+- **Instructions only -- safe by construction:** a skill can never download or run tool code; it only
+  contributes guidance. This is the deliberate difference from [`ManagedMCP`](#managedmcp), which
+  connects an (already-trusted) server rather than shipping code.
+- **Progressive disclosure:** each skill is a deferred capability. The catalog and `load_capability`
+  tool are provided by the framework for any deferred capability; `ManagedSkills` just contributes the
+  skills. Instructions load only when the model asks for them.
+- Two skills sharing a `name` would collide on their capability id, so the last one wins and a warning
+  is emitted rather than breaking the run. An empty or invalid list simply adds no skills.
+- **Optional `name`:** omit `name` to default the backing variable to the agent's own `name`
+  (`skill__<agent name>`). Resolves **once per run**, in `for_run` (the deferred skills must be in
+  place before the catalog is assembled), with its label + version riding as baggage on every span.
