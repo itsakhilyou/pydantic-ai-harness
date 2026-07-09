@@ -126,7 +126,13 @@ async def test_records_variable_resolution_span(capfire: CaptureLogfire) -> None
 
     # Without `Instrumentation` the only span is the one Logfire records for resolving the
     # prompt variable -- the resolved value, label, version, and reason are captured as attributes.
-    assert span_attributes(capfire) == snapshot(
+    spans = span_attributes(capfire)
+    # The `reason` for a no-provider resolution is worded differently across logfire versions
+    # ('no_provider' before 4.37, 'code_default' after), so assert it separately and drop it from the
+    # structural snapshot below.
+    assert len(spans) == 1
+    assert spans[0]['attributes'].pop('reason') in ('code_default', 'no_provider')
+    assert spans == snapshot(
         [
             {
                 'name': 'Resolve variable prompt__span_slug',
@@ -141,7 +147,6 @@ async def test_records_variable_resolution_span(capfire: CaptureLogfire) -> None
                     'value': '"You are a helpful assistant."',
                     'label': 'null',
                     'version': 'null',
-                    'reason': 'code_default',
                     'logfire.json_schema': '{"type":"object","properties":{"name":{},"targeting_key":{"type":"null"},"attributes":{"type":"object"},"value":{},"label":{"type":"null"},"version":{"type":"null"},"reason":{}}}',
                 },
             }
