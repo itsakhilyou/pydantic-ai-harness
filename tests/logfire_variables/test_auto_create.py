@@ -99,6 +99,34 @@ async def test_unknown_variable_is_auto_created(capfire: CaptureLogfire, spawned
     assert created.example == '"You are a helpful assistant."'
 
 
+async def test_code_default_fallback_reason_still_triggers_create(
+    capfire: CaptureLogfire, spawned_inline: list[str]
+) -> None:
+    # Regression for logfire >= 4.37: an unrecognized variable's fallback to the code default is
+    # reported as the generic `'code_default'` reason (older SDKs surfaced `'unrecognized_variable'`
+    # as the final reason). Auto-create must key off the provider not recognizing the name -- not the
+    # exact reason string -- so it still fires here. Assert both that the run saw a code-default
+    # fallback reason and that the variable was created.
+    capability = ManagedPrompt('auto_reason', default=DEFAULT)
+    seen_reasons: list[str | None] = []
+
+    def record_reason() -> str:
+        resolved = capability.resolved
+        seen_reasons.append(_managed_variable.resolution_reason(resolved) if resolved is not None else None)
+        return 'ok'
+
+    config = VariablesConfig(variables={})
+    with variables_provider(capfire, config):
+        agent = Agent(TestModel(), tools=[record_reason], capabilities=[capability])
+        await agent.run('hello')
+
+    # The value fell back to the code default (whichever reason this logfire surfaces for it)...
+    assert seen_reasons == ['code_default'] or seen_reasons == ['unrecognized_variable']
+    # ...and that still triggered creation of the previously-unknown variable.
+    assert spawned_inline == ['prompt__auto_reason']
+    assert 'prompt__auto_reason' in config.variables
+
+
 async def test_real_background_thread_creates_variable(capfire: CaptureLogfire) -> None:
     # Exercise the genuine fire-and-forget path (no `_spawn_create` monkeypatch): a daemon thread
     # creates the variable in the local provider off the run's thread. Poll inside the provider

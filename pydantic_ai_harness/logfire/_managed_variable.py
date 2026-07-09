@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Any, Generic
 
 import logfire
 from logfire.variables import Variable, VariableAlreadyExistsError
+from logfire.variables.abstract import NoOpVariableProvider
 from pydantic_ai.capabilities import AbstractCapability, CapabilityOrdering, Instrumentation
 from pydantic_ai.tools import AgentDepsT, RunContext
 from typing_extensions import TypeVar
@@ -51,6 +52,12 @@ def resolution_reason(resolved: ResolvedVariable[Any]) -> str | None:
 # (not on success), so a failed create -- e.g. a read-only token -- does not retry on every run.
 _auto_create_attempted: set[str] = set()
 _auto_create_lock = threading.Lock()
+
+# Resolution reasons that mean "the value fell back to the code default because the provider had no
+# value for it". logfire >= 4.37 collapses the "provider doesn't recognize this variable" case into
+# the general `'code_default'` reason; older SDKs surface `'unrecognized_variable'` directly. We
+# accept both and then confirm the actual cause against the provider (see `_maybe_auto_create_for`).
+_CODE_DEFAULT_REASONS = frozenset({'code_default', 'unrecognized_variable'})
 
 
 def _reset_auto_create_guard() -> None:  # pyright: ignore[reportUnusedFunction]
@@ -199,14 +206,26 @@ class ManagedVariableCapability(AbstractCapability[AgentDepsT], Generic[AgentDep
         _spawn_create(self._variable)
 
     def _maybe_auto_create_for(self, resolved: ResolvedVariable[ValueT]) -> None:
-        """Trigger background auto-create when the provider doesn't recognize the variable yet.
+        """Trigger background auto-create when a configured provider doesn't recognize the variable yet.
 
-        `'unrecognized_variable'` means a provider is configured but doesn't know this name yet --
-        the case auto-create is for. Reasons like `'no_provider'`/`'missing_config'` mean there's
-        no provider (or config) to create into, so they must not trigger.
+        Auto-create is for exactly one case: a provider is configured but has no entry for this name,
+        so resolution fell back to the code default. logfire >= 4.37 reports that as `'code_default'`
+        (older SDKs as `'unrecognized_variable'`), but `'code_default'` also covers "no provider
+        configured" and "known variable with no targeted value" -- neither of which should create
+        anything. So we confirm against the provider itself: it must be a real (non-`NoOp`) provider
+        that has no config for this name. A `resolved`/`context_override` value isn't a candidate at
+        all, and is filtered out by the reason check up front.
         """
-        if self.auto_create and resolution_reason(resolved) == 'unrecognized_variable':
-            self._maybe_auto_create()
+        if not self.auto_create or resolution_reason(resolved) not in _CODE_DEFAULT_REASONS:
+            return
+        provider = self._variable.logfire_instance.config.get_variable_provider()
+        if isinstance(provider, NoOpVariableProvider):
+            # No provider to create into (the `'no_provider'` case).
+            return
+        if provider.get_variable_config(self._variable.name) is not None:
+            # The provider already knows this variable (a configured value, or one awaiting a target).
+            return
+        self._maybe_auto_create()
 
     def _resolve(self, ctx: RunContext[AgentDepsT]) -> ResolvedVariable[ValueT]:
         """Resolve the backing variable for this run using the capability's targeting inputs.
