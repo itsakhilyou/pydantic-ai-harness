@@ -1,3 +1,8 @@
+---
+title: ConfinedAuthoring
+description: Let an agent author, validate, and persist its own typed, sandboxed tools, callable on its next run and reaching the host only through a default-deny allowlist of injected functions.
+---
+
 # ConfinedAuthoring
 
 !!! warning "Experimental"
@@ -22,18 +27,28 @@
 Let an agent author, validate, and persist its own **sandboxed** tools -- and call them on
 its next run.
 
+## Installation
+
+This capability runs authored slots in the [Monty](https://github.com/pydantic/monty) sandbox, so
+it needs the same extra `CodeMode` uses (no new extra is added):
+
+```bash
+uv add "pydantic-ai-harness[code-mode]"
+```
+
 ## The problem
 
 An agent often discovers, mid-task, that it wants a tool its host does not have. Two existing
 options each give up something:
 
-- `RuntimeAuthoring` lets the agent write a real capability, but that capability runs arbitrary
-  Python **in the host process**. It fits when the agent already runs shell commands and edits
-  files -- the same trust boundary -- but not when the authoring model is untrusted, when
+- [`RuntimeAuthoring`](authoring.md) lets the agent write a real capability, but that capability
+  runs arbitrary Python **in the host process**. It fits when the agent already runs shell commands
+  and edits files -- the same trust boundary -- but not when the authoring model is untrusted, when
   authored tools must be isolated per tenant, or when the host wants the authored tool to reach
   only a narrow set of host functions.
-- `CodeMode` runs model-written Python in a Monty sandbox, but its `run_code` tool is ephemeral:
-  nothing the agent writes survives the call, so it cannot grow a durable tool.
+- [`CodeMode`](../capabilities/code-mode.md) runs model-written Python in a Monty sandbox, but its
+  `run_code` tool is ephemeral: nothing the agent writes survives the call, so it cannot grow a
+  durable tool.
 
 `ConfinedAuthoring` fills the gap those two leave: authored tools that are **typed and
 validated**, **sandboxed**, **persistent**, and reach the host only through a **capability-scoped,
@@ -135,6 +150,8 @@ host can let one agent author slots and a separate, least-privilege agent run th
 `SlotStore`:
 
 ```python
+from pathlib import Path
+
 from pydantic_ai import Agent
 from pydantic_ai_harness.experimental.confined_authoring import ConfinedAuthoringToolset, SlotStore
 
@@ -152,9 +169,22 @@ serving = Agent('anthropic:claude-sonnet-4-6', toolsets=[ConfinedAuthoringToolse
   injected-function allowlist be the only escape hatch. A slot can do exactly what its `uses`
   functions allow, and no more.
 
+Across these, a default `max_duration_secs` cap (overridable via `resource_limits`) bounds a slot's
+in-sandbox compute, so a hostile slot cannot hang the host indefinitely with a pure-CPU loop.
+
 ## Scope
 
 Only `tool` slots exist today. The slot record carries a `kind` field so `hook` and
 `instruction` slots can be added without a manifest migration; those kinds are not implemented
 yet. Return-shape is checked statically at authoring time and guarded again at execution when a
 return type is declared.
+
+## API reference
+
+::: pydantic_ai_harness.experimental.confined_authoring.ConfinedAuthoring
+
+::: pydantic_ai_harness.experimental.confined_authoring.ConfinedAuthoringToolset
+
+::: pydantic_ai_harness.experimental.confined_authoring.InjectedFunction
+
+::: pydantic_ai_harness.experimental.confined_authoring.SlotStore

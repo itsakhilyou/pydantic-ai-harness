@@ -416,6 +416,17 @@ class TestServingToolset:
         with pytest.raises(ModelRetry, match='aborted inside the sandbox'):
             await _call_slot(ConfinedAuthoringToolset[object](store=store), 'dup', {'city': 'X'})
 
+    async def test_duration_cap_bounds_compute(self, tmp_path: Path) -> None:
+        # A pure-CPU slot with no await would block the event loop until an external kill.
+        # `_DEFAULT_LIMITS` caps in-sandbox compute (default 30s); a low `resource_limits`
+        # override bounds this runaway as a retry instead of hanging the test.
+        store = _store(tmp_path, functions=[])
+        code = 'n = 0\nwhile n < 10_000_000_000:\n    n = n + 1\nn'
+        _author(store, name='spin', code=code, parameters=[], uses=[], returns=None)
+        toolset = ConfinedAuthoringToolset[object](store=store, resource_limits={'max_duration_secs': 0.1})
+        with pytest.raises(ModelRetry, match='raised at runtime'):
+            await _call_slot(toolset, 'spin', {})
+
     async def test_non_panic_base_exception_propagates(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         class _Boom(BaseException):
             pass

@@ -22,6 +22,15 @@
 Let an agent author, validate, and persist its own **sandboxed** tools -- and call them on
 its next run.
 
+## Installation
+
+This capability runs authored slots in the [Monty](https://github.com/pydantic/monty) sandbox,
+so it needs the same extra `CodeMode` uses (no new extra is added):
+
+```bash
+uv add "pydantic-ai-harness[code-mode]"
+```
+
 ## The problem
 
 An agent often discovers, mid-task, that it wants a tool its host does not have. Two existing
@@ -136,6 +145,8 @@ host can let one agent author slots and a separate, least-privilege agent run th
 `SlotStore`:
 
 ```python
+from pathlib import Path
+
 from pydantic_ai import Agent
 from pydantic_ai_harness.experimental.confined_authoring import ConfinedAuthoringToolset, SlotStore
 
@@ -152,6 +163,9 @@ serving = Agent('anthropic:claude-sonnet-4-6', toolsets=[ConfinedAuthoringToolse
 - **Deliberately least-privilege agents.** Remove broad tools (shell, file writes) and let the
   injected-function allowlist be the only escape hatch. A slot can do exactly what its `uses`
   functions allow, and no more.
+
+Across these, a default `max_duration_secs` cap (overridable via `resource_limits`) bounds a slot's
+in-sandbox compute, so a hostile slot cannot hang the host indefinitely with a pure-CPU loop.
 
 ## Scope
 

@@ -103,7 +103,9 @@ class ConfinedAuthoring(AbstractCapability[AgentDepsT]):
     """Maximum retries for a served slot tool when its sandbox execution raises."""
 
     resource_limits: ResourceLimits | None = None
-    """Sandbox limits for slot execution. `None` uses a memory/allocation backstop with no duration cap."""
+    """Sandbox limits for slot execution. `None` uses a memory/allocation backstop plus a default
+    30s cap on in-sandbox compute. A partial mapping merges onto that backstop, overriding only the
+    caps it names."""
 
     @property
     def store(self) -> SlotStore[AgentDepsT]:

@@ -52,7 +52,16 @@ except ImportError as _import_error:  # pragma: no cover
 
 from pydantic_ai_harness._monty_exec import MontyExecutor, PrintCapture, is_sandbox_panic
 
-_DEFAULT_LIMITS: ResourceLimits = {'max_memory': 256 * 1024 * 1024, 'max_allocations': 50_000_000}
+# `max_duration_secs` bounds pure sandbox compute: Monty checks it per bytecode step, so it caps a
+# runaway like `while True: pass` that would otherwise block the host event loop until an external
+# kill. It does NOT cover time spent awaiting host-side injected functions, which run suspended on
+# the host rather than in the sandbox. 30s is generous for a typed tool-slot's pure compute; a host
+# can raise any of these via `resource_limits=`.
+_DEFAULT_LIMITS: ResourceLimits = {
+    'max_memory': 256 * 1024 * 1024,
+    'max_allocations': 50_000_000,
+    'max_duration_secs': 30.0,
+}
 
 
 class _AuthoringControlToolset(FunctionToolset[AgentDepsT]):
@@ -173,7 +182,9 @@ class ConfinedAuthoringToolset(AbstractToolset[AgentDepsT]):
     """Maximum retries for a served slot tool (a sandbox runtime error counts as a retry)."""
 
     resource_limits: ResourceLimits | None = None
-    """Sandbox limits for slot execution. `None` uses a memory/allocation backstop with no duration cap."""
+    """Sandbox limits for slot execution. `None` uses a memory/allocation backstop plus a default
+    30s cap on in-sandbox compute. A partial mapping merges onto that backstop, overriding only the
+    caps it names."""
 
     toolset_id: str | None = None
     """Stable toolset id; defaults to `confined_authoring_slots`."""
