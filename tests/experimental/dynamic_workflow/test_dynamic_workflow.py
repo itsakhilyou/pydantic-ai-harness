@@ -1144,6 +1144,21 @@ async def test_runaway_loop_stopped_by_duration_cap() -> None:
         await _run_script(ts, 'while True:\n    x = 1')
 
 
+async def test_awaiting_sub_agents_does_not_count_against_duration_cap() -> None:
+    # `max_duration_secs` bounds in-sandbox execution time, not wall-clock: time the script spends
+    # awaiting sub-agents is spent suspended on the host, so it must not accrue against the cap.
+    # Here three sub-agents each sleep 0.2s on the host under a 0.1s cap; the workflow still
+    # completes. Guards the documented behavior that the timer excludes sub-agent latency.
+    async def slow_model(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        await asyncio.sleep(0.2)
+        return ModelResponse(parts=[TextPart('done')])
+
+    sub: Agent[object, str] = Agent(FunctionModel(slow_model), name='sub')
+    ts = DynamicWorkflowToolset[object](agents=[WorkflowAgent(agent=sub)], resource_limits={'max_duration_secs': 0.1})
+    code = "import asyncio\nawait asyncio.gather(sub(task='a'), sub(task='b'), sub(task='c'))"
+    assert await _run_script(ts, code) == ['done', 'done', 'done']
+
+
 async def test_resource_limit_override_is_enforced_in_the_sandbox() -> None:
     # The configured cap reaches the sandbox: a script comfortably under the default backstop
     # trips a small explicit `max_memory`, proving a partial dict is applied (merged, not dropped).

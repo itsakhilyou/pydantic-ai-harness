@@ -102,11 +102,11 @@ class DynamicWorkflow(AbstractCapability[AgentDepsT]):
     resource_limits: WorkflowResourceLimits | Literal['unlimited'] | None = None
     """Sandbox limits guarding the orchestration script's own memory/allocations.
 
-    `None` applies a safe backstop (256 MB, 50M allocations, no wall-clock cap); `'unlimited'`
+    `None` applies a safe backstop (256 MB, 50M allocations, no execution-time cap); `'unlimited'`
     removes all limits; a `WorkflowResourceLimits` mapping is merged onto the backstop, overriding
-    only the caps it names. There is no default `max_duration_secs` because the timer counts total
-    wall-clock -- including time awaiting `asyncio.gather` -- so a default would abort ordinary
-    parallel workflows; set one to bound runtime (and to guard a pure-CPU `while True`).
+    only the caps it names. There is no default `max_duration_secs`: Monty's timer bounds in-sandbox
+    execution time and time awaiting sub-agents does not count against it, so set one only to guard
+    a pure-CPU `while True` loop.
     """
 
     @classmethod

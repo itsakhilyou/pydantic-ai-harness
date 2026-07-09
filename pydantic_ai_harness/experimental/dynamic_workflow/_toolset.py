@@ -53,12 +53,12 @@ class WorkflowResourceLimits(TypedDict, total=False):
     """
 
     max_duration_secs: float
-    """Maximum total wall-clock seconds for the script -- **including** time spent awaiting
-    sub-agents dispatched concurrently with `asyncio.gather` (the sandbox's duration timer accrues
-    across that suspension; it only excludes the wait for sub-agents awaited one at a time). There
-    is no default cap, because one would also kill ordinary parallel fan-out, not just a runaway.
-    Set this only to put a hard ceiling on a whole orchestration's runtime; it is also the only
-    guard against a pure-CPU `while True` loop, which otherwise blocks the event loop."""
+    """Ceiling on the time the script spends executing sandbox code. Monty checks it per bytecode
+    step, so time spent awaiting sub-agents does not count against it -- neither a single `await`
+    nor a concurrent `asyncio.gather` batch, because during that wait the script is suspended on
+    the host, not running sandbox code. There is no default cap. Set one to bound a pure-CPU
+    `while True` loop, which would otherwise burn a core and block the event loop -- the one
+    runaway the sub-agent budgets do not catch."""
 
     max_memory: int
     """Maximum sandbox memory, in bytes."""
