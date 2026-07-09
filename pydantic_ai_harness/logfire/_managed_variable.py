@@ -20,6 +20,7 @@ import logfire
 from logfire.variables import Variable, VariableAlreadyExistsError
 from logfire.variables.abstract import NoOpVariableProvider
 from pydantic_ai.capabilities import AbstractCapability, CapabilityOrdering, Instrumentation
+from pydantic_ai.exceptions import UserError
 from pydantic_ai.tools import AgentDepsT, RunContext
 from typing_extensions import TypeVar
 
@@ -95,14 +96,31 @@ def _create_variable(variable: Variable[Any]) -> None:
         warnings.warn(f'Failed to auto-create Logfire managed variable {variable.name!r}: {exc}')
 
 
+@dataclass(frozen=True)
+class _DeferredVariable(Generic[ValueT]):
+    """The inputs to build the backing variable lazily.
+
+    Remembered by [`ManagedVariableCapability._setup_variable`][] when the capability's `name` was
+    omitted, so the backing variable can be constructed as `<prefix><agent name>` from the running
+    agent's own `name` on first run-time use (there is no agent at construction time on this
+    pydantic-ai version).
+    """
+
+    prefix: str
+    value_type: type[ValueT]
+    default: ValueT
+
+
 @dataclass
 class ManagedVariableCapability(AbstractCapability[AgentDepsT], Generic[AgentDepsT, ValueT]):
     """Base for capabilities that resolve a Logfire managed variable once per run.
 
-    Subclasses set `self._variable` (and `self._resolved`) in their `__post_init__` -- typically via
-    `_build_managed_variable` for a declared name, or directly from a pre-built
-    [`logfire.variables.Variable`][logfire.variables.Variable] -- then expose the active run's
-    resolution through their own surface (instructions, a toolset wrapper, ...).
+    Subclasses call `_setup_variable` from their `__post_init__` with their prefix, value type, and
+    default. When an explicit `name` (or a pre-built [`Variable`][logfire.variables.Variable]) is
+    given, the backing variable is built eagerly; when `name` is omitted, its construction is
+    deferred to the first run-time use, where it is derived from the running agent's own `name` (see
+    `_ensure_variable`). Either way, the capability exposes the active run's resolution through its
+    own surface (instructions, a toolset wrapper, ...).
     """
 
     label: str | None = field(default=None, kw_only=True)
@@ -136,7 +154,16 @@ class ManagedVariableCapability(AbstractCapability[AgentDepsT], Generic[AgentDep
     per variable. Set to `False` to opt out."""
 
     _variable: Variable[ValueT] = field(init=False, repr=False, compare=False)
-    """The managed variable backing this capability (declared by the subclass)."""
+    """The managed variable backing this capability. Assigned eagerly in `_setup_variable` for an
+    explicit name/`Variable`; for a nameless capability it is left unset until `_ensure_variable`
+    builds it from the agent's `name` on first run-time use (use `_built_variable` to read it safely
+    before then)."""
+
+    _deferred: _DeferredVariable[ValueT] | None = field(init=False, default=None, repr=False, compare=False)
+    """The inputs to build `_variable` lazily, set only when `name` was omitted; `None` otherwise."""
+
+    _build_lock: threading.Lock = field(init=False, default_factory=threading.Lock, repr=False, compare=False)
+    """Guards the lazy build of `_variable` so concurrent first runs don't each construct one."""
 
     _resolved: ContextVar[ResolvedVariable[ValueT] | None] = field(init=False, repr=False, compare=False)
     """Per-run resolution, isolated across concurrent runs via the context variable."""
@@ -144,6 +171,77 @@ class ManagedVariableCapability(AbstractCapability[AgentDepsT], Generic[AgentDep
     def _new_resolved(self) -> ContextVar[ResolvedVariable[ValueT] | None]:
         """A fresh per-run resolution context variable; `None` means nothing is resolved yet."""
         return ContextVar('managed_variable_resolved', default=None)
+
+    def _setup_variable(
+        self, name: str | Variable[ValueT] | None, *, prefix: str, value_type: type[ValueT], default: ValueT
+    ) -> None:
+        """Wire up the backing variable from `name`, deferring construction when `name` was omitted.
+
+        Called from each subclass's `__post_init__`. A str `name` builds `<prefix><name>` eagerly; a
+        pre-built [`Variable`][logfire.variables.Variable] is used as-is (with full `get_model`
+        support); `None` records the build inputs so the variable is derived from the running agent's
+        own `name` on first run-time use (this pydantic-ai version has no construction-time agent hook).
+        """
+        self._resolved = self._new_resolved()
+        if isinstance(name, str):
+            self._variable = self._build_managed_variable(name, prefix=prefix, value_type=value_type, default=default)
+        elif name is not None:
+            self._warn_logfire_instance_ignored('name')
+            self._variable = name
+        else:
+            # Nameless: leave `_variable` unset (there is no agent yet) and remember the build inputs,
+            # so `_ensure_variable` can derive `<prefix><agent name>` on the first run.
+            self._deferred = _DeferredVariable(prefix=prefix, value_type=value_type, default=default)
+
+    @property
+    def _name_omitted(self) -> bool:
+        """Whether the capability was constructed without an explicit `name`.
+
+        When it was, the backing variable is derived from the agent's own `name` at run time rather
+        than built at construction.
+        """
+        return self._deferred is not None
+
+    @property
+    def _built_variable(self) -> Variable[ValueT] | None:
+        """The backing variable if it has been built yet, else `None`.
+
+        For a nameless capability `_variable` is unset until the first run builds it, so read it
+        through this rather than touching `_variable` directly outside a run.
+        """
+        return getattr(self, '_variable', None)
+
+    def _ensure_variable(self, ctx: RunContext[AgentDepsT]) -> Variable[ValueT]:
+        """Return the backing variable, building it from the running agent's `name` on first use.
+
+        For an eagerly-built variable (an explicit `name` or `Variable` was given) this just returns
+        it. For a nameless capability it derives `<prefix><agent name>` from `ctx.agent.name` once,
+        caching the result on the capability so later runs and the other run-time surfaces reuse it.
+        Raises [`UserError`][pydantic_ai.exceptions.UserError] when there is no agent name to derive
+        from -- a nameless managed capability requires the agent to have a `name`.
+        """
+        variable = self._built_variable
+        if variable is not None:
+            return variable
+        deferred = self._deferred
+        assert deferred is not None  # `_variable` is unset only in the nameless (deferred) case.
+        with self._build_lock:
+            # A concurrent first run may have built the variable while we waited for the lock.
+            variable = self._built_variable
+            if variable is not None:
+                return variable
+            agent_name = ctx.agent.name if ctx.agent is not None else None
+            if not agent_name:
+                raise UserError(
+                    'A managed capability without an explicit `name` derives its backing variable from '
+                    "the agent's `name`, but this agent has none. Give the agent a `name=...`, or pass an "
+                    'explicit `name` to the capability.'
+                )
+            variable = self._build_managed_variable(
+                agent_name, prefix=deferred.prefix, value_type=deferred.value_type, default=deferred.default
+            )
+            self._variable = variable
+            return variable
 
     def _warn_logfire_instance_ignored(self, field_name: str) -> None:
         if self.logfire_instance is not None:
@@ -195,15 +293,15 @@ class ManagedVariableCapability(AbstractCapability[AgentDepsT], Generic[AgentDep
         """Run outermost so the resolution's baggage envelops the whole run, including the run span."""
         return CapabilityOrdering(position='outermost', wraps=[Instrumentation])
 
-    def _maybe_auto_create(self) -> None:
+    def _maybe_auto_create(self, variable: Variable[Any]) -> None:
         """Kick off background creation of the backing variable, at most once per process per name."""
-        name = self._variable.name
+        name = variable.name
         with _auto_create_lock:
             if name in _auto_create_attempted:
                 return
             # Mark before spawning: one attempt per process, so a failed create doesn't retry.
             _auto_create_attempted.add(name)
-        _spawn_create(self._variable)
+        _spawn_create(variable)
 
     def _maybe_auto_create_for(self, resolved: ResolvedVariable[ValueT]) -> None:
         """Trigger background auto-create when a configured provider doesn't recognize the variable yet.
@@ -216,23 +314,28 @@ class ManagedVariableCapability(AbstractCapability[AgentDepsT], Generic[AgentDep
         that has no config for this name. A `resolved`/`context_override` value isn't a candidate at
         all, and is filtered out by the reason check up front.
         """
+        # Always called after `_resolve` has built/resolved the variable for this run.
+        variable = self._variable
         if not self.auto_create or resolution_reason(resolved) not in _CODE_DEFAULT_REASONS:
             return
-        provider = self._variable.logfire_instance.config.get_variable_provider()
+        provider = variable.logfire_instance.config.get_variable_provider()
         if isinstance(provider, NoOpVariableProvider):
             # No provider to create into (the `'no_provider'` case).
             return
-        if provider.get_variable_config(self._variable.name) is not None:
+        if provider.get_variable_config(variable.name) is not None:
             # The provider already knows this variable (a configured value, or one awaiting a target).
             return
-        self._maybe_auto_create()
+        self._maybe_auto_create(variable)
 
     def _resolve(self, ctx: RunContext[AgentDepsT]) -> ResolvedVariable[ValueT]:
         """Resolve the backing variable for this run using the capability's targeting inputs.
 
         Shared by `wrap_run` (the base's per-run resolution point) and subclasses that must resolve
         earlier -- e.g. in `for_run`, where the resolved value drives what the run is assembled from.
+        Builds the backing variable from the agent's `name` first when the capability is nameless.
         """
+        variable = self._ensure_variable(ctx)
+
         if callable(self.targeting_key):
             targeting_key = self.targeting_key(ctx)
         else:
@@ -243,7 +346,7 @@ class ManagedVariableCapability(AbstractCapability[AgentDepsT], Generic[AgentDep
         else:
             attributes = self.attributes
 
-        return self._variable.get(targeting_key=targeting_key, attributes=attributes, label=self.label)
+        return variable.get(targeting_key=targeting_key, attributes=attributes, label=self.label)
 
     async def wrap_run(self, ctx: RunContext[AgentDepsT], *, handler: WrapRunHandler) -> AgentRunResult[Any]:
         """Resolve the variable once and keep its baggage active for the duration of the run."""

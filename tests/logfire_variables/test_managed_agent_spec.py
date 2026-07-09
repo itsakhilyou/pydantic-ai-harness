@@ -473,6 +473,7 @@ def test_resolved_agent_spec_get_methods() -> None:
         resolution_holder=ContextVar('holder', default=None),
         model_cache={},
         trigger_auto_create=lambda _resolution: None,
+        get_model_active=True,
     )
     assert populated.get_instructions() == ['hi']
     assert populated.get_model_settings() == {'temperature': 0.5}
@@ -483,6 +484,7 @@ def test_resolved_agent_spec_get_methods() -> None:
         resolution_holder=ContextVar('holder', default=None),
         model_cache={},
         trigger_auto_create=lambda _resolution: None,
+        get_model_active=True,
     )
     assert empty.get_instructions() is None
     assert empty.get_model_settings() is None

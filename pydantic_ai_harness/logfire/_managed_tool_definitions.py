@@ -246,9 +246,10 @@ class ManagedToolDefinitions(ManagedVariableCapability[AgentDepsT, 'list[ToolDef
     want to use a variable you declared yourself.
     """
 
-    name: str | Variable[list[ToolDefinitionOverride]]
+    name: str | Variable[list[ToolDefinitionOverride]] | None = None
     """The managed name (declared as the variable `tool_definitions__<name>`), or a pre-built
-    `logfire.Variable`."""
+    `logfire.Variable`. When omitted, the variable is derived from the agent's own `name` at run time
+    (`tool_definitions__<agent name>`); the agent must then have a `name`."""
 
     default: list[ToolDefinitionOverride] | None = None
     """Code-default override list. When omitted, an empty list (no overrides) is used -- a sensible
@@ -256,13 +257,7 @@ class ManagedToolDefinitions(ManagedVariableCapability[AgentDepsT, 'list[ToolDef
     `Variable`."""
 
     def __post_init__(self) -> None:
-        self._resolved = self._new_resolved()
-        if not isinstance(self.name, str):
-            self._warn_logfire_instance_ignored('name')
-            self._variable = self.name
-            return
-
-        self._variable = self._build_managed_variable(
+        self._setup_variable(
             self.name,
             prefix=_TOOL_DEFINITIONS_VARIABLE_PREFIX,
             value_type=list[ToolDefinitionOverride],

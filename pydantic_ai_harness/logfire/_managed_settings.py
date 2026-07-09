@@ -159,23 +159,21 @@ class ManagedSettings(ManagedVariableCapability[AgentDepsT, ManagedSettingsValue
     of an agent-settings name when you want to use a variable you defined yourself.
     """
 
-    name: str | Variable[ManagedSettingsValue]
-    """The agent-settings name (declared as the variable `agent__<name>`), or a pre-built `logfire.Variable`."""
+    name: str | Variable[ManagedSettingsValue] | None = None
+    """The agent-settings name (declared as the variable `agent__<name>`), or a pre-built
+    `logfire.Variable`. When omitted, the variable is derived from the agent's own `name` at run time
+    (`agent__<agent name>`); the agent must then have a `name`. Note that a nameless capability can't
+    *source* the model via `get_model` (there is no agent at run setup), only override it per request
+    on an agent that already has a model -- pass an explicit `name` to have it source the model."""
 
     default: ManagedSettingsValue | None = None
     """Code-default managed value. When omitted, an empty value is used -- nothing is managed until
     a value is configured in Logfire. Ignored when `name` is a `Variable`."""
 
     def __post_init__(self) -> None:
-        self._resolved = self._new_resolved()
         # Inferred `Model` instances keyed by model string, so a repeated override isn't re-inferred.
         self._model_cache: dict[str, Model] = {}
-        if not isinstance(self.name, str):
-            self._warn_logfire_instance_ignored('name')
-            self._variable = self.name
-            return
-
-        self._variable = self._build_managed_variable(
+        self._setup_variable(
             self.name,
             prefix=_AGENT_SETTINGS_VARIABLE_PREFIX,
             value_type=ManagedSettingsValue,
@@ -205,7 +203,14 @@ class ManagedSettings(ManagedVariableCapability[AgentDepsT, ManagedSettingsValue
         back to `None`). The per-run `wrap_run` resolution still runs its own `.get()` (for baggage,
         and for the callable inputs the per-request surfaces use); that second resolve is a cheap
         in-memory lookup that returns a consistent value via the SDK's cached config.
+
+        A nameless capability returns `None` here: its backing variable is derived from the agent's
+        `name`, which isn't available at run setup (there is no `RunContext`), so it can't source the
+        model. It can still *override* the model per request via `before_model_request` on an agent
+        that has a code-side model; pass an explicit `name` to have it source the model instead.
         """
+        if self._name_omitted:
+            return None
         targeting_key = None if callable(self.targeting_key) else self.targeting_key
         attributes = None if callable(self.attributes) else self.attributes
         return self._variable.get(targeting_key=targeting_key, attributes=attributes, label=self.label).value.model
@@ -217,10 +222,12 @@ class ManagedSettings(ManagedVariableCapability[AgentDepsT, ManagedSettingsValue
 
         On pydantic-ai with the `get_model` hook, `get_model` above already sourced the managed model
         at run setup with the correct precedence, so this stands down -- swapping again here would
-        re-apply it over a per-run `model=`. Only older versions without the hook fall through to the
-        per-request swap.
+        re-apply it over a per-run `model=`. It stands down only when `get_model` actually supplied the
+        model, i.e. an explicit `name` was given; a nameless capability can't source via `get_model`
+        (no agent at run setup), so it does the run-time swap here using the lazily-built variable.
+        Older versions without the hook always fall through to the per-request swap.
         """
-        if _FRAMEWORK_HAS_GET_MODEL:
+        if _FRAMEWORK_HAS_GET_MODEL and not self._name_omitted:
             return request_context
 
         resolved = self.resolved

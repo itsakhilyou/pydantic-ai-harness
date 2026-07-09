@@ -15,6 +15,32 @@ Each capability manages one surface of the agent, so you adopt exactly as much a
 - [`ManagedAgentSpec`](#managedagentspec) -- the agent's instructions, model, settings, and
   capabilities together, as one versioned `AgentSpec`
 
+Each capability takes an optional `name` that selects its backing variable. **When you omit it, the
+name defaults to the agent's own `name`** -- so `ManagedPrompt(default=...)` on an
+`Agent(..., name='weather_agent')` resolves `prompt__weather_agent`, and you don't repeat the name
+per capability:
+
+```python
+from pydantic_ai import Agent
+
+from pydantic_ai_harness.logfire import ManagedPrompt, ManagedSettings, ManagedToolDefinitions
+
+agent = Agent(
+    'openai:gpt-5',
+    name='weather_agent',
+    tools=[...],
+    capabilities=[ManagedPrompt(default=...), ManagedSettings(), ManagedToolDefinitions()],
+)  # -> prompt__weather_agent, agent__weather_agent, tool_definitions__weather_agent
+```
+
+The agent must then have a `name` (pass `name=` or let pydantic-ai infer it from the assignment);
+a nameless capability on a nameless agent raises a clear error. Pass an explicit `name` to decouple
+the variable from the agent's name, or to share one variable across agents. One edge: a nameless
+`ManagedSettings`/`ManagedAgentSpec` can't *source* the model at run setup (there's no agent yet at
+that point) -- it can only override the model on an agent that already has one. Pass an explicit
+`name` when you need it to source the model for a model-less agent (until pydantic-ai#4977 lands a
+construction-time agent hook that will let the nameless case source it too).
+
 They share one contract: **the code-defined agent is the fallback.** Every managed value is a
 patch on what's written in code -- unset fields keep their code values, and a missing, invalid,
 or unreachable remote value degrades to exactly the agent the developer wrote, never a crashed
@@ -62,6 +88,8 @@ iteration and rollback from the Logfire UI.
 Pass the prompt name and a default value. The name `support_agent` is declared as the managed
 variable `prompt__support_agent` -- the naming Logfire's Prompt management uses (hyphens in a
 name become underscores). The default keeps the agent working until a remote value is published.
+Omit `name` to default it to the agent's own `name` (`prompt__<agent name>`); a `default` is still
+required.
 
 ```python
 import logfire
@@ -246,7 +274,8 @@ from the validator the tool actually runs against.
 ### Usage
 
 The name `checkout_assistant` is declared as the managed variable
-`tool_definitions__checkout_assistant`, holding a list of per-tool overrides:
+`tool_definitions__checkout_assistant`, holding a list of per-tool overrides (omit `name` to default
+it to the agent's own `name`, `tool_definitions__<agent name>`):
 
 ```python
 import logfire
@@ -353,6 +382,11 @@ settings, and it's excluded when the payload is lowered to `ModelSettings`.
   the agent's constructor model, and a fully model-less agent can be driven entirely from Logfire.
   (On older pydantic-ai without the `get_model` hook, the model is instead swapped per request, which
   requires a code-side model and can't beat a per-run `model=`.)
+- **Optional `name`:** omit `name` to default the backing variable to the agent's own `name`
+  (`agent__<agent name>`). The one caveat is model *sourcing*: a nameless capability can't source the
+  model at run setup (there's no agent yet then), only override it on an agent that already has a
+  model. Pass an explicit `name` to source the model for a model-less agent (until pydantic-ai#4977
+  adds a construction-time agent hook).
 - `thinking` accepts `true`/`false` or an effort level (`'minimal'` ... `'xhigh'`), exactly like
   the unified `thinking` model setting; per-provider lowering (e.g. effort to budget tokens) is
   pydantic-ai's existing behavior.
@@ -443,6 +477,10 @@ is published (and a call-site `run(model=...)` still wins). On older pydantic-ai
   agent (or `ManagedAgent` with no fallback `model`) can be driven entirely from Logfire. (On older
   pydantic-ai without the `get_model` hook, the model is instead swapped per request, which requires a
   code-side or `ManagedAgent` fallback model and can't beat a per-run `model=`.)
+- **Optional `name`:** omit `name` to default the backing variable to the agent's own `name`
+  (`agentspec__<agent name>`; for `ManagedAgent`, pass the agent's `name` through). As with
+  `ManagedSettings`, a nameless capability can only *override* the model, not source it at run setup;
+  pass an explicit `name` to source the model for a model-less agent (until pydantic-ai#4977).
 - The spec resolves **once per run**, in `for_run` (earlier than the per-surface capabilities, since
   the resolved spec decides what the run is assembled from), and its label + version ride as baggage
   on every span of the run. `ManagedAgentSpec.resolved` exposes the active run's `ResolvedVariable`.

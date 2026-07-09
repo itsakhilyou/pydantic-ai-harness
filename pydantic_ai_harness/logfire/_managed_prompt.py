@@ -69,11 +69,14 @@ class ManagedPrompt(ManagedVariableCapability[AgentDepsT, str]):
     registered for [`variables_push`][logfire.Logfire.variables_push]).
     """
 
-    name: str | Variable[str]
-    """The managed prompt name (declared as the variable `prompt__<name>`), or a pre-built `logfire.Variable`."""
+    name: str | Variable[str] | None = None
+    """The managed prompt name (declared as the variable `prompt__<name>`), or a pre-built
+    `logfire.Variable`. When omitted, the variable is derived from the agent's own `name` at run time
+    (`prompt__<agent name>`); the agent must then have a `name`."""
 
     default: str | None = None
-    """Code-default prompt text. Required when `name` is a prompt name; ignored when `name` is a `Variable`."""
+    """Code-default prompt text. Required when `name` is a prompt name (or omitted); ignored when
+    `name` is a `Variable`."""
 
     render_template: bool = False
     """When `True`, render the resolved prompt as a Handlebars template against the agent's
@@ -82,18 +85,12 @@ class ManagedPrompt(ManagedVariableCapability[AgentDepsT, str]):
     Defaults to `False`, so the resolved prompt is used verbatim."""
 
     def __post_init__(self) -> None:
-        self._resolved = self._new_resolved()
-        if not isinstance(self.name, str):
-            self._warn_logfire_instance_ignored('name')
-            self._variable = self.name
-            return
-
-        if self.default is None:
+        # A prompt name (given or derived from the agent) needs a code default; only a pre-built
+        # `Variable` carries its own.
+        if not isinstance(self.name, Variable) and self.default is None:
             raise TypeError('`default` is required when `name` is a prompt name rather than a `Variable`.')
 
-        self._variable = self._build_managed_variable(
-            self.name, prefix=_PROMPT_VARIABLE_PREFIX, value_type=str, default=self.default
-        )
+        self._setup_variable(self.name, prefix=_PROMPT_VARIABLE_PREFIX, value_type=str, default=self.default or '')
 
     def get_instructions(self) -> Callable[[RunContext[AgentDepsT]], str | None]:
         """Provide the resolved prompt to the agent's system prompt."""
