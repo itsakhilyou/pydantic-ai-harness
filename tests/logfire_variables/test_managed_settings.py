@@ -8,7 +8,7 @@ settings, overriding its model, and falling back to code on a bad remote value.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, cast
 
 import logfire
 import pytest
@@ -20,8 +20,8 @@ from pydantic_ai.models.function import AgentInfo, FunctionModel
 from pydantic_ai.profiles import ModelProfile
 from pydantic_ai.settings import ModelSettings
 
+from pydantic_ai_harness import ManagedSettings
 from pydantic_ai_harness.logfire._managed_settings import (
-    ManagedSettings,
     ManagedSettingsValue,
     _lower_settings,
 )
@@ -97,6 +97,15 @@ def test_lower_settings_extra_canonical_key_passthrough() -> None:
     # `extra='allow'`.
     value = ManagedSettingsValue.model_validate({'temperature': 0.3, 'some_future_key': 1})
     assert _lower_settings(value) == {'temperature': 0.3, 'some_future_key': 1}
+
+
+def test_model_settings_contributes_nothing_outside_a_run() -> None:
+    # `get_model_settings` returns the per-request callable pydantic-ai invokes. With no active run
+    # (nothing resolved in the per-run ContextVar) it contributes no settings, so the agent's own
+    # settings pass through untouched. `ctx` is unused on this branch, so `None` is fine.
+    model_settings = ManagedSettings('outside_run').get_model_settings()
+    assert callable(model_settings)
+    assert model_settings(cast(Any, None)) == ModelSettings()
 
 
 def test_lower_settings_provider_options_flattened() -> None:

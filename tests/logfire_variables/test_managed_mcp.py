@@ -34,7 +34,7 @@ pytestmark = pytest.mark.anyio
 
 def local_tool() -> str:
     """A local tool."""
-    return 'local'
+    return 'local'  # pragma: no cover - advertised only; the capturing model never calls it
 
 
 def search(query: str) -> str:  # pragma: no cover - definition-only, never executed

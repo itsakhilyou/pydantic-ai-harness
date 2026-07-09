@@ -138,7 +138,7 @@ async def test_real_background_thread_creates_variable(capfire: CaptureLogfire) 
 
         deadline = time.monotonic() + 5.0
         while 'prompt__auto_thread' not in config.variables and time.monotonic() < deadline:
-            time.sleep(0.01)
+            time.sleep(0.01)  # pragma: no cover - timing race; skipped when the thread wins before the first check
 
     assert instructions_seen(result.all_messages()) == [DEFAULT]
     assert config.variables['prompt__auto_thread'].example == '"You are a helpful assistant."'

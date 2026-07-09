@@ -21,8 +21,8 @@ from pydantic_ai import Agent, RunContext
 from pydantic_ai.models.test import TestModel
 from pydantic_ai.tools import ToolDefinition
 
+from pydantic_ai_harness import ManagedToolDefinitions
 from pydantic_ai_harness.logfire._managed_tool_definitions import (
-    ManagedToolDefinitions,
     ToolDefinitionOverride,
     _with_parameter_descriptions,
 )
@@ -229,7 +229,7 @@ async def test_dropped_rename_does_not_misroute_calls_to_the_colliding_name() ->
 
     called: list[str] = []
 
-    def get_weather(city: str) -> str:
+    def get_weather(city: str) -> str:  # pragma: no cover - must NOT be reached; the assert proves no misroute
         called.append('get_weather')
         return 'sunny'
 

@@ -139,7 +139,9 @@ async def test_nameless_without_agent_name_raises() -> None:
 async def test_nameless_model_override_via_before_model_request() -> None:
     # A nameless `ManagedSettings` can't source the model at run setup, but it can still override the
     # model per request on an agent that has a code-side model.
-    def respond(_messages: list[ModelMessage], _info: AgentInfo) -> ModelResponse:
+    def respond(  # pragma: no cover - must NOT be reached; `model='test'` swaps in `TestModel`
+        _messages: list[ModelMessage], _info: AgentInfo
+    ) -> ModelResponse:
         return ModelResponse(parts=[TextPart('from-function')])
 
     capability = ManagedSettings(default=ManagedSettingsValue(model='test'))

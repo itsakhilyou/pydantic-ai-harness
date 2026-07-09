@@ -24,7 +24,7 @@ def get_weather(city: str) -> str:
 
 
 def get_forecast(city: str) -> str:
-    return f'forecast for {city}'
+    return f'forecast for {city}'  # pragma: no cover - advertised only; the test models never call it
 
 
 def capture_tools(seen: list[ToolDefinition]) -> FunctionModel:

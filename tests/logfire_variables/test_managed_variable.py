@@ -11,11 +11,13 @@ prefix, value type, and default into this base correctly, plus its capability-sp
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any, cast
 
 import logfire
 import pytest
+from logfire.variables import Variable
 
-from pydantic_ai_harness.logfire._managed_variable import ManagedVariableCapability
+from pydantic_ai_harness.logfire._managed_variable import ManagedVariableCapability, resolution_reason
 
 _PREFIX = 'var__'
 
@@ -29,6 +31,14 @@ class _StrVariable(ManagedVariableCapability[None, str]):
     def __post_init__(self) -> None:
         self._resolved = self._new_resolved()
         self._variable = self._build_managed_variable(self.raw_name, prefix=_PREFIX, value_type=str, default='')
+
+
+@dataclass
+class _NamelessStrVariable(ManagedVariableCapability[None, str]):
+    """A nameless `str` capability: defers its backing variable build to first run-time use."""
+
+    def __post_init__(self) -> None:
+        self._setup_variable(None, prefix=_PREFIX, value_type=str, default='')
 
 
 def test_name_becomes_prefixed_variable_name() -> None:
@@ -67,3 +77,44 @@ def test_explicit_logfire_instance_is_used() -> None:
     # covered by every other construction).
     capability = _StrVariable('with_instance', logfire_instance=logfire.DEFAULT_LOGFIRE_INSTANCE)
     assert capability._variable.name == 'var__with_instance'
+
+
+def test_resolution_reason_falls_back_to_private_reason() -> None:
+    # Older logfire SDKs (before the public `reason` attribute) expose only the private `_reason`;
+    # `resolution_reason` reads that when there is no public `reason`.
+    class _OldResolved:
+        _reason = 'unrecognized_variable'
+
+    assert resolution_reason(cast(Any, _OldResolved())) == 'unrecognized_variable'
+
+
+def test_resolution_reason_none_when_neither_attribute_present() -> None:
+    # Neither the public `reason` nor the private `_reason` is available: nothing to report.
+    class _NoReason:
+        pass
+
+    assert resolution_reason(cast(Any, _NoReason())) is None
+
+
+def test_ensure_variable_returns_variable_built_while_awaiting_lock() -> None:
+    # Double-checked lock: the outer check sees no backing variable, but a concurrent first run
+    # finishes building it while this run waits for the build lock, so the second check inside the
+    # lock returns that already-built variable rather than building a second one.
+    capability = _NamelessStrVariable()
+    assert capability._built_variable is None
+
+    built = Variable('var__raced', type=str, default='', logfire_instance=logfire.DEFAULT_LOGFIRE_INSTANCE)
+
+    class _RaceLock:
+        """Stands in for the build lock, simulating the concurrent build completing on acquire."""
+
+        def __enter__(self) -> _RaceLock:
+            capability._variable = built
+            return self
+
+        def __exit__(self, *exc: object) -> bool:
+            return False
+
+    capability._build_lock = cast(Any, _RaceLock())
+    # `ctx` is only touched after the second check builds a new variable; here it returns first.
+    assert capability._ensure_variable(cast(Any, None)) is built
