@@ -176,7 +176,9 @@ class BudgetDisclosure(AbstractCapability[AgentDepsT]):
         for dimension in self._active_dimensions():
             limit: int = getattr(limits, _LIMIT_ATTR[dimension])
             used: int = getattr(usage, _USAGE_ATTR[dimension])
-            peak_fraction = max(peak_fraction, used / limit)
+            # A zero limit is fully consumed by definition; avoid dividing by zero.
+            fraction = 1.0 if limit == 0 else used / limit
+            peak_fraction = max(peak_fraction, fraction)
             remaining[dimension] = max(0, limit - used)
         if peak_fraction < self.start_at:
             return None

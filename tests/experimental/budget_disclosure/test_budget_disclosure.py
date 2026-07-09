@@ -16,7 +16,7 @@ import pytest
 from pydantic_ai import Agent
 from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart, ToolCallPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
-from pydantic_ai.usage import RequestUsage, UsageLimits
+from pydantic_ai.usage import RequestUsage, RunUsage, UsageLimits
 
 from pydantic_ai_harness.experimental.budget_disclosure import BudgetDimension, BudgetDisclosure
 
@@ -225,3 +225,11 @@ def test_disclose_with_no_limits_is_allowed_and_silent() -> None:
     """`disclose` names dimensions but `limits` is None: no limit to validate, discloses nothing."""
     capability = BudgetDisclosure[None](disclose={'requests'})
     assert capability.get_instructions() is None
+
+
+def test_zero_limit_does_not_divide_by_zero() -> None:
+    """A zero-valued limit is fully consumed by definition and must not raise `ZeroDivisionError`."""
+    limits = UsageLimits(request_limit=None, total_tokens_limit=0)
+    capability = BudgetDisclosure[None](limits=limits, disclose={'total_tokens'})
+    remaining = capability._remaining(RunUsage(), limits)  # type: ignore[arg-type]
+    assert remaining == {'total_tokens': 0}
