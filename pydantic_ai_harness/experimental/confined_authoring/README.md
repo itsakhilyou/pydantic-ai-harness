@@ -167,6 +167,15 @@ serving = Agent('anthropic:claude-sonnet-4-6', toolsets=[ConfinedAuthoringToolse
 Across these, a default `max_duration_secs` cap (overridable via `resource_limits`) bounds a slot's
 in-sandbox compute, so a hostile slot cannot hang the host indefinitely with a pure-CPU loop.
 
+One caveat for the untrusted-author and multi-tenant cases: the `uses` allowlist and validation
+constrain what a slot can *execute*, not the metadata the model *reads*. A slot's `description`
+becomes the tool's model-visible `ToolDefinition.description`, and authored slots activate on the
+next run without a separate host-promotion step, so an untrusted author sharing a store could plant
+prompt-injection text that later agents see. Single-tenant use (where the author is the trusted
+operator) is unaffected. A shared-store deployment with untrusted authors should gate promotion
+behind a trusted host or keep host-authored tool descriptions separate from authored text -- a
+first-class promotion gate is tracked as a follow-up.
+
 ## Scope
 
 Only `tool` slots exist today. The slot record carries a `kind` field so `hook` and
