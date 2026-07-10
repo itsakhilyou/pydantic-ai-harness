@@ -100,15 +100,19 @@ bump = true
 # below lives in the same table -- uv reads `constraint-dependencies` from
 # `[tool.uv]`, not from an adjacent `uv.toml`.
 exclude-newer-package = { pydantic-ai = false, pydantic-ai-slim = false, pydantic-evals = false, pydantic-graph = false }
-# pydantic-monty 0.0.19b2 requires pydantic-monty-runtime>=0.0.18, but the
-# runtime only publishes that range as pre-releases (0.0.18, 0.0.19b2). The
-# transitive `>=0.0.18` requirement carries no pre-release marker, so uv skips
-# those versions and resolution fails (notably the `test-floor` job's
-# `--resolution lowest-direct`). This constraint carries a pre-release
-# specifier for the runtime, opting just that package into pre-release
-# resolution without enabling pre-releases globally. Drop it once the runtime
-# has a stable >=0.0.18 release.
-constraint-dependencies = ['pydantic-monty-runtime>=0.0.18b0']
+# pydantic-monty and pydantic-monty-runtime are a matched pair: a given monty
+# build only works with the runtime of the same version. But monty 0.0.19b2
+# declares its runtime dependency loosely as `pydantic-monty-runtime>=0.0.18`,
+# so an unlocked resolution (notably the `test-floor` job's
+# `--resolution lowest-direct`) floats the runtime up to the newest pre-release
+# (e.g. 0.0.19b3) while monty stays pinned at 0.0.19b2. That mismatched pair
+# fails and hangs the code_mode / dynamic_workflow suites. Pin the runtime to
+# the exact version that matches the monty we depend on so every resolution
+# mode installs the matched pair; the `==` pre-release specifier also opts the
+# runtime into pre-release resolution without enabling pre-releases globally.
+# Keep this in lockstep with the `pydantic-monty` version above, and drop it
+# once monty pins its runtime tightly (or ships a stable release).
+constraint-dependencies = ['pydantic-monty-runtime==0.0.19b2']
 
 
 [tool.hatch.build.targets.wheel]
