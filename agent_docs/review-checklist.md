@@ -62,8 +62,10 @@ Checks:
   defaults, or safety caveats.
 - Every snippet in both docs is runnable: all imports present, class/param names
   match the source, model ids unchanged from what the source uses.
-- The unified doc ends with a `## API reference` + `::: pydantic_ai_harness.<Class>`
-  block (auto-expanded from the docstring, not hand-written), uses relative `.md`
+- The unified doc ends with a `## API reference` section containing one or more
+  `::: pydantic_ai_harness...` autodoc blocks covering the capability's public
+  class(es) -- some capabilities (e.g. compaction, subagents) export several
+  (auto-expanded from the docstring, not hand-written), uses relative `.md`
   links to other harness pages, and links Pydantic AI docs with root-relative
   internal links `/ai/<section>/<page>/` (verify the route resolves on the live
   `pydantic.dev/docs` site before using it).

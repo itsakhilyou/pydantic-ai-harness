@@ -77,15 +77,17 @@ opt-in and configurable:
 from pathlib import Path
 
 from pydantic_ai import Agent
+from pydantic_ai_harness import FileSystem
 from pydantic_ai_harness.experimental.context import RepoContext
 
 agent = Agent(
     'anthropic:claude-sonnet-4-6',
     capabilities=[
+        FileSystem(root_dir='.'),
         RepoContext(
             workspace_dir=Path('.'),
             nested_traversal=True,
-            traversal_tool_names=frozenset({'list_dir', 'read_file'}),  # match your tools
+            traversal_tool_names=frozenset({'list_directory', 'read_file'}),  # the FileSystem tool names to hook
             traversal_path_arg='path',                                   # the path arg key
             nested_inject='pointer',                                     # or 'contents'
         )

@@ -5,7 +5,7 @@ description: Give an agent a tool that locates and returns Pydantic AI documenta
 
 # Pydantic AI Docs
 
-`PyaiDocs` gives an agent a single tool, `read_pyai_docs(topic)`, that locates a Pydantic AI documentation page and returns it verbatim. Nothing is bundled into context up front. Each call resolves the topic from a configured local checkout first, then falls back to fetching the page from `pydantic/pydantic-ai:main`, so it works in any environment.
+`PyaiDocs` gives an agent a single tool, `read_pyai_docs(topic)`, that locates a Pydantic AI documentation page and returns it verbatim. Nothing is bundled into context up front. Each call resolves the topic from a configured local checkout first, then falls back to fetching the page from `pydantic/pydantic-ai:main`, so it works whether or not you have a local checkout (the remote fallback needs network access).
 
 !!! warning "Experimental"
     This capability lives under `pydantic_ai_harness.experimental` and may change or be removed in any release, without a deprecation period. Import it from the experimental path -- there is no top-level export:
@@ -30,7 +30,7 @@ An agent that authors Pydantic AI capabilities, hooks, tools, or toolsets needs 
 
 ## The solution
 
-`PyaiDocs` exposes one tool, `read_pyai_docs(topic)`, that locates the requested page and returns it verbatim. Each call resolves the topic from a configured local checkout first, then falls back to fetching the page from `pydantic/pydantic-ai:main`, so it works in any environment.
+`PyaiDocs` exposes one tool, `read_pyai_docs(topic)`, that locates the requested page and returns it verbatim. Each call resolves the topic from a configured local checkout first, then falls back to fetching the page from `pydantic/pydantic-ai:main`, so it works whether or not you have a local checkout (the remote fallback needs network access).
 
 The available topics are `capabilities`, `hooks`, `tools`, `tools-advanced`, `toolsets`, and `agent`.
 

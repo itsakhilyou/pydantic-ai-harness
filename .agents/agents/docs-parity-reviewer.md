@@ -14,8 +14,8 @@ other:
   PyPI. Keeps absolute links and its badges.
 - **Unified doc** -- `docs/capabilities/<capability>.md` (released) or
   `docs/experimental/<capability>.md` (experimental). Renders on the docs site
-  (`https://pydantic.dev/docs/harness/`). No badges; ends with a
-  `::: pydantic_ai_harness.<Class>` autodoc block.
+  (`https://pydantic.dev/docs/harness/`). No badges; ends with one or more
+  `::: pydantic_ai_harness.<Class>` autodoc blocks.
 
 Both are hand-maintained. A change to one that is not reflected in the other is
 the failure mode you exist to catch.
@@ -47,11 +47,13 @@ problem as a finding (blocking / warning / nit) with a concrete fix.
    root-relative internal paths `/ai/<section>/<page>/` (not legacy
    `ai.pydantic.dev` links); no leftover `../../README.md` or badge markup.
    README: absolute links are fine.
-5. **API block.** The unified doc ends with `## API reference` +
-   `::: pydantic_ai_harness.<Class>` naming the correct public class, and does
-   not hand-duplicate the signature (the block is auto-expanded from the
-   docstring). If the class docstring is too thin to render a useful API
-   section, flag it -- the fix is a richer docstring, not a hand-written table.
+5. **API block.** The unified doc ends with a `## API reference` section
+   containing one or more `::: pydantic_ai_harness...` autodoc blocks covering
+   the capability's public class(es) -- some capabilities (e.g. compaction,
+   subagents) export several. It does not hand-duplicate the signature (the
+   block is auto-expanded from the docstring). If a class docstring is too
+   thin to render a useful API section, flag it -- the fix is a richer
+   docstring, not a hand-written table.
 6. **Safety caveats preserved.** Where the source carries access, sandbox, or
    command-control limits (Shell, CodeMode, FileSystem), both docs state them.
 7. **Writing style.** Both follow `AGENTS.md` "Writing style": no em-dashes (use

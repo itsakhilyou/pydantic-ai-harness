@@ -72,6 +72,7 @@ agent = Agent('anthropic:claude-sonnet-4-6', capabilities=[authoring])
 
 history = None
 done = False
+next_prompt = 'Start the task.'
 while not done:
     extra = authoring.store.load_active()
     result = await agent.run(next_prompt, message_history=history, capabilities=extra)

@@ -36,6 +36,8 @@ It is not a full graph-state checkpoint. Capability-state restore, workspace sna
 ## Quick start
 
 ```python
+import asyncio
+
 from pydantic_ai import Agent
 from pydantic_ai_harness.experimental.step_persistence import StepPersistence, InMemoryStepStore
 
@@ -45,7 +47,12 @@ librarian = Agent(
     capabilities=[StepPersistence(store=store, agent_name='code_librarian')],
 )
 
-await librarian.run('Find ThinkingPartDelta and confirm the callable allowance')
+
+async def main():
+    await librarian.run('Find ThinkingPartDelta and confirm the callable allowance')
+
+
+asyncio.run(main())
 ```
 
 That is the whole setup. `run_id` is always per-`Agent.run` call, matching pydantic_ai's `RunContext.run_id`. For multi-turn logical grouping use `conversation_id=` -- that is the pydantic_ai-native primitive for it (see [Three-level identity](#three-level-identity)).
@@ -59,6 +66,8 @@ That is the whole setup. `run_id` is always per-`Agent.run` call, matching pydan
 The orchestrator pattern -- one logical agent serving many turns -- uses `conversation_id`, not a shared `run_id`:
 
 ```python
+import asyncio
+
 from pydantic_ai import Agent
 from pydantic_ai_harness.experimental.step_persistence import StepPersistence, InMemoryStepStore
 
@@ -68,11 +77,16 @@ orchestrator = Agent(
     capabilities=[StepPersistence(store=store, agent_name='orchestrator')],
 )
 
-for turn in turns:
-    await orchestrator.run(turn, conversation_id='orch-conv')
 
-# All turns of this orchestrator, chronological:
-records = await store.list_runs(conversation_id='orch-conv')
+async def main():
+    for turn in turns:
+        await orchestrator.run(turn, conversation_id='orch-conv')
+
+    # All turns of this orchestrator, chronological:
+    records = await store.list_runs(conversation_id='orch-conv')
+
+
+asyncio.run(main())
 ```
 
 ## Three-level identity
@@ -88,7 +102,14 @@ The capability mirrors pydantic_ai's identity stack:
 `StepEvent.conversation_id` and `RunRecord.conversation_id` are populated from `ctx.conversation_id`. So three `.run()` calls sharing one `conversation_id` produce three distinct `run_id`s, all queryable as a group:
 
 ```python
-runs = await store.list_runs(conversation_id='conv-abc')  # 3 records, chronological
+import asyncio
+
+
+async def main():
+    runs = await store.list_runs(conversation_id='conv-abc')  # 3 records, chronological
+
+
+asyncio.run(main())
 ```
 
 ## Continuing a delegate's investigation
@@ -96,6 +117,8 @@ runs = await store.list_runs(conversation_id='conv-abc')  # 3 records, chronolog
 pydantic_ai already has `message_history=` for "carry on with this prior context". `StepPersistence` does not introduce a parallel mechanism. It exposes one helper that loads the most recent provider-valid snapshot:
 
 ```python
+import asyncio
+
 from pydantic_ai import Agent
 from pydantic_ai_harness.experimental.step_persistence import (
     StepPersistence,
@@ -109,20 +132,25 @@ librarian = Agent(
     capabilities=[StepPersistence(store=store, agent_name='code_librarian')],
 )
 
-# Earlier: tag the first turn with a conversation id so the follow-up can find it.
-await librarian.run(
-    'Find ThinkingPartDelta and confirm the callable allowance',
-    conversation_id='libr-conv',
-)
 
-# Later (possibly a different process):
-prior_run = (await store.list_runs(conversation_id='libr-conv'))[-1].run_id
-history = await continue_run(store, run_id=prior_run)
-await librarian.run(
-    'Read _apply_provider_details_delta and check the path',
-    message_history=history,
-    conversation_id='libr-conv',   # keep the conversation grouping
-)
+async def main():
+    # Earlier: tag the first turn with a conversation id so the follow-up can find it.
+    await librarian.run(
+        'Find ThinkingPartDelta and confirm the callable allowance',
+        conversation_id='libr-conv',
+    )
+
+    # Later (possibly a different process):
+    prior_run = (await store.list_runs(conversation_id='libr-conv'))[-1].run_id
+    history = await continue_run(store, run_id=prior_run)
+    await librarian.run(
+        'Read _apply_provider_details_delta and check the path',
+        message_history=history,
+        conversation_id='libr-conv',   # keep the conversation grouping
+    )
+
+
+asyncio.run(main())
 ```
 
 `fork_run(store, run_id=...)` returns the same shape but is intended when the caller wants a branched logical run from that snapshot point (the new run gets a fresh `run_id` and probably a fresh `conversation_id`).
@@ -146,6 +174,8 @@ A run that crashed mid-tool-call has events (`tool_call_started`) but no snapsho
 It is auto-inferred for in-process delegation: when an orchestrator's tool synchronously calls a delegate's `Agent.run(...)`, the delegate's `StepPersistence` picks up the orchestrator's `run_id` via a `ContextVar` that the orchestrator's `wrap_run` set. No threading required:
 
 ```python
+import asyncio
+
 from pydantic_ai import Agent
 from pydantic_ai_harness.experimental.step_persistence import StepPersistence, InMemoryStepStore
 
@@ -166,15 +196,19 @@ async def ask_librarian(question: str) -> str:
     return result.output
 
 
-# Tag the orchestrator turn so the lookup below can find its run_id.
-await orchestrator.run(
-    'Where is ThinkingPartDelta defined?',
-    conversation_id='orch-conv',
-)
+async def main():
+    # Tag the orchestrator turn so the lookup below can find its run_id.
+    await orchestrator.run(
+        'Where is ThinkingPartDelta defined?',
+        conversation_id='orch-conv',
+    )
 
-# All librarian runs now point at the orchestrator's run_id:
-orch_run_id = (await store.list_runs(conversation_id='orch-conv'))[-1].run_id
-delegates = await store.list_runs(parent_run_id=orch_run_id)
+    # All librarian runs now point at the orchestrator's run_id:
+    orch_run_id = (await store.list_runs(conversation_id='orch-conv'))[-1].run_id
+    delegates = await store.list_runs(parent_run_id=orch_run_id)
+
+
+asyncio.run(main())
 ```
 
 Set `parent_run_id=` explicitly to override (for example, cross-process delegation where `ContextVar`s do not propagate).
@@ -186,45 +220,59 @@ Set `parent_run_id=` explicitly to override (for example, cross-process delegati
 `list_runs` returns matches sorted by `started_at` ascending across all backends -- pick the most recent with `[-1]`.
 
 ```python
-# Every delegate of one orchestrator run (chronological)
-delegates = await store.list_runs(parent_run_id='orch-3f2a')
+import asyncio
 
-# Every run in one dialogue (multi-turn conversation across many .run() calls)
-turns = await store.list_runs(conversation_id='conv-abc')
-latest_turn = turns[-1]
 
-# Filters combine (AND):
-focused = await store.list_runs(
-    parent_run_id='orch-3f2a',
-    conversation_id='libr-conv',
-)
+async def main():
+    # Every delegate of one orchestrator run (chronological)
+    delegates = await store.list_runs(parent_run_id='orch-3f2a')
 
-# Detail per run:
-events = await store.list_events(run_id=delegates[0].run_id)
-snapshot = await store.latest_snapshot(run_id=delegates[0].run_id)
-unresolved = await store.list_unresolved_tool_effects(run_id=delegates[0].run_id)
+    # Every run in one dialogue (multi-turn conversation across many .run() calls)
+    turns = await store.list_runs(conversation_id='conv-abc')
+    latest_turn = turns[-1]
+
+    # Filters combine (AND):
+    focused = await store.list_runs(
+        parent_run_id='orch-3f2a',
+        conversation_id='libr-conv',
+    )
+
+    # Detail per run:
+    events = await store.list_events(run_id=delegates[0].run_id)
+    snapshot = await store.latest_snapshot(run_id=delegates[0].run_id)
+    unresolved = await store.list_unresolved_tool_effects(run_id=delegates[0].run_id)
+
+
+asyncio.run(main())
 ```
 
 ## Failure recovery
 
 ```python
-# An earlier delegate run died mid-investigation.
-events = await store.list_events(run_id='libr-3f2a')
-unresolved = await store.list_unresolved_tool_effects(run_id='libr-3f2a')
-for record in unresolved:
-    # status == 'started' with no terminal update -- unknown_after_crash.
-    print(f'tool {record.tool_name} ({record.tool_call_id}) may or may not have run')
-    print(f'  idempotency_key={record.idempotency_key}  '
-          f'effect_summary={record.effect_summary}')
+import asyncio
 
-# Decide whether to resume or branch:
-history = await continue_run(store, run_id='libr-3f2a')
-# If the unresolved tools were read-only and safe to redo:
-await librarian.run('continue investigating', message_history=history,
-                    conversation_id='libr-conv')
-# If side effects might have happened and the orchestrator wants a fresh attempt:
-history = await fork_run(store, run_id='libr-3f2a')
-# ... pass to a new delegate run with a different agent_name / conversation_id.
+
+async def main():
+    # An earlier delegate run died mid-investigation.
+    events = await store.list_events(run_id='libr-3f2a')
+    unresolved = await store.list_unresolved_tool_effects(run_id='libr-3f2a')
+    for record in unresolved:
+        # status == 'started' with no terminal update -- unknown_after_crash.
+        print(f'tool {record.tool_name} ({record.tool_call_id}) may or may not have run')
+        print(f'  idempotency_key={record.idempotency_key}  '
+              f'effect_summary={record.effect_summary}')
+
+    # Decide whether to resume or branch:
+    history = await continue_run(store, run_id='libr-3f2a')
+    # If the unresolved tools were read-only and safe to redo:
+    await librarian.run('continue investigating', message_history=history,
+                        conversation_id='libr-conv')
+    # If side effects might have happened and the orchestrator wants a fresh attempt:
+    history = await fork_run(store, run_id='libr-3f2a')
+    # ... pass to a new delegate run with a different agent_name / conversation_id.
+
+
+asyncio.run(main())
 ```
 
 Side-effect deduplication is the orchestrator's responsibility. Tools that write external state should annotate their in-flight `ToolEffectRecord` via `annotate_tool_effect`:

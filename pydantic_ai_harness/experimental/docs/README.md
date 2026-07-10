@@ -32,7 +32,8 @@ the agent rarely needs in full and pins a snapshot that drifts from `main`.
 `PyaiDocs` exposes one tool, `read_pyai_docs(topic)`, that locates the requested page and
 returns it verbatim -- nothing is bundled into context up front. Each call resolves the
 topic from a configured local checkout first, then falls back to fetching the page from
-`pydantic/pydantic-ai:main`, so it works in any environment.
+`pydantic/pydantic-ai:main`, so it works whether or not you have a local checkout (the
+remote fallback needs network access).
 
 Topics: `capabilities`, `hooks`, `tools`, `tools-advanced`, `toolsets`, `agent`.
 

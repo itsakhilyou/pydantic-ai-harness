@@ -114,7 +114,7 @@ Each capability is a self-contained battery you drop into an agent's `capabiliti
 | [Shell](capabilities/shell.md) | Command execution in a subprocess rooted at a working directory, gated by allowlists, denylists, timeouts, and optional environment-variable stripping (including a preset for common LLM provider credentials). | -- |
 | [Managed Prompt](capabilities/managed-prompt.md) | Backs an agent's instructions with a [Logfire-managed prompt](https://logfire.pydantic.dev/docs/reference/advanced/prompt-management/), so you can version, label, and roll out prompt changes from the Logfire UI without redeploying -- with a code default that keeps the agent working when no remote value is available. | `logfire` |
 
-Additional capabilities live under `pydantic_ai_harness.experimental` -- they emit a `HarnessExperimentalWarning` on import and may change or be removed in any release. They're documented separately (coming soon).
+Additional capabilities live under `pydantic_ai_harness.experimental` -- they emit a `HarnessExperimentalWarning` on import and may change or be removed in any release. They're documented in the Experimental section.
 
 ## Build your own
 
