@@ -962,16 +962,12 @@ async def test_completed_sub_agent_results_are_truncated_and_capped() -> None:
     assert ' ... [truncated]' in msg
 
 
-async def test_duplicate_future_in_gather_is_retryable() -> None:
-    # Awaiting the same sub-agent call twice in one gather makes the Monty VM panic; that panic
-    # must surface as a retry, not tear down the whole agent run.
+async def test_duplicate_future_in_gather_completes() -> None:
+    # Awaiting the same sub-agent call's future twice in one gather is resolved once and reused
+    # (pydantic-monty 0.0.19); the script returns both slots instead of aborting.
     ts = DynamicWorkflowToolset[object](agents=[_wf_agent()])
     code = 'import asyncio\nf = sub(task="x")\nawait asyncio.gather(f, f)'
-    with pytest.raises(ModelRetry, match='aborted inside the sandbox') as exc_info:
-        await _run_script(ts, code)
-    msg = str(exc_info.value)
-    assert 'Completed sub-agent results from the failed script' in msg
-    assert 'sub(task="x") -> "ok"' in msg
+    assert await _run_script(ts, code) == ['ok', 'ok']
 
 
 async def test_sandbox_panic_after_budget_exhaustion_returns_terminal_result(
@@ -1023,6 +1019,35 @@ async def test_non_panic_base_exception_propagates(monkeypatch: pytest.MonkeyPat
         await _run_script(ts, "await sub(task='x')")
 
 
+async def test_workflow_worker_timeout_becomes_retry(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A runaway sandbox loop trips the worker's request timeout, surfaced as MontyCrashedError;
+    # the toolset must convert it to a retry rather than tear down the run.
+    from pydantic_ai_harness._monty_exec import MontyReplSession as _RealReplSession
+
+    def _timeout_session(**kwargs: Any) -> _RealReplSession:
+        return _RealReplSession(request_timeout=0.5, **kwargs)
+
+    monkeypatch.setattr('pydantic_ai_harness.experimental.dynamic_workflow._toolset.MontyReplSession', _timeout_session)
+    ts = DynamicWorkflowToolset[object](agents=[_wf_agent()])
+    with pytest.raises(ModelRetry, match='timed out inside the sandbox'):
+        await _run_script(ts, 'while True:\n    pass')
+
+
+async def test_workflow_host_panic_is_retryable(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A host-side conversion panic (pyo3 `PanicException`) with budget intact must surface as a
+    # retry, not tear down the run.
+    class PanicException(BaseException):
+        pass
+
+    async def _panic(self: Any, state: Any) -> Any:
+        raise PanicException('boom')
+
+    monkeypatch.setattr('pydantic_ai_harness._monty_exec.MontyExecutor.run', _panic)
+    ts = DynamicWorkflowToolset[object](agents=[_wf_agent()])
+    with pytest.raises(ModelRetry, match='aborted inside the sandbox'):
+        await _run_script(ts, "await sub(task='x')")
+
+
 async def test_print_only_returns_output_dict() -> None:
     ts = DynamicWorkflowToolset[object](agents=[_wf_agent()])
     out = await _run_script(ts, "print('hello')")
@@ -1070,17 +1095,19 @@ async def test_sub_agent_failure_inside_gather_aborts_script() -> None:
     assert 'ValueError' in msg
 
 
-async def test_host_errors_cannot_be_caught_in_sandbox() -> None:
-    # On the deferred-future path this capability uses, host-raised exceptions abort the script
-    # even under a matching `except RuntimeError`. Monty's inline resume path can differ.
+async def test_host_errors_can_be_caught_in_sandbox() -> None:
+    # pydantic-monty 0.0.19 propagates a host-raised exception to the sandbox `await` site where
+    # a matching `except` can catch it. Budget is still enforced (the call raised and produced no
+    # result), and the terminal budget result still surfaces once the script later errors.
     counted: Agent[object, str] = Agent(TestModel(custom_output_text='ok'), name='counted')
     ts = DynamicWorkflowToolset[object](agents=[WorkflowAgent(agent=counted)], max_agent_calls=1)
     code = "await counted(task='a')\ntry:\n    await counted(task='b')\nexcept RuntimeError:\n    pass\n1 / 0"
     out = await _run_script(ts, code)
-    # The script aborted at the second call (`1 / 0` never ran) and the terminal result surfaced.
+    # The `except RuntimeError` swallowed the budget error, so `1 / 0` ran and failed the script;
+    # the terminal result still reports budget exhaustion, with the later error as `last_error`.
     assert isinstance(out, dict)
     assert 'budget' in out['error']
-    assert 'sub-agent call budget (1) exhausted' in out['last_error']
+    assert 'ZeroDivisionError' in out['last_error']
     assert out['completed'] == ['counted(task="a") -> "ok"']
 
 
@@ -1240,9 +1267,7 @@ async def test_cancellation_closes_unscheduled_coroutines() -> None:
     # In global-sequential mode (durable backends) deferred calls are kept as bare, unscheduled
     # coroutines. On cancellation those must be `close()`d, not cancelled -- covers the
     # coroutine branch of the executor's cleanup, unreachable through DynamicWorkflowToolset.
-    from pydantic_monty import MontyRepl
-
-    from pydantic_ai_harness._monty_exec import MontyExecutor
+    from pydantic_ai_harness._monty_exec import MontyExecutor, MontyReplSession
 
     started = asyncio.Event()
 
@@ -1250,15 +1275,28 @@ async def test_cancellation_closes_unscheduled_coroutines() -> None:
         started.set()
         await asyncio.Event().wait()  # block forever; only cancellation ends this
 
-    repl = MontyRepl()
-    state = repl.feed_start("import asyncio\nawait asyncio.gather(sub(task='a'), sub(task='b'))")
-    executor = MontyExecutor(dispatch=dispatch, valid_names={'sub'}, global_sequential=True)
-    # The first call is awaited inline and blocks; the second is still a bare coroutine.
-    task = asyncio.ensure_future(executor.run(state))
-    await started.wait()
-    task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await task
+    repl = MontyReplSession()
+    try:
+        state = repl.feed_start("import asyncio\nawait asyncio.gather(sub(task='a'), sub(task='b'))")
+        executor = MontyExecutor(dispatch=dispatch, valid_names={'sub'}, global_sequential=True)
+        # The first call is awaited inline and blocks; the second is still a bare coroutine.
+        task = asyncio.ensure_future(executor.run(state))
+        await started.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    finally:
+        repl.close()
+
+
+async def test_monty_repl_session_close_before_feed_is_safe() -> None:
+    # close() on a session that was never fed (no pool or worker created) is a no-op, and is
+    # idempotent -- covers the guards for the never-created pool/session.
+    from pydantic_ai_harness._monty_exec import MontyReplSession
+
+    repl = MontyReplSession()
+    repl.close()
+    repl.close()
 
 
 # --- Runtime reveal --------------------------------------------------------

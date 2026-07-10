@@ -1561,16 +1561,50 @@ class TestCodeMode:
         assert 'debug info' in msg
         assert '[stdout before error]' in msg
 
-    async def test_duplicate_future_in_gather_is_retryable(self) -> None:
-        # Awaiting the same tool call twice in one gather makes the Monty VM panic; that panic
-        # must surface as a retry (with the corrupt REPL dropped), not tear down the agent run.
+    async def test_duplicate_future_in_gather_completes(self) -> None:
+        # Awaiting the same tool call's future twice in one gather is resolved once and reused
+        # (pydantic-monty 0.0.19); the sandbox returns both slots instead of aborting.
         wrapper = CodeMode[None]().get_wrapper_toolset(_build_function_toolset(add))
         assert isinstance(wrapper, CodeModeToolset)
         ctx = await build_ctx(None, wrapper)
         tools = await wrapper.get_tools(ctx)
         code = 'import asyncio\nf = add(a=1, b=2)\nawait asyncio.gather(f, f)'
+        result = await wrapper.call_tool('run_code', {'code': code}, ctx, tools['run_code'])
+        assert result.return_value == [3, 3]
+
+    async def test_worker_timeout_becomes_retry(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # A runaway sandbox loop trips the worker's request timeout, which the pool surfaces as
+        # MontyCrashedError; the toolset must convert it to a retry and drop the dead session.
+        from pydantic_ai_harness._monty_exec import MontyReplSession as _RealReplSession
+
+        def _timeout_session(**kwargs: Any) -> _RealReplSession:
+            return _RealReplSession(request_timeout=0.5, **kwargs)
+
+        monkeypatch.setattr('pydantic_ai_harness.code_mode._toolset.MontyReplSession', _timeout_session)
+        wrapper = CodeMode[None]().get_wrapper_toolset(_build_function_toolset(add))
+        assert isinstance(wrapper, CodeModeToolset)
+        ctx = await build_ctx(None, wrapper)
+        tools = await wrapper.get_tools(ctx)
+        with pytest.raises(ModelRetry, match='timed out inside the sandbox'):
+            await wrapper.call_tool('run_code', {'code': 'while True:\n    pass'}, ctx, tools['run_code'])
+        assert wrapper._repl is None  # pyright: ignore[reportPrivateUsage]
+
+    async def test_host_panic_is_retryable(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # A host-side conversion panic (pyo3 `PanicException`) must surface as a retry with the
+        # session dropped, not tear down the agent run.
+        class PanicException(BaseException):
+            pass
+
+        async def _panic(self: Any, state: Any) -> Any:
+            raise PanicException('boom')
+
+        monkeypatch.setattr('pydantic_ai_harness._monty_exec.MontyExecutor.run', _panic)
+        wrapper = CodeMode[None]().get_wrapper_toolset(_build_function_toolset(add))
+        assert isinstance(wrapper, CodeModeToolset)
+        ctx = await build_ctx(None, wrapper)
+        tools = await wrapper.get_tools(ctx)
         with pytest.raises(ModelRetry, match='aborted inside the sandbox'):
-            await wrapper.call_tool('run_code', {'code': code}, ctx, tools['run_code'])
+            await wrapper.call_tool('run_code', {'code': 'await add(a=1, b=2)'}, ctx, tools['run_code'])
         assert wrapper._repl is None  # pyright: ignore[reportPrivateUsage]
 
     async def test_non_panic_base_exception_propagates(self, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -11,6 +11,10 @@ Two capabilities build on this:
 The synchronous snapshot API (rather than `feed_run_async`) is used deliberately:
 it avoids background threads and `call_soon_threadsafe`, so the loop is safe inside
 restricted event loops such as Temporal's workflow sandbox.
+
+Monty 0.0.19 runs execution in subprocess workers and replaced the in-process
+`MontyRepl` with a `Monty` pool plus checked-out `MontySession`. `MontyReplSession`
+below wraps that pair back into the persistent-REPL shape both capabilities drive.
 """
 
 from __future__ import annotations
@@ -24,14 +28,18 @@ try:
     from pydantic_monty import (
         AbstractOS,
         ExternalException,
-        ExternalResult,
         ExternalReturnValue,
+        ExternalSettledResult,
         FunctionSnapshot,
         FutureSnapshot,
+        Monty,
         MontyComplete,
+        MontySession,
         MountDir,
         NameLookupSnapshot,
         OsFunction,
+        ResourceLimits,
+        SyncSnapshot,
     )
 except ImportError as _import_error:  # pragma: no cover
     raise ImportError(
@@ -53,6 +61,16 @@ MontyMount = MountDir | list[MountDir]
 
 # A coroutine not yet scheduled on the event loop, or its running Task.
 PendingCall = asyncio.Task[Any] | Coroutine[Any, Any, Any]
+
+
+def is_syntax_diagnostic(display: str) -> bool:
+    """Whether a rendered `MontyTypingError` is actually a parse failure.
+
+    Monty type-checks a fed snippet before running it and reports unparsable code under the
+    `invalid-syntax` rule, so a first-feed syntax error arrives as a typing error rather than
+    `MontySyntaxError`. Callers use this to keep labelling such errors as syntax errors.
+    """
+    return 'invalid-syntax' in display
 
 
 def is_sandbox_panic(exc: BaseException) -> bool:
@@ -89,6 +107,79 @@ class PrintCapture:
 
 
 @dataclass
+class MontyReplSession:
+    """A persistent Monty REPL backed by a pooled subprocess worker.
+
+    Stands in for the `MontyRepl` removed in pydantic-monty 0.0.19: owns a
+    single-worker `Monty` pool and a checked-out `MontySession`, so REPL state
+    persists across `feed_start` calls until `close()`. The pool and session are
+    created lazily on the first `feed_start`, so constructing one is cheap.
+
+    When `type_check` is set, only the first feed is checked -- accumulated REPL
+    state is invisible to the stateless checker, so later feeds pass
+    `skip_type_check=True`, matching the contract callers relied on.
+    """
+
+    type_check: bool = False
+    type_check_stubs: str | None = None
+    limits: ResourceLimits | None = None
+    request_timeout: float | None = None
+    """Hard per-feed deadline (seconds); a worker that exceeds it is killed and the feed raises
+    `MontyCrashedError` with `timed_out=True`. Backstops the sandbox `limits`."""
+
+    _pool: Monty | None = field(default=None, init=False, repr=False)
+    _session: MontySession | None = field(default=None, init=False, repr=False)
+    _fed: bool = field(default=False, init=False, repr=False)
+
+    def feed_start(
+        self,
+        code: str,
+        *,
+        print_callback: PrintCapture | None = None,
+        os: MontyOS | None = None,
+        mount: MontyMount | None = None,
+    ) -> SyncSnapshot:
+        """Start a snippet and return the first snapshot, type-checking the first feed."""
+        session = self._ensure_session()
+        snapshot = session.feed_start(
+            code,
+            print_callback=print_callback,
+            os=os,
+            mount=mount,
+            skip_type_check=self._fed,
+        )
+        self._fed = True
+        return snapshot
+
+    def _ensure_session(self) -> MontySession:
+        if self._session is None:
+            pool = Monty(request_timeout=self.request_timeout)
+            pool.__enter__()
+            try:
+                session = pool.checkout(
+                    type_check=self.type_check,
+                    type_check_stubs=self.type_check_stubs,
+                    limits=self.limits,
+                )
+                session.__enter__()
+            except BaseException:  # pragma: no cover -- defensive: unwind the pool if checkout fails
+                pool.__exit__(None, None, None)
+                raise
+            self._pool = pool
+            self._session = session
+        return self._session
+
+    def close(self) -> None:
+        """Return the worker to its pool and shut the pool down. Safe to call twice."""
+        session, pool = self._session, self._pool
+        self._session = self._pool = None
+        if session is not None:
+            session.__exit__(None, None, None)
+        if pool is not None:
+            pool.__exit__(None, None, None)
+
+
+@dataclass
 class MontyExecutor:
     """Drives a Monty REPL to completion, dispatching external calls to a host callback.
 
@@ -109,22 +200,24 @@ class MontyExecutor:
     valid_names: Container[str]
     sequential_names: set[str] = field(default_factory=set[str])
     global_sequential: bool = False
-    # OS handler and mounts. Monty auto-dispatches OS calls only while every `resume`
-    # carries them, so they are threaded through each resume below, not just `feed_start`.
+    # OS handler. Monty auto-dispatches OS calls only while every `resume` carries it, so it
+    # is threaded through each resume below, not just `feed_start`. Mounts are fixed at
+    # `feed_start` (there is no `mount=` on `resume`), so they are not held here.
     os_access: MontyOS | None = None
-    mount: MontyMount | None = None
 
     # Parallel calls deferred but not yet resolved, keyed by Monty call id.
     _pending: dict[int, PendingCall] = field(default_factory=dict[int, PendingCall], init=False)
     # Parallel results awaited early at a sequential barrier, before their FutureSnapshot is reached.
-    _pre_resolved: dict[int, ExternalResult] = field(default_factory=dict[int, ExternalResult], init=False)
+    _pre_resolved: dict[int, ExternalSettledResult] = field(
+        default_factory=dict[int, ExternalSettledResult], init=False
+    )
 
     async def run(self, state: MontyState) -> MontyComplete:
         """Drive the REPL from `state` until it completes."""
         try:
             while not isinstance(state, MontyComplete):
                 if isinstance(state, NameLookupSnapshot):
-                    state = state.resume(os=self.os_access, mount=self.mount)
+                    state = state.resume(os=self.os_access)
                 elif isinstance(state, FunctionSnapshot):
                     state = await self._handle_function(state)
                 else:
@@ -150,14 +243,11 @@ class MontyExecutor:
         """Dispatch (or defer) a single external function call."""
         name = snapshot.function_name
         if name not in self.valid_names:
-            return snapshot.resume(
-                {'exception': NameError(f'Unknown function: {name}')}, os=self.os_access, mount=self.mount
-            )
+            return snapshot.resume({'exception': NameError(f'Unknown function: {name}')}, os=self.os_access)
         if snapshot.args:
             return snapshot.resume(
                 {'exception': TypeError(f'{name}() does not accept positional arguments; use keyword arguments')},
                 os=self.os_access,
-                mount=self.mount,
             )
 
         if name in self.sequential_names:
@@ -170,9 +260,7 @@ class MontyExecutor:
                 self._pre_resolved[cid] = await _await_external(self._pending.pop(cid))
             # The wrapped outcome (`{'return_value': ...}` / `{'exception': ...}`) is already
             # exactly the payload `resume` expects.
-            return snapshot.resume(
-                await _await_external(self.dispatch(name, snapshot.kwargs)), os=self.os_access, mount=self.mount
-            )
+            return snapshot.resume(await _await_external(self.dispatch(name, snapshot.kwargs)), os=self.os_access)
 
         # Deferred execution -- resolved later at FutureSnapshot.
         call = self.dispatch(name, snapshot.kwargs)
@@ -182,12 +270,12 @@ class MontyExecutor:
         else:
             # Schedule now as a Task so concurrently-deferred calls actually run in parallel.
             self._pending[snapshot.call_id] = asyncio.ensure_future(call)
-        return snapshot.resume({'future': ...}, os=self.os_access, mount=self.mount)
+        return snapshot.resume({'future': ...}, os=self.os_access)
 
     async def _resolve_futures(self, snapshot: FutureSnapshot) -> MontyState:
         """Resolve the deferred calls a `FutureSnapshot` is waiting on."""
         pending_ids = snapshot.pending_call_ids
-        results: dict[int, ExternalResult] = {}
+        results: dict[int, ExternalSettledResult] = {}
         for cid in pending_ids:
             if cid in self._pre_resolved:
                 results[cid] = self._pre_resolved.pop(cid)
@@ -203,7 +291,7 @@ class MontyExecutor:
                 del self._pending[cid]
                 results[cid] = _wrap_gathered(outcome)
 
-        return snapshot.resume(results=results, os=self.os_access, mount=self.mount)
+        return snapshot.resume(results=results, os=self.os_access)
 
 
 async def _await_external(call: PendingCall) -> ExternalReturnValue | ExternalException:
