@@ -28,7 +28,7 @@ try:
     # `Monty()` construction imports this lazily; do it eagerly so Temporal's workflow
     # sandbox (which forbids imports after initial workflow load) sees it as already
     # loaded when CodeMode runs a snippet inside a workflow.
-    import pydantic_monty._binary  # noqa: F401
+    import pydantic_monty._binary  # noqa: F401  # pyright: ignore[reportUnusedImport]
     from pydantic_monty import (
         AbstractOS,
         ExternalException,
