@@ -30,6 +30,7 @@ classifiers = [
 dependencies = [
     "httpx>=0.28.1",
     "pydantic-ai-slim>=2.1.0",
+    "pydantic-monty>=0.0.19b2",
 ]
 
 [project.optional-dependencies]

@@ -35,7 +35,6 @@ try:
     from pydantic_monty import (
         AbstractOS,
         Monty,
-        MontyRepl,
         MontyRuntimeError,
         MontySyntaxError,
         MontyTypingError,
@@ -284,9 +283,11 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
     so Tool Search discoveries don't bust the tool-definitions cache prefix.
     """
 
-    # init=False so `replace()` in `for_run` produces a fresh instance with _repl=None,
-    # giving each agent run isolated REPL state. Lazy-initialized on first call_tool.
-    _repl: MontyRepl | None = field(default=None, init=False, repr=False)
+    # init=False so `replace()` in `for_run` produces a fresh instance with `_repl_state=None`,
+    # giving each agent run isolated REPL state. A Monty session cannot outlive its worker pool's
+    # `with` block, so REPL state is carried between calls as the dumped bytes of the session
+    # (`session.dump()`), reloaded into a fresh session on the next call.
+    _repl_state: bytes | None = field(default=None, init=False, repr=False)
 
     # Catalog string stashed during `get_tools` (when `dynamic_catalog`) and read back by
     # `get_instructions` in the same step. Empty when there's nothing to surface.
@@ -307,7 +308,7 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
         if new_wrapped is self.wrapped:
             return self
         new_self = replace(self, wrapped=new_wrapped)
-        new_self._repl = self._repl
+        new_self._repl_state = self._repl_state
         new_self._warned_deferred = self._warned_deferred
         new_self._last_catalog = self._last_catalog
         return new_self
@@ -431,8 +432,9 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
         # Clear the REPL on restart so that if type checking fails, the
         # next retry still gets fresh_repl=True and is type-checked again.
         if restart:
-            self._repl = None
-        fresh_repl = self._repl is None
+            self._repl_state = None
+
+        fresh_repl = self._repl_state is None
 
         callable_defs = tool.callable_defs
         sanitized_to_original = tool.sanitized_to_original
@@ -527,33 +529,45 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
             return _TOOL_RETURN_CONTENT_TA.dump_python(result)
 
         # Static type checking on fresh REPL sessions (first call or after
-        # restart). Skipped on subsequent calls because accumulated REPL state
-        # (variables from prior snippets) is invisible to the stateless checker.
-        # Runs before REPL creation so that if this raises ModelRetry, the REPL
-        # stays None and the next retry still gets type-checked.
-        if fresh_repl and callable_defs:
-            self._type_check(code, callable_defs=callable_defs)
-
-        # Create the REPL after type checking passes.
-        if fresh_repl:
-            self._repl = MontyRepl()
-        assert self._repl is not None
+        # restart). Monty type-checks each fed snippet before executing it when
+        # the session is checked out with `type_check=True`, so a type error
+        # surfaces as `MontyTypingError` from `feed_start` before any tool runs.
+        # Skipped on subsequent (loaded) sessions: accumulated REPL state
+        # (variables from prior snippets) is invisible to the stateless checker,
+        # and `load` does not restore the checker's accumulated context anyway.
+        # `skip_type_check` is passed to `feed_start` too (not just `type_check`
+        # at checkout) so a loaded session never type-checks even if it lands on
+        # a pooled worker that a prior checkout left in type-check mode. Because
+        # `feed_start` raises before completing, `_repl_state` is left None on a
+        # type error, so the next retry is type-checked again.
+        type_check = fresh_repl and bool(callable_defs)
+        type_check_stubs = self._build_type_check_stubs(callable_defs) if type_check else None
 
         capture = PrintCapture()
 
         try:
-            monty_state = self._repl.feed_start(code, print_callback=capture, os=self.os_access, mount=self.mount)
-            completed = await MontyExecutor(
-                dispatch=dispatch_tool_call,
-                valid_names=callable_defs,
-                sequential_names=sequential_tools,
-                global_sequential=global_sequential,
-                os_access=self.os_access,
-                mount=self.mount,
-            ).run(monty_state)
+            with Monty() as monty_pool:
+                with monty_pool.checkout(type_check=type_check, type_check_stubs=type_check_stubs) as session:
+                    if self._repl_state is not None:
+                        session.load(self._repl_state)
+                    monty_state = session.feed_start(
+                        code,
+                        print_callback=capture,
+                        os=self.os_access,
+                        mount=self.mount,
+                        skip_type_check=not type_check,
+                    )
+                    completed = await MontyExecutor(
+                        dispatch=dispatch_tool_call,
+                        valid_names=callable_defs,
+                        sequential_names=sequential_tools,
+                        global_sequential=global_sequential,
+                        os_access=self.os_access,
+                    ).run(monty_state)
+                    self._repl_state = session.dump()
         except MontySyntaxError as e:
             raise ModelRetry(f'Syntax error in code:\n{capture.prepend_to(e.display())}') from e
-        except MontyTypingError as e:  # pragma: no cover -- MontyRepl.feed_start doesn't raise this
+        except MontyTypingError as e:
             raise ModelRetry(f'Type error in code:\n{capture.prepend_to(e.display())}') from e
         except MontyRuntimeError as e:
             # Exceptions raised inside dispatch_tool_call (e.g. UserError from
@@ -573,11 +587,9 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
                 raise
             # The panic aborts the VM mid-execution, so the REPL's accumulated state cannot
             # be trusted; drop it so the retry starts from a fresh, type-checked session.
-            self._repl = None
+            self._repl_state = None
             raise ModelRetry(
-                'The code aborted inside the sandbox and the session was reset. This can happen '
-                'when the same tool call is awaited more than once in one asyncio.gather -- give '
-                'each gathered call its own invocation. Revise the code and try again.'
+                'The code aborted inside the sandbox and the session was reset. Revise the code and try again.'
             ) from e
 
         result = completed.output
@@ -709,24 +721,6 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
             for td in callable_defs.values()
         )
         return '\n\n'.join(parts)
-
-    @staticmethod
-    def _type_check(code: str, *, callable_defs: dict[str, ToolDefinition]) -> None:
-        """Type-check a code snippet against tool signatures before execution.
-
-        Uses Monty's stateless type checker with function stubs. Only sound
-        when the REPL has no accumulated state (first call or after restart).
-
-        Raises:
-            ModelRetry: If the code has type errors or syntax errors.
-        """
-        stubs = CodeModeToolset._build_type_check_stubs(callable_defs)
-        try:
-            Monty(code, type_check=True, type_check_stubs=stubs)
-        except MontyTypingError as e:
-            raise ModelRetry(f'Type error in code:\n{e.display()}') from e
-        except MontySyntaxError as e:
-            raise ModelRetry(f'Syntax error in code:\n{e.display()}') from e
 
 
 def _get_sigs_and_conflicting(

@@ -481,13 +481,12 @@ Before a script runs, it is statically type-checked against the sub-agent signat
 function, a positional `task`, or a wrong-typed argument costs one retry, but no sub-agent budget and
 no sandbox execution.
 
-> **Warning: errors abort the whole script**
+> **Warning: an uncaught error aborts the whole script**
 >
-> A sub-agent that raises cannot be caught inside the script. One failure aborts the whole script,
-> and the model retries it. So write scripts where sub-agents do not depend on catching each other's
-> errors. If a script does fail after some sub-agents already finished, the retry prompt lists those
-> completed results, so the model can reuse them as plain values instead of paying for the same
-> calls again.
+> A sub-agent that raises propagates as a normal exception. The script can catch it with
+> `try`/`except`; an uncaught failure aborts the whole script and the model retries it. If a script
+> does fail after some sub-agents already finished, the retry prompt lists those completed results,
+> so the model can reuse them as plain values instead of paying for the same calls again.
 
 ## What is coming
 

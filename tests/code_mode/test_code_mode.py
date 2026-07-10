@@ -397,11 +397,13 @@ class TestCodeMode:
         ctx = await build_ctx(None, wrapper)
         tools = await wrapper.get_tools(ctx)
         run_code = tools['run_code']
-        # Fresh REPL: type checker catches the syntax error.
-        with pytest.raises(ModelRetry, match=r'Syntax error in code'):
+        # Fresh REPL: the type checker parses the snippet first, so a syntax
+        # error surfaces through it as a `Type error in code` retry.
+        with pytest.raises(ModelRetry, match=r'error in code'):
             await wrapper.call_tool('run_code', {'code': 'def ('}, ctx, run_code)
 
-        # Non-fresh REPL: feed_start catches the syntax error at runtime.
+        # Non-fresh REPL: type checking is skipped, so feed_start raises
+        # MontySyntaxError and the retry is labelled a syntax error.
         await wrapper.call_tool('run_code', {'code': '1 + 1', 'restart': True}, ctx, run_code)
         with pytest.raises(ModelRetry, match=r'Syntax error in code'):
             await wrapper.call_tool('run_code', {'code': 'def ('}, ctx, run_code)
@@ -442,12 +444,12 @@ class TestCodeMode:
         # Force lazy REPL creation on the *original* instance.
         tools = await wrapper.get_tools(ctx)
         await wrapper.call_tool('run_code', {'code': 'x = 1'}, ctx, tools['run_code'])
-        assert wrapper._repl is not None  # pyright: ignore[reportPrivateUsage]
+        assert wrapper._repl_state is not None  # pyright: ignore[reportPrivateUsage]
 
         fresh = await wrapper.for_run(ctx)
         assert isinstance(fresh, CodeModeToolset)
         assert fresh is not wrapper
-        assert fresh._repl is None  # pyright: ignore[reportPrivateUsage]
+        assert fresh._repl_state is None  # pyright: ignore[reportPrivateUsage]
 
     async def test_for_run_step_short_circuits_when_wrapped_unchanged(self) -> None:
         """If the inner toolset doesn't change between steps, `for_run_step` returns `self` unchanged."""
@@ -498,14 +500,14 @@ class TestCodeMode:
         # Lazily create the REPL on the original instance.
         tools = await wrapper.get_tools(ctx)
         await wrapper.call_tool('run_code', {'code': 'x = 7'}, ctx, tools['run_code'])
-        original_repl = wrapper._repl  # pyright: ignore[reportPrivateUsage]
+        original_repl = wrapper._repl_state  # pyright: ignore[reportPrivateUsage]
         assert original_repl is not None
 
         next_step = await wrapper.for_run_step(ctx)
         assert isinstance(next_step, CodeModeToolset)
         assert next_step is not wrapper
         # State carries over so the LLM doesn't lose its variables between steps.
-        assert next_step._repl is original_repl  # pyright: ignore[reportPrivateUsage]
+        assert next_step._repl_state is original_repl  # pyright: ignore[reportPrivateUsage]
 
     # ---------------------------------------------------------------------------
     # Filter behaviour
@@ -1306,6 +1308,8 @@ class TestCodeMode:
 
         On a fresh REPL, the static type checker catches this before execution.
         """
+
+        # TODO: It is not being caught, why?
         wrapper = CodeMode[object]().get_wrapper_toolset(_build_function_toolset(add))
         assert isinstance(wrapper, CodeModeToolset)
         ctx = await build_ctx(None, wrapper)
@@ -1561,17 +1565,31 @@ class TestCodeMode:
         assert 'debug info' in msg
         assert '[stdout before error]' in msg
 
-    async def test_duplicate_future_in_gather_is_retryable(self) -> None:
-        # Awaiting the same tool call twice in one gather makes the Monty VM panic; that panic
-        # must surface as a retry (with the corrupt REPL dropped), not tear down the agent run.
+    async def test_sandbox_panic_is_retryable(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # A Rust-side sandbox panic (pyo3 PanicException) must surface as a retry with the
+        # corrupt REPL dropped, not tear down the agent run. It is injected via the execution
+        # loop because Monty no longer panics on the inputs it once did (e.g. awaiting one
+        # tool call twice in a single asyncio.gather).
+        class PanicException(BaseException):
+            """Named to match the pyo3 panic class `is_sandbox_panic` recognizes."""
+
+        async def _panic(self: Any, state: Any) -> Any:
+            raise PanicException('sandbox aborted')
+
         wrapper = CodeMode[None]().get_wrapper_toolset(_build_function_toolset(add))
         assert isinstance(wrapper, CodeModeToolset)
         ctx = await build_ctx(None, wrapper)
         tools = await wrapper.get_tools(ctx)
-        code = 'import asyncio\nf = add(a=1, b=2)\nawait asyncio.gather(f, f)'
+        run_code = tools['run_code']
+
+        # Establish REPL state so the guard's reset to None is observable.
+        await wrapper.call_tool('run_code', {'code': 'x = 1'}, ctx, run_code)
+        assert wrapper._repl_state is not None  # pyright: ignore[reportPrivateUsage]
+
+        monkeypatch.setattr('pydantic_ai_harness._monty_exec.MontyExecutor.run', _panic)
         with pytest.raises(ModelRetry, match='aborted inside the sandbox'):
-            await wrapper.call_tool('run_code', {'code': code}, ctx, tools['run_code'])
-        assert wrapper._repl is None  # pyright: ignore[reportPrivateUsage]
+            await wrapper.call_tool('run_code', {'code': 'x'}, ctx, run_code)
+        assert wrapper._repl_state is None  # pyright: ignore[reportPrivateUsage]
 
     async def test_non_panic_base_exception_propagates(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # The panic guard catches BaseException but must re-raise anything that is not a VM panic.
@@ -2575,7 +2593,13 @@ class TestCodeModeOSAccess:
             await wrapper.call_tool('run_code', {'code': "import os\nos.getenv('X')"}, ctx, tools['run_code'])
 
     async def test_mount_exposes_host_directory(self, tmp_path: Path) -> None:
-        """A `mount` exposes a host directory inside the sandbox, threaded through resumes."""
+        """A `mount` exposes a host directory inside the sandbox.
+
+        The mount is fixed at `feed_start` for the whole feed (Monty does not accept `mount=` on
+        `resume`), so the `await add(...)` here forces a FunctionSnapshot -> FutureSnapshot resume
+        round-trip before the read, proving the mount is still in effect after the sandbox suspends
+        and resumes.
+        """
         (tmp_path / 'data.txt').write_text('hello-from-host')
         wrapper = CodeMode[object](mount=MountDir('/work', str(tmp_path))).get_wrapper_toolset(
             _build_function_toolset(add)

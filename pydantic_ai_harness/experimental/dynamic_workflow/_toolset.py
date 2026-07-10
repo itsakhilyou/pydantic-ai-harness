@@ -29,7 +29,7 @@ from pydantic_core import to_jsonable_python
 from typing_extensions import Self, TypedDict
 
 try:
-    from pydantic_monty import Monty, MontyRepl, MontyRuntimeError, MontySyntaxError, MontyTypingError, ResourceLimits
+    from pydantic_monty import Monty, MontyRuntimeError, MontySyntaxError, MontyTypingError, ResourceLimits
 except ImportError as _import_error:  # pragma: no cover
     raise ImportError(
         'pydantic-monty is required for DynamicWorkflow. '
@@ -145,9 +145,9 @@ import asyncio
 reviews = await asyncio.gather(reviewer(task="check auth"), reviewer(task="check parsing"))
 ```
 
-`asyncio.gather` does **not** support `return_exceptions=True`, and a sub-agent that raises cannot be
-caught inside the script: one failure aborts the whole script and you retry it. Design the script so
-sub-agents don't depend on catching each other's errors.
+`asyncio.gather` does **not** support `return_exceptions=True`. A sub-agent that raises propagates as
+a normal exception: wrap the call in `try`/`except` to handle it, or let it abort the whole script
+and retry.
 
 The last expression's value is captured as the result -- you do **not** need to `print()` it, and
 printing produces a string representation, not structured data. Use `print()` only for debug logging.
@@ -611,12 +611,14 @@ class DynamicWorkflowToolset(AbstractToolset[AgentDepsT]):
                 message = f'{message}: {exc}'
             raise RuntimeError(message) from exc
 
-    def _type_check(self, code: str, capture: PrintCapture) -> None:
-        """Statically check the script against the sub-agent signatures before running it.
+    def _build_type_check_stubs(self) -> str:
+        """Render sub-agent signatures as stubs for Monty's static type checker.
 
-        Each `run_workflow` call is a fresh sandbox with no accumulated state, so the check is
-        always sound. Catching a positional `task`, a misspelled function, or a wrong-typed
-        argument here costs a retry but no sub-agent budget.
+        Fed to `checkout(type_check=True, type_check_stubs=...)`, they let `feed_start`
+        reject a positional `task`, a misspelled function, or a wrong-typed argument
+        before the script runs -- costing a retry but no sub-agent budget. Each
+        `run_workflow` call is a fresh sandbox with no accumulated state, so the check
+        is always sound.
         """
         signatures = [_agent_signature(name, entry.agent) for name, entry in self._by_name.items()]
         conflicting = FunctionSignature.get_conflicting_type_names(signatures)
@@ -626,12 +628,7 @@ class DynamicWorkflowToolset(AbstractToolset[AgentDepsT]):
             signature.render('raise NotImplementedError()', is_async=True, conflicting_type_names=conflicting)
             for signature in signatures
         )
-        try:
-            Monty(code, type_check=True, type_check_stubs='\n\n'.join(parts))
-        except MontyTypingError as e:
-            raise ModelRetry(f'Type error in workflow:\n{capture.prepend_to(e.display())}') from e
-        except MontySyntaxError as e:
-            raise ModelRetry(f'Syntax error in workflow:\n{capture.prepend_to(e.display())}') from e
+        return '\n\n'.join(parts)
 
     async def call_tool(
         self, name: str, tool_args: dict[str, Any], ctx: RunContext[AgentDepsT], tool: ToolsetTool[AgentDepsT]
@@ -673,17 +670,23 @@ class DynamicWorkflowToolset(AbstractToolset[AgentDepsT]):
 
         limits = _resolve_resource_limits(self.resource_limits)
         capture = PrintCapture()
-        self._type_check(code, capture)
+        # Type-check the script against the sub-agent stubs as part of `feed_start`: a type error
+        # surfaces as `MontyTypingError` before any sub-agent runs, so it costs a retry but no
+        # sub-agent budget.
+        type_check_stubs = self._build_type_check_stubs()
         in_workflow_token = _in_workflow.set(True)
         try:
-            repl = MontyRepl(limits=limits)
-            monty_state = repl.feed_start(code, print_callback=capture)
-            # `_by_name` is not mutated while a script executes (reveals land in `get_tools`,
-            # which does not interleave with `call_tool`), so it is a stable name registry for
-            # the whole script. Sub-agents always run concurrently (the executor's defaults);
-            # durable ordering (global_sequential) lands with durability.
-            completed = await MontyExecutor(dispatch=dispatch, valid_names=self._by_name).run(monty_state)
-        except MontySyntaxError as e:  # pragma: no cover -- backstop; `_type_check` rejects syntax errors first
+            with Monty() as monty_pool:
+                with monty_pool.checkout(limits=limits, type_check=True, type_check_stubs=type_check_stubs) as session:
+                    monty_state = session.feed_start(code, print_callback=capture)
+                    # `_by_name` is not mutated while a script executes (reveals land in `get_tools`,
+                    # which does not interleave with `call_tool`), so it is a stable name registry for
+                    # the whole script. Sub-agents always run concurrently (the executor's defaults);
+                    # durable ordering (global_sequential) lands with durability.
+                    completed = await MontyExecutor(dispatch=dispatch, valid_names=self._by_name).run(monty_state)
+        except MontyTypingError as e:
+            raise ModelRetry(f'Type error in workflow:\n{capture.prepend_to(e.display())}') from e
+        except MontySyntaxError as e:  # pragma: no cover -- backstop; the type checker parses first
             raise ModelRetry(f'Syntax error in workflow:\n{capture.prepend_to(e.display())}') from e
         except MontyRuntimeError as e:
             if budget_exhausted:
@@ -712,9 +715,7 @@ class DynamicWorkflowToolset(AbstractToolset[AgentDepsT]):
                     completed_dispatches=completed_dispatches,
                 )
             raise ModelRetry(
-                'The workflow script aborted inside the sandbox. This can happen when the same '
-                'sub-agent call is awaited more than once in one asyncio.gather -- give each gathered '
-                'call its own invocation. Revise the script and try again.'
+                'The workflow script aborted inside the sandbox. Revise the script and try again.'
                 f'{_completed_retry_section(completed_dispatches)}'
             ) from e
         finally:

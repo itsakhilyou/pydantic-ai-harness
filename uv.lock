@@ -8,7 +8,6 @@ resolution-markers = [
 ]
 
 [options]
-prerelease-mode = "allow"
 
 [options.exclude-newer-package]
 pydantic-ai-slim = false
@@ -1029,6 +1028,7 @@ source = { editable = "." }
 dependencies = [
     { name = "httpx" },
     { name = "pydantic-ai-slim" },
+    { name = "pydantic-monty" },
 ]
 
 [package.optional-dependencies]
@@ -1083,9 +1083,10 @@ requires-dist = [
     { name = "pydantic-ai-slim", extras = ["dbos"], marker = "extra == 'dbos'" },
     { name = "pydantic-ai-slim", extras = ["spec"], marker = "extra == 'logfire'", specifier = ">=2.1.0" },
     { name = "pydantic-ai-slim", extras = ["temporal"], marker = "extra == 'temporal'" },
-    { name = "pydantic-monty", marker = "extra == 'code-mode'", specifier = ">=0.0.16" },
-    { name = "pydantic-monty", marker = "extra == 'codemode'", specifier = ">=0.0.16" },
-    { name = "pydantic-monty", marker = "extra == 'dynamic-workflow'", specifier = ">=0.0.16" },
+    { name = "pydantic-monty", specifier = ">=0.0.19b2" },
+    { name = "pydantic-monty", marker = "extra == 'code-mode'", specifier = ">=0.0.19b2" },
+    { name = "pydantic-monty", marker = "extra == 'codemode'", specifier = ">=0.0.19b2" },
+    { name = "pydantic-monty", marker = "extra == 'dynamic-workflow'", specifier = ">=0.0.19b2" },
 ]
 provides-extras = ["acp", "code-mode", "codemode", "dbos", "dynamic-workflow", "logfire", "temporal"]
 
