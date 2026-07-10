@@ -11,6 +11,19 @@ Pydantic AI's [capabilities](/ai/core-concepts/capabilities/) and [hooks](/ai/co
 
 **Pydantic AI Harness** is the official capability library for Pydantic AI, maintained by the [Pydantic AI](https://github.com/pydantic/pydantic-ai) team. Pydantic AI core ships the capabilities that require model or framework support, plus the ones fundamental to every agent -- [web search](/ai/core-concepts/capabilities/#provider-adaptive-tools), [tool search](/ai/tools-toolsets/deferred-tools/), [thinking](/ai/core-concepts/capabilities/#thinking). Everything else lives here: standalone building blocks you pick and choose to turn your agent into a coding agent, a research assistant, or anything else. This is also where new capabilities start -- as they stabilize and prove themselves broadly essential, they can graduate into core.
 
+## What goes where?
+
+Pydantic AI core ships the agent loop, model providers, the capabilities/hooks abstraction, and two kinds of capabilities:
+
+- **Capabilities that require model or framework support** -- anything backed by provider native tools (like [image generation](/ai/core-concepts/capabilities/#provider-adaptive-tools)), provider-specific APIs (like compaction via the OpenAI or Anthropic APIs), or deep agent graph integration. These go hand-in-hand with model class code and need to ship together.
+- **Capabilities that are fundamental to the agent experience** -- things nearly every agent benefits from, like [web search](/ai/core-concepts/capabilities/#provider-adaptive-tools), [tool search](/ai/tools-toolsets/deferred-tools/), and [thinking](/ai/core-concepts/capabilities/#thinking). These feel like qualities of the agent itself, not accessories.
+
+**Pydantic AI Harness** is where everything else lives: standalone capabilities that make specific categories of agents powerful, or that are still finding their final shape. Context management, memory, guardrails, file system access, code execution, multi-agent orchestration -- these are the building blocks you pick and choose based on what your agent needs to do.
+
+The harness is also where new capabilities *start*. It ships as a separate package so capabilities can iterate faster without the strict backward-compatibility requirements of core. As a capability stabilizes and proves itself broadly essential, it can graduate into core -- [code mode](capabilities/code-mode.md) is an early candidate.
+
+Many capabilities benefit from a "fall up" pattern: they typically start as a local implementation that works with every model, then gain provider-native support that uses the provider's built-in API when available -- auto-switching between the two. This is how [web search](/ai/core-concepts/capabilities/#provider-adaptive-tools), [web fetch](/ai/core-concepts/capabilities/#provider-adaptive-tools), and [image generation](/ai/core-concepts/capabilities/#provider-adaptive-tools) already work in core, and the same approach is coming for skills, code mode, and context compaction.
+
 ## Installation
 
 ```bash
