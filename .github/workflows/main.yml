@@ -30,7 +30,11 @@ jobs:
 
       - uses: astral-sh/setup-uv@cec208311dfd045dd5311c1add060b2062131d57 # v8.0.0
         with:
-          python-version: '3.14'
+          # `pydantic-monty` (needed to typecheck the code_mode / dynamic_workflow modules) has no
+          # cp314 wheel yet and is gated to Python < 3.14, so typecheck runs on the highest Python
+          # where the full dependency graph -- monty included -- installs. pyright targets py3.10
+          # regardless (see `[tool.pyright] pythonVersion`).
+          python-version: '3.13'
           enable-cache: true # zizmor: ignore[cache-poisoning] -- Job does not produce release artifacts and does not have sensitive permissions
           cache-suffix: lint
 

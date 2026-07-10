@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib.util
 from collections.abc import Iterator
 from datetime import datetime
 from pathlib import Path
@@ -9,6 +10,12 @@ import pydantic_ai.models
 import pytest
 from pydantic_ai import Agent
 from pydantic_ai.models.test import TestModel
+
+# The README quick-start test drives a real `CodeMode` sandbox, so it needs `pydantic-monty`,
+# which is gated to Python < 3.14 (no cp314 wheel yet). Ignore it at collection when monty is
+# absent. A conditional expression rather than an `if` statement: branch coverage traces statement
+# arcs, and no single environment takes both arms of an install-dependent branch.
+collect_ignore = ['test_readme_quick_start.py'] if importlib.util.find_spec('pydantic_monty') is None else []
 
 # `dirty-equals` matchers are typed as `DirtyEquals[T]`, not `T`, so passing
 # them where pydantic-ai expects concrete `str`/`datetime`/etc. fails pyright
