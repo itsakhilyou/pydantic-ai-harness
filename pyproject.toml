@@ -139,6 +139,10 @@ executionEnvironments = [
 [tool.pytest.ini_options]
 testpaths = ['tests']
 xfail_strict = true
+# Dump every thread's traceback if a single test runs longer than this, so a CI hang (e.g. a
+# monty subprocess-pool worker that never returns) prints where it is stuck instead of just
+# timing out the job. Uses the stdlib faulthandler pytest already enables -- no new dependency.
+faulthandler_timeout = 120
 filterwarnings = [
     'error',
     # DBOS's run_sync triggers this on Python 3.12+ — not our code.
