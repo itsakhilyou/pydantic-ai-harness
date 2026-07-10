@@ -1038,15 +1038,18 @@ acp = [
 ]
 code-mode = [
     { name = "pydantic-monty", marker = "python_full_version < '3.14'" },
+    { name = "pydantic-monty-runtime", marker = "python_full_version < '3.14'" },
 ]
 codemode = [
     { name = "pydantic-monty", marker = "python_full_version < '3.14'" },
+    { name = "pydantic-monty-runtime", marker = "python_full_version < '3.14'" },
 ]
 dbos = [
     { name = "pydantic-ai-slim", extra = ["dbos"] },
 ]
 dynamic-workflow = [
     { name = "pydantic-monty", marker = "python_full_version < '3.14'" },
+    { name = "pydantic-monty-runtime", marker = "python_full_version < '3.14'" },
 ]
 logfire = [
     { name = "logfire" },
@@ -1087,6 +1090,9 @@ requires-dist = [
     { name = "pydantic-monty", marker = "python_full_version < '3.14' and extra == 'code-mode'", specifier = ">=0.0.19b1" },
     { name = "pydantic-monty", marker = "python_full_version < '3.14' and extra == 'codemode'", specifier = ">=0.0.19b1" },
     { name = "pydantic-monty", marker = "python_full_version < '3.14' and extra == 'dynamic-workflow'", specifier = ">=0.0.19b1" },
+    { name = "pydantic-monty-runtime", marker = "python_full_version < '3.14' and extra == 'code-mode'", specifier = ">=0.0.19b1" },
+    { name = "pydantic-monty-runtime", marker = "python_full_version < '3.14' and extra == 'codemode'", specifier = ">=0.0.19b1" },
+    { name = "pydantic-monty-runtime", marker = "python_full_version < '3.14' and extra == 'dynamic-workflow'", specifier = ">=0.0.19b1" },
 ]
 provides-extras = ["acp", "code-mode", "codemode", "dbos", "dynamic-workflow", "logfire", "temporal"]
 
