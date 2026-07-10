@@ -42,10 +42,19 @@ try:
         SyncSnapshot,
     )
 except ImportError as _import_error:  # pragma: no cover
-    raise ImportError(
-        'pydantic-monty is required for code-execution capabilities. Install it with: '
-        'pip install "pydantic-ai-harness[code-mode]" or "pydantic-ai-harness[dynamic-workflow]"'
-    ) from _import_error
+    import sys
+
+    if sys.version_info >= (3, 14):
+        _monty_hint = (
+            'pydantic-monty does not publish wheels for Python 3.14 yet, so the code-execution '
+            'capabilities require Python 3.13 or earlier.'
+        )
+    else:
+        _monty_hint = (
+            'pydantic-monty is required for code-execution capabilities. Install it with: '
+            'pip install "pydantic-ai-harness[code-mode]" or "pydantic-ai-harness[dynamic-workflow]"'
+        )
+    raise ImportError(_monty_hint) from _import_error
 
 # Dispatch callback: given the sandbox function name and keyword arguments,
 # perform the host-side work (tool call or sub-agent run) and return the result.

@@ -34,11 +34,11 @@ dependencies = [
 
 [project.optional-dependencies]
 code-mode = [
-    'pydantic-monty>=0.0.19b1',
+    'pydantic-monty>=0.0.19b1 ; python_version < "3.14"',
 ]
 # Extras metadata has no native redirect syntax, so aliases are represented as duplicate extras.
 codemode = [
-    'pydantic-monty>=0.0.19b1',
+    'pydantic-monty>=0.0.19b1 ; python_version < "3.14"',
 ]
 temporal = [
     'pydantic-ai-slim[temporal]',
@@ -51,7 +51,7 @@ logfire = [
     "pydantic-ai-slim[spec]>=2.1.0",
 ]
 dynamic-workflow = [
-    "pydantic-monty>=0.0.19b1",
+    "pydantic-monty>=0.0.19b1 ; python_version < '3.14'",
 ]
 acp = [
     # The SDK breaks across minors, so cap per minor.

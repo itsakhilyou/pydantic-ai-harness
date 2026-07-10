@@ -42,9 +42,17 @@ try:
         OsFunction,
     )
 except ImportError as _import_error:  # pragma: no cover
-    raise ImportError(
-        'pydantic-monty is required for CodeMode. Install it with: pip install "pydantic-ai-harness[code-mode]"'
-    ) from _import_error
+    import sys
+
+    if sys.version_info >= (3, 14):
+        _monty_hint = (
+            'pydantic-monty does not publish wheels for Python 3.14 yet, so CodeMode requires Python 3.13 or earlier.'
+        )
+    else:
+        _monty_hint = (
+            'pydantic-monty is required for CodeMode. Install it with: pip install "pydantic-ai-harness[code-mode]"'
+        )
+    raise ImportError(_monty_hint) from _import_error
 from typing_extensions import NotRequired, TypedDict
 
 from pydantic_ai_harness._monty_exec import (

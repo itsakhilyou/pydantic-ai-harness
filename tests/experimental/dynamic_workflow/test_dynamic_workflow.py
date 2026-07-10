@@ -375,9 +375,10 @@ import asyncio
 reviews = await asyncio.gather(reviewer(task="check auth"), reviewer(task="check parsing"))
 ```
 
-`asyncio.gather` does **not** support `return_exceptions=True`, and a sub-agent that raises cannot be
-caught inside the script: one failure aborts the whole script and you retry it. Design the script so
-sub-agents don't depend on catching each other's errors.
+`asyncio.gather` does **not** support `return_exceptions=True`, so a failing sub-agent inside a
+`gather` propagates its error and cancels the batch -- you cannot collect partial results. A sub-agent
+that raises surfaces the error at its `await`, which you can catch with `try`/`except` to handle or
+fall back; uncaught, it aborts the script and you retry.
 
 The last expression's value is captured as the result -- you do **not** need to `print()` it, and
 printing produces a string representation, not structured data. Use `print()` only for debug logging.
