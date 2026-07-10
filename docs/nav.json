@@ -1,0 +1,30 @@
+[
+  {
+    "label": "Pydantic AI Harness",
+    "items": [
+      { "label": "Overview", "slug": "index" },
+      {
+        "label": "Capabilities",
+        "items": [
+          { "label": "Code Mode", "slug": "capabilities/code-mode" },
+          { "label": "Shell", "slug": "capabilities/shell" },
+          { "label": "FileSystem", "slug": "capabilities/filesystem" },
+          { "label": "Managed Prompt", "slug": "capabilities/managed-prompt" }
+        ]
+      },
+      {
+        "label": "Experimental",
+        "items": [
+          { "label": "Subagents", "slug": "experimental/subagents" },
+          { "label": "Context", "slug": "experimental/context" },
+          { "label": "Planning", "slug": "experimental/planning" },
+          { "label": "Compaction", "slug": "experimental/compaction" },
+          { "label": "Pydantic AI Docs", "slug": "experimental/docs" },
+          { "label": "Overflow", "slug": "experimental/overflow" },
+          { "label": "Authoring", "slug": "experimental/authoring" },
+          { "label": "Step Persistence", "slug": "experimental/step-persistence" }
+        ]
+      }
+    ]
+  }
+]
