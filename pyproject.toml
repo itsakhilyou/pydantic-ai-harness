@@ -30,7 +30,6 @@ classifiers = [
 dependencies = [
     "httpx>=0.28.1",
     "pydantic-ai-slim>=2.1.0",
-    "pydantic-monty>=0.0.19b2",
 ]
 
 [project.optional-dependencies]
@@ -94,6 +93,22 @@ source = 'uv-dynamic-versioning'
 vcs = 'git'
 style = 'pep440'
 bump = true
+
+[tool.uv]
+# Let PydanticAI packages install fresh regardless of any exclude-newer pin
+# (was previously in uv.toml; see #238). Consolidated here so the constraint
+# below lives in the same table -- uv reads `constraint-dependencies` from
+# `[tool.uv]`, not from an adjacent `uv.toml`.
+exclude-newer-package = { pydantic-ai = false, pydantic-ai-slim = false, pydantic-evals = false, pydantic-graph = false }
+# pydantic-monty 0.0.19b2 requires pydantic-monty-runtime>=0.0.18, but the
+# runtime only publishes that range as pre-releases (0.0.18, 0.0.19b2). The
+# transitive `>=0.0.18` requirement carries no pre-release marker, so uv skips
+# those versions and resolution fails (notably the `test-floor` job's
+# `--resolution lowest-direct`). This constraint carries a pre-release
+# specifier for the runtime, opting just that package into pre-release
+# resolution without enabling pre-releases globally. Drop it once the runtime
+# has a stable >=0.0.18 release.
+constraint-dependencies = ['pydantic-monty-runtime>=0.0.18b0']
 
 
 [tool.hatch.build.targets.wheel]
