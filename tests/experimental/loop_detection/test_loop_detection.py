@@ -75,7 +75,9 @@ def _nudges(result_messages: list[ModelMessage]) -> list[str]:
         part.content
         for message in result_messages
         for part in message.parts
-        if isinstance(part, UserPromptPart) and isinstance(part.content, str) and '[loop-detection]' in part.content
+        if isinstance(part, UserPromptPart)
+        and isinstance(part.content, str)
+        and '[harness:loop-detection]' in part.content
     ]
 
 
@@ -86,6 +88,16 @@ async def test_exact_repetition_nudges_reach_next_request() -> None:
     nudges = _nudges(result.all_messages())
     assert len(nudges) == 1
     assert 'called 5 times with identical arguments' in nudges[0]
+
+
+async def test_nudge_carries_structured_harness_marker() -> None:
+    """The nudge persists as a `UserPromptPart`, so it must lead with an unambiguous harness
+    marker naming the framework and capability -- not read as a real user turn."""
+    agent = _build_agent(_repeated_call('alpha', 5), LoopDetection(error_cycle_threshold=99))
+    result = await agent.run('go')
+    nudges = _nudges(result.all_messages())
+    assert len(nudges) == 1
+    assert nudges[0].startswith('[harness:loop-detection] ')
 
 
 async def test_error_cycle_nudges() -> None:

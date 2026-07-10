@@ -107,7 +107,18 @@ OnLoop = Literal['nudge', 'error'] | Callable[[LoopDetected], None] | Callable[[
   or use it to log / record / enqueue custom steering.
 """
 
-_MARKER = '[loop-detection]'
+# Structured, unambiguous harness marker prefixing every nudge. The nudge is delivered via
+# `ctx.enqueue` (see `_act`), which lands it as a *durable* `UserPromptPart` -- wire-
+# indistinguishable from a real user turn without this prefix. Naming the harness and the
+# capability up front lets the model (and any downstream model that reads the history)
+# attribute the steering to the framework, not the user. Matches the bracketed
+# `harness:<capability>` convention used across the harness's explicit-marker paths.
+#
+# TODO(pydantic-ai#6404): once core grows a provenance channel that renders a model-neutral
+# `source` marker on request parts per `ModelProfile` at `prepare_messages` time (developer
+# role / attribution tag), migrate the nudge onto it instead of baking this presentation
+# prefix into the durable transcript. Until then the prefix is the only signal available.
+_MARKER = '[harness:loop-detection]'
 _CHANGE_APPROACH = 'Change approach, or state plainly what is blocking you.'
 
 
@@ -363,6 +374,10 @@ class LoopDetection(AbstractCapability[AgentDepsT]):
             return
         if on_loop == 'error':
             raise LoopDetectedError(detected)
+        # `enqueue` delivers the nudge on the next request but persists it as a durable
+        # `UserPromptPart`; the `_MARKER` prefix is what keeps it attributable as harness
+        # steering rather than a real user turn. See the `_MARKER` TODO for the intended
+        # migration to core's provenance channel (pydantic-ai#6404) once it exists.
         try:
             ctx.enqueue(detected.message, priority='asap')
         except UserError:  # pragma: no cover - no queue only in synthetic contexts outside a run
