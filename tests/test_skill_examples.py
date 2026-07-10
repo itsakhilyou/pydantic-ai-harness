@@ -1,5 +1,6 @@
 from __future__ import annotations as _annotations
 
+import importlib.util
 import os
 from collections.abc import Iterable
 from dataclasses import dataclass, field
@@ -9,6 +10,10 @@ import pytest
 from _pytest.mark import ParameterSet
 from pytest_examples import CodeExample, EvalExample, find_examples
 from pytest_examples.config import ExamplesConfig as BaseExamplesConfig
+
+# The CODE-MODE skill examples construct `CodeMode`, which needs `pydantic-monty` -- gated to
+# Python < 3.14 (no cp314 wheel). When it is absent, still lint those snippets but skip execution.
+_MONTY_ABSENT = importlib.util.find_spec('pydantic_monty') is None
 
 
 @dataclass
@@ -67,6 +72,9 @@ def test_skill_examples(example: CodeExample, eval_example: EvalExample):
 
     if prefix.get('test', '').startswith('skip'):
         pytest.skip('running skipped for this example')
+
+    if _MONTY_ABSENT and 'CODE-MODE.md' in str(example.path):
+        pytest.skip('pydantic-monty is gated to Python < 3.14; CodeMode example execution needs it')
 
     if eval_example.update_examples:  # pragma: lax no cover
         eval_example.run_print_update(example)

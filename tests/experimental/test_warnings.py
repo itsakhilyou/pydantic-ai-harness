@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 import importlib
+import importlib.util
 import warnings
 
 import pytest
 
 from pydantic_ai_harness.experimental import HarnessExperimentalWarning
 from pydantic_ai_harness.experimental._warn import warn_experimental
+
+# `dynamic_workflow` imports `pydantic-monty`, which is gated to Python < 3.14 (no cp314 wheel).
+_MONTY_ABSENT = importlib.util.find_spec('pydantic_monty') is None
 
 
 class TestExperimentalWarning:
@@ -29,7 +33,17 @@ class TestExperimentalWarning:
             warn_experimental('compaction')
             warn_experimental('some_future_capability')  # also silenced, same filter
 
-    @pytest.mark.parametrize('feature', ['compaction', 'subagents', 'dynamic_workflow'])
+    @pytest.mark.parametrize(
+        'feature',
+        [
+            'compaction',
+            'subagents',
+            pytest.param(
+                'dynamic_workflow',
+                marks=pytest.mark.skipif(_MONTY_ABSENT, reason='pydantic-monty is gated to Python < 3.14'),
+            ),
+        ],
+    )
     def test_importing_a_capability_warns(self, feature: str) -> None:
         module = importlib.import_module(f'pydantic_ai_harness.experimental.{feature}')
         with pytest.warns(HarnessExperimentalWarning):
