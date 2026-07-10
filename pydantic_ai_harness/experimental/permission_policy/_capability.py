@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any
 
 from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.exceptions import ApprovalRequired
+from pydantic_ai.messages import ToolReturn
 from pydantic_ai.tools import (
     AgentDepsT,
     DeferredToolApprovalResult,
@@ -31,6 +32,24 @@ if TYPE_CHECKING:
 # `handle_deferred_tool_calls` only resolves the asks *this* capability raised and leaves
 # other capabilities' deferred calls untouched (good composition citizen).
 _MARKER = 'pydantic_ai_harness.permission_policy'
+
+# Provenance marker stamped onto the `metadata` of a `deny`'s `ToolReturnPart`, so the app
+# (and any provenance-aware consumer) can tell a *harness* denial apart from a genuine tool
+# result. Mirrors the pattern of core PR #6319's `SYNTHESIZED_TOOL_RETURN_METADATA_KEY`.
+#
+# NOTE: `wrap_tool_execute` cannot set `ToolReturnPart.outcome` — the only value return that
+# reaches `outcome='denied'` is a `ToolDenied` on the *deferred* approval path (core
+# `_tool_execution._call_tool`); a synchronous `deny` verdict has no such channel, and
+# `outcome` is not serialized to the wire regardless. So the denial reaches the model as a
+# structurally-successful `ToolReturnPart` distinguished only by its prose. We keep an
+# explicit, unambiguous prose marker (below) load-bearing for the model, and the `metadata`
+# marker load-bearing for the app. When core grows a provenance channel that renders to the
+# wire (pydantic-ai#6404), route this through it.
+_DENY_METADATA_KEY = 'pydantic_ai_harness_permission_denied'
+
+# Explicit prose prefix so the *model* can attribute the denial to the harness policy layer,
+# not to the tool itself failing.
+_DENY_PROSE_MARKER = '[permission-policy]'
 
 # Default set of tool names treated as shell-class (their command argument is analyzed).
 DEFAULT_SHELL_TOOLS: frozenset[str] = frozenset(
@@ -171,7 +190,7 @@ class PermissionPolicy(AbstractCapability[AgentDepsT]):
         return decision, command
 
     def _deny_message(self, tool_name: str, decision: Decision) -> str:
-        head = f'Permission denied for `{tool_name}`: {decision.reason}.'
+        head = f'{_DENY_PROSE_MARKER} Permission denied for `{tool_name}`: {decision.reason}.'
         if decision.retryable:
             tail = (
                 ' If this action is genuinely required, you may restate the request once with a '
@@ -180,6 +199,17 @@ class PermissionPolicy(AbstractCapability[AgentDepsT]):
         else:
             tail = ' This will not be allowed even with justification; use a safer alternative.'
         return head + tail
+
+    def _deny_return(self, tool_name: str, decision: Decision) -> ToolReturn:
+        """Build the `deny` tool return.
+
+        Explicit prose marker for the model + `metadata` provenance marker for the app. See
+        `_DENY_METADATA_KEY` for why `outcome` can't be set from here.
+        """
+        return ToolReturn(
+            return_value=self._deny_message(tool_name, decision),
+            metadata={_DENY_METADATA_KEY: True},
+        )
 
     # --- hooks -------------------------------------------------------------------
 
@@ -209,7 +239,7 @@ class PermissionPolicy(AbstractCapability[AgentDepsT]):
         if decision.verdict == 'allow':
             return await handler(args)
         if decision.verdict == 'deny':
-            return self._deny_message(tool_def.name, decision)
+            return self._deny_return(tool_def.name, decision)
         # ask
         if ctx.tool_call_approved:
             return await handler(args)

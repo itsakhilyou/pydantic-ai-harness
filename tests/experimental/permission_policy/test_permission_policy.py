@@ -99,6 +99,24 @@ class TestDeny:
         result = await _agent(_one_shot_command_model('ls'), policy).run('go')
         assert 'EXECUTED' not in result.output
 
+    async def test_deny_return_carries_provenance_marker(self) -> None:
+        # A denial must be attributable to the harness policy layer, not read as a genuine
+        # (successful) tool result. The prose marker is load-bearing for the model; the
+        # `metadata` key is load-bearing for the app. (`outcome` can't be set from the
+        # `wrap_tool_execute` return path in current core — see `_DENY_METADATA_KEY`.)
+        policy = PermissionPolicy[object](rules=[Rule('deny', tool='run_command')])
+        result = await _agent(_one_shot_command_model('ls'), policy).run('go')
+        deny_part = next(
+            p
+            for m in result.all_messages()
+            if isinstance(m, ModelRequest)
+            for p in m.parts
+            if isinstance(p, ToolReturnPart) and p.tool_name == 'run_command'
+        )
+        assert deny_part.metadata == {'pydantic_ai_harness_permission_denied': True}
+        assert isinstance(deny_part.content, str)
+        assert deny_part.content.startswith('[permission-policy] Permission denied for `run_command`')
+
 
 class TestDenyRemovesTool:
     async def test_bare_deny_removes_tool_from_toolset(self) -> None:
