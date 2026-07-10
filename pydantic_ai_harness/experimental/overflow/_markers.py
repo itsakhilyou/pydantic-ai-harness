@@ -48,6 +48,19 @@ def elision_marker(*, omitted: str, handle: str | None) -> str:
     return f'[... {omitted} omitted; not stored, re-run the tool for the full output ...]'
 
 
+def summary_header(*, size_desc: str, handle: str | None) -> str:
+    """Lead line of a summarized tool return: what was replaced, by whom, and how to recover it.
+
+    Like `spill_header`/`elision_marker`, this makes the elision explicit: the model learns the
+    body below is a harness-generated summary standing in for the real tool output, not the tool
+    result itself. When `handle` is set the original was also spilled and stays retrievable
+    through the query tools; otherwise the summary is all that remains (re-run the tool for the
+    full output).
+    """
+    recover = f'{retrieval_hint(handle)}' if handle is not None else 're-run the tool for the full output'
+    return f'[Tool output too large ({size_desc}); summarized by harness. {recover}. The summary follows.]'
+
+
 def missing_handle_message(handle: str) -> str:
     """Guidance returned (not raised) when a handle does not resolve to a stored payload.
 

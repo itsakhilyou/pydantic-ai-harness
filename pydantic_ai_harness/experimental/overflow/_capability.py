@@ -29,6 +29,7 @@ from pydantic_ai_harness.experimental.overflow._markers import (
     elision_marker,
     missing_handle_message,
     spill_header,
+    summary_header,
 )
 from pydantic_ai_harness.experimental.overflow._payload import (
     is_binary,
@@ -437,7 +438,14 @@ class OverflowingToolOutput(AbstractCapability[AgentDepsT]):
             summary = await self._summarize(ctx, call, action, unit.text)
         except Exception:
             return await self._fallback(ctx, call, action.then, unit)
-        return summary, None
+        # Mark the summary the same way every other elision path is marked: an explicit
+        # bracketed header so the model (and any downstream model) knows this body is a
+        # harness-generated stand-in, not the tool's real output. `Summarize` does not spill
+        # the original, so there is no retrieval handle.
+        size_unit = 'tokens' if self.over_tokens else 'chars'
+        amount = measure(unit.text, over_tokens=self.over_tokens, tokenizer=self.tokenizer)
+        header = summary_header(size_desc=f'{amount:,} {size_unit}', handle=None)
+        return f'{header}\n{summary}', None
 
     async def _summarize(
         self,

@@ -538,7 +538,7 @@ class TestSummarize:
             bands=[Band(over=5, action=Summarize(summarize=lambda name, text: f'{name}:{len(text)}'))]
         )
         out = await _run(cap, 'x' * 100)
-        assert out == 'big_tool:100'
+        assert out.endswith('big_tool:100')
 
     async def test_custom_async_summarizer(self):
         async def summ(name: str, text: str) -> str:
@@ -548,14 +548,25 @@ class TestSummarize:
             bands=[Band(over=5, action=Summarize(summarize=summ))]
         )
         out = await _run(cap, 'x' * 100)
-        assert out == 'async:100'
+        assert out.endswith('async:100')
+
+    async def test_summary_carries_explicit_marker(self):
+        # The summary replaces the real tool output, so it must be marked as a harness
+        # stand-in the same way every other elision path is -- not passed off as the result.
+        cap: OverflowingToolOutput[object] = OverflowingToolOutput(
+            bands=[Band(over=5, action=Summarize(summarize=lambda name, text: 'THE GIST'))]
+        )
+        out = await _run(cap, 'x' * 100)
+        assert out.startswith('[Tool output too large (100 chars); summarized by harness.')
+        assert 're-run the tool for the full output' in out
+        assert out.endswith('\nTHE GIST')
 
     async def test_inherited_model_and_usage(self):
         # model=None resolves to ctx.model, and the call threads usage=ctx.usage.
         ctx = _make_ctx(model=_fixed_model('THE SUMMARY'))
         cap: OverflowingToolOutput[object] = OverflowingToolOutput(bands=[Band(over=5, action=Summarize())])
         out = await _run(cap, 'x' * 100, ctx=ctx)
-        assert out == 'THE SUMMARY'
+        assert out.endswith('THE SUMMARY')
         assert ctx.usage.requests == 1
 
     async def test_explicit_model_overrides_ctx(self):
@@ -564,7 +575,7 @@ class TestSummarize:
             bands=[Band(over=5, action=Summarize(model=_fixed_model('FROM EXPLICIT MODEL')))]
         )
         out = await _run(cap, 'x' * 100, ctx=ctx)
-        assert out == 'FROM EXPLICIT MODEL'
+        assert out.endswith('FROM EXPLICIT MODEL')
         assert ctx.usage.requests == 1
 
     async def test_binary_summarize_falls_back(self):
