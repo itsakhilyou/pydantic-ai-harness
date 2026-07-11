@@ -7,21 +7,7 @@ description: Let an agent delegate self-contained tasks to named child agents vi
 
 `SubAgents` lets an agent delegate self-contained tasks to named child agents. It takes a sequence of `SubAgent` entries and exposes a single `delegate_task(agent_name, task)` tool. Each delegation runs the chosen sub-agent in its own run -- with its own message history, so it never sees the parent conversation -- and returns its output to the parent.
 
-!!! warning "Experimental"
-    This capability lives under `pydantic_ai_harness.experimental` and may change or be removed in any release, without a deprecation period. Import it from the experimental path -- there is no top-level export:
-
-    ```python
-    from pydantic_ai_harness.experimental.subagents import SubAgent, SubAgents
-    ```
-
-    Importing any experimental capability emits a `HarnessExperimentalWarning`. Silence **all** harness experimental warnings with a single filter (no per-capability lines needed):
-
-    ```python
-    import warnings
-    from pydantic_ai_harness.experimental import HarnessExperimentalWarning
-
-    warnings.filterwarnings('ignore', category=HarnessExperimentalWarning)
-    ```
+[Source](https://github.com/pydantic/pydantic-ai-harness/tree/main/pydantic_ai_harness/subagents/)
 
 ## The problem
 
@@ -33,7 +19,7 @@ A single agent that does everything accumulates a large tool set and a long cont
 
 ```python
 from pydantic_ai import Agent
-from pydantic_ai_harness.experimental.subagents import SubAgent, SubAgents
+from pydantic_ai_harness.subagents import SubAgent, SubAgents
 
 researcher = Agent('anthropic:claude-sonnet-4-6', name='researcher', description='Researches a topic and reports findings')
 writer = Agent('anthropic:claude-sonnet-4-6', name='writer', description='Turns notes into polished prose')
@@ -74,7 +60,7 @@ Each `SubAgent` carries its own budgets, so one delegate's controls do not touch
 ```python
 from pydantic_ai import Agent
 from pydantic_ai.usage import UsageLimits
-from pydantic_ai_harness.experimental.subagents import SubAgent, SubAgents
+from pydantic_ai_harness.subagents import SubAgent, SubAgents
 
 reproducer = Agent('anthropic:claude-sonnet-4-6', instructions='Reproduce the reported bug from a minimal script.')
 librarian = Agent('anthropic:claude-sonnet-4-6', instructions='Find relevant docs, issues, and prior art.')
@@ -120,7 +106,7 @@ A repo's markdown agent definitions become delegates without writing any `Agent`
 
 ```python
 from pydantic_ai import Agent
-from pydantic_ai_harness.experimental.subagents import SubAgents
+from pydantic_ai_harness.subagents import SubAgents
 
 orchestrator = Agent(
     'anthropic:claude-opus-4-7',
@@ -160,7 +146,7 @@ Frontmatter is read by a small, dependency-free parser limited to those keys (`p
 Disk agents inherit the parent run's model by default. Per agent, the caller can override the model and set a thinking/effort level via `agent_overrides`, keyed by the agent's name:
 
 ```python
-from pydantic_ai_harness.experimental.subagents import AgentOverride, SubAgents
+from pydantic_ai_harness.subagents import AgentOverride, SubAgents
 
 SubAgents(
     agent_folders='agents',
@@ -175,7 +161,7 @@ Every agent the capability builds runs at a minimum thinking-effort floor. `MINI
 A disk agent gets no tools by default (`inherit_tools` is `False`); set `inherit_tools=True` to expose the parent's tools to it through the `inherit_tools` mechanism, in which case its `tools` frontmatter is ignored. To map the frontmatter tool names to specific toolsets instead, pass a `tool_resolver`: it receives each tool name (so it can honor entries like `Bash(git:*)`) and returns the toolsets that provide it, or `None` for an unknown name, which is skipped with a warning.
 
 ```python
-from pydantic_ai_harness.experimental.subagents import SubAgents
+from pydantic_ai_harness.subagents import SubAgents
 
 def resolve(tool_name: str):
     return TOOLSETS.get(tool_name)  # -> Sequence[AgentToolset[object]] | None
@@ -232,8 +218,8 @@ SubAgent(
 
 ## API reference
 
-::: pydantic_ai_harness.experimental.subagents.SubAgents
+::: pydantic_ai_harness.subagents.SubAgents
 
-::: pydantic_ai_harness.experimental.subagents.SubAgent
+::: pydantic_ai_harness.subagents.SubAgent
 
-::: pydantic_ai_harness.experimental.subagents.AgentOverride
+::: pydantic_ai_harness.subagents.AgentOverride

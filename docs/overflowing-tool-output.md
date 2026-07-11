@@ -1,34 +1,17 @@
 ---
-title: Overflow
+title: Overflowing Tool Output
 description: Reduce oversized tool returns when they are produced -- truncate, spill to a queryable file, or summarize -- so a large payload does not persist in history.
 ---
 
-# Overflow
+# Overflowing Tool Output
 
 `OverflowingToolOutput` reduces a tool return that is large enough to dominate the context
 window. Tool returns persist in history as `ToolReturnPart`s, so an oversized one is re-sent
 on every later model request, paying its token cost for the rest of the run. This capability
-intercepts a return in the `after_tool_execute` hook, reduces it once, and lets the reduced
-form persist. The reduction is not recomputed per request.
+intercepts a return when it is produced, reduces it once, and lets the reduced form persist --
+the reduction is not recomputed per request.
 
-!!! warning "Experimental"
-    This capability lives under `pydantic_ai_harness.experimental` and may change or be
-    removed in any release, without a deprecation period. Import it from the experimental
-    path -- there is no top-level export:
-
-    ```python
-    from pydantic_ai_harness.experimental.overflow import OverflowingToolOutput
-    ```
-
-    Importing any experimental capability emits a `HarnessExperimentalWarning`. Silence all
-    harness experimental warnings with a single filter (no per-capability lines needed):
-
-    ```python
-    import warnings
-    from pydantic_ai_harness.experimental import HarnessExperimentalWarning
-
-    warnings.filterwarnings('ignore', category=HarnessExperimentalWarning)
-    ```
+[Source](https://github.com/pydantic/pydantic-ai-harness/tree/main/pydantic_ai_harness/overflowing_tool_output/)
 
 ## The problem
 
@@ -63,7 +46,7 @@ fallback if the store cannot accept the write.
 
 ```python
 from pydantic_ai import Agent
-from pydantic_ai_harness.experimental.overflow import OverflowingToolOutput
+from pydantic_ai_harness.overflowing_tool_output import OverflowingToolOutput
 
 agent = Agent('openai:gpt-4o', capabilities=[OverflowingToolOutput()])
 ```
@@ -79,7 +62,7 @@ that fits wins; anything below the smallest threshold passes through.
 
 ```python
 from pydantic_ai import Agent
-from pydantic_ai_harness.experimental.overflow import (
+from pydantic_ai_harness.overflowing_tool_output import (
     Band,
     OverflowingToolOutput,
     Spill,
@@ -123,7 +106,7 @@ spill -> truncate.
 
 ```python
 from pydantic_ai import Agent
-from pydantic_ai_harness.experimental.overflow import (
+from pydantic_ai_harness.overflowing_tool_output import (
     Band,
     OverflowingToolOutput,
     Truncate,
@@ -200,7 +183,7 @@ agent that still wants to read a spill. To bound disk use, opt into age-based pr
 from datetime import timedelta
 
 from pydantic_ai import Agent
-from pydantic_ai_harness.experimental.overflow import LocalFileStore, OverflowingToolOutput
+from pydantic_ai_harness.overflowing_tool_output import LocalFileStore, OverflowingToolOutput
 
 store = LocalFileStore(cleanup_after=timedelta(hours=6))  # default: None = keep forever
 agent = Agent('openai:gpt-4o', capabilities=[OverflowingToolOutput(store=store)])
@@ -262,4 +245,4 @@ built-in prompt entirely. The `summary_prompt` template on the capability must c
 
 ## API reference
 
-::: pydantic_ai_harness.experimental.overflow.OverflowingToolOutput
+::: pydantic_ai_harness.overflowing_tool_output.OverflowingToolOutput

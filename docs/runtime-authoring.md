@@ -1,27 +1,13 @@
 ---
-title: Authoring
+title: Runtime Authoring
 description: Let an agent write, validate, and persist real pydantic-ai capabilities at runtime, live on the next run.
 ---
 
-# Authoring
+# Runtime Authoring
 
 `RuntimeAuthoring` lets an agent author, validate, and persist real pydantic-ai capabilities while it runs. It exposes three tools that let the model write a capability class to disk as Python source, validate it immediately, and manage the set of authored capabilities. Each authored capability is a real `pydantic_ai.capabilities.AbstractCapability` subclass, so it can contribute instructions, model settings, a toolset, native tools, or a lifecycle hook.
 
-!!! warning "Experimental"
-    This capability lives under `pydantic_ai_harness.experimental` and may change or be removed in any release, without a deprecation period. There is no top-level export -- import it from the experimental path:
-
-    ```python
-    from pydantic_ai_harness.experimental.authoring import RuntimeAuthoring
-    ```
-
-    Importing any experimental capability emits a `HarnessExperimentalWarning`. Silence every harness experimental warning with a single filter (no per-capability lines needed):
-
-    ```python
-    import warnings
-    from pydantic_ai_harness.experimental import HarnessExperimentalWarning
-
-    warnings.filterwarnings('ignore', category=HarnessExperimentalWarning)
-    ```
+[Source](https://github.com/pydantic/pydantic-ai-harness/tree/main/pydantic_ai_harness/runtime_authoring/)
 
 ## The problem
 
@@ -45,7 +31,7 @@ Construct `RuntimeAuthoring` with a `directory` for the authored files, then add
 from pathlib import Path
 
 from pydantic_ai import Agent
-from pydantic_ai_harness.experimental.authoring import RuntimeAuthoring
+from pydantic_ai_harness.runtime_authoring import RuntimeAuthoring
 
 authoring = RuntimeAuthoring(directory=Path('.authored'))
 agent = Agent('anthropic:claude-sonnet-4-6', capabilities=[authoring])
@@ -65,7 +51,7 @@ The orchestrator drives the loop, so it owns the one-line contract: thread the s
 from pathlib import Path
 
 from pydantic_ai import Agent
-from pydantic_ai_harness.experimental.authoring import RuntimeAuthoring
+from pydantic_ai_harness.runtime_authoring import RuntimeAuthoring
 
 authoring = RuntimeAuthoring(directory=Path('.authored'))
 agent = Agent('anthropic:claude-sonnet-4-6', capabilities=[authoring])
@@ -102,6 +88,6 @@ Imported authored code is dynamic, but nothing typed `Any` crosses back into the
 
 ## API reference
 
-::: pydantic_ai_harness.experimental.authoring.RuntimeAuthoring
+::: pydantic_ai_harness.runtime_authoring.RuntimeAuthoring
 
-::: pydantic_ai_harness.experimental.authoring.CapabilityStore
+::: pydantic_ai_harness.runtime_authoring.CapabilityStore

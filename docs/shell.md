@@ -10,6 +10,8 @@ controls, environment scrubbing, and managed background processes. It exposes
 command-execution tools rooted at a working directory and cleans up any
 background processes automatically when the agent run ends.
 
+[Source](https://github.com/pydantic/pydantic-ai-harness/tree/main/pydantic_ai_harness/shell/)
+
 ## The problem
 
 Agents frequently need to run a build, a test suite, a linter, or a quick

@@ -7,22 +7,7 @@ description: Give an agent a tool that locates and returns Pydantic AI documenta
 
 `PyaiDocs` gives an agent a single tool, `read_pyai_docs(topic)`, that locates a Pydantic AI documentation page and returns it verbatim. Nothing is bundled into context up front. Each call resolves the topic from a configured local checkout first, then falls back to fetching the page from `pydantic/pydantic-ai:main`, so it works whether or not you have a local checkout (the remote fallback needs network access).
 
-!!! warning "Experimental"
-    This capability lives under `pydantic_ai_harness.experimental` and may change or be removed in any release, without a deprecation period. Import it from the experimental path -- there is no top-level export:
-
-    ```python
-    from pydantic_ai_harness.experimental.docs import PyaiDocs
-    ```
-
-    Importing any experimental capability emits a `HarnessExperimentalWarning`. Silence all harness experimental warnings with a single filter (no per-capability lines needed):
-
-    ```python
-    import warnings
-
-    from pydantic_ai_harness.experimental import HarnessExperimentalWarning
-
-    warnings.filterwarnings('ignore', category=HarnessExperimentalWarning)
-    ```
+[Source](https://github.com/pydantic/pydantic-ai-harness/tree/main/pydantic_ai_harness/docs/)
 
 ## The problem
 
@@ -42,7 +27,7 @@ Construct an `Agent` with `PyaiDocs()` in its `capabilities`. Point `local_docs_
 from pathlib import Path
 
 from pydantic_ai import Agent
-from pydantic_ai_harness.experimental.docs import PyaiDocs
+from pydantic_ai_harness.docs import PyaiDocs
 
 agent = Agent(
     'anthropic:claude-sonnet-4-6',
@@ -89,7 +74,7 @@ capabilities:
 
 ```python
 from pydantic_ai import Agent
-from pydantic_ai_harness.experimental.docs import PyaiDocs
+from pydantic_ai_harness.docs import PyaiDocs
 
 agent = Agent.from_file('agent.yaml', custom_capability_types=[PyaiDocs])
 result = agent.run_sync('...')
@@ -100,4 +85,4 @@ Pass `custom_capability_types` so the spec loader knows how to instantiate `Pyai
 
 ## API reference
 
-::: pydantic_ai_harness.experimental.docs.PyaiDocs
+::: pydantic_ai_harness.docs.PyaiDocs

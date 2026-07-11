@@ -9,21 +9,7 @@ Compaction is a menu of strategies for keeping an agent's conversation history w
 
 All strategies preserve tool-call / tool-return **pairing**. Core does not validate this, and a provider rejects an orphaned pair, so the pairing guarantee is what makes these safe to drop into an agent. The zero-LLM strategies never call a model; only `SummarizingCompaction` (and `TieredCompaction` when it escalates that far) spends tokens.
 
-!!! warning "Experimental"
-    These capabilities live under `pydantic_ai_harness.experimental` and may change or be removed in any release, without a deprecation period. Import them from the experimental path -- there is no top-level export:
-
-    ```python
-    from pydantic_ai_harness.experimental.compaction import TieredCompaction
-    ```
-
-    Importing any experimental capability emits a `HarnessExperimentalWarning`. Silence **all** harness experimental warnings with a single filter (no per-capability lines needed):
-
-    ```python
-    import warnings
-    from pydantic_ai_harness.experimental import HarnessExperimentalWarning
-
-    warnings.filterwarnings('ignore', category=HarnessExperimentalWarning)
-    ```
+[Source](https://github.com/pydantic/pydantic-ai-harness/tree/main/pydantic_ai_harness/compaction/)
 
 ## The problem
 
@@ -53,7 +39,7 @@ The field consensus (Anthropic, OpenCode, Letta) is to clear and dedupe first, a
 
 ```python
 from pydantic_ai import Agent
-from pydantic_ai_harness.experimental.compaction import (
+from pydantic_ai_harness.compaction import (
     ClearToolResults,
     DeduplicateFileReads,
     SummarizingCompaction,
@@ -93,7 +79,7 @@ A single model response of repeated whitespace, or a single tool call with a gia
 
 ```python
 from pydantic_ai import Agent
-from pydantic_ai_harness.experimental.compaction import ClampOversizedMessages
+from pydantic_ai_harness.compaction import ClampOversizedMessages
 
 agent = Agent(
     'openai:gpt-4o',
@@ -115,7 +101,7 @@ Request-side parts (user prompts, tool *returns*, system prompts) are deliberate
 Use it as the first tier of `TieredCompaction`, before `ClearToolResults`:
 
 ```python
-from pydantic_ai_harness.experimental.compaction import (
+from pydantic_ai_harness.compaction import (
     ClampOversizedMessages,
     ClearToolResults,
     TieredCompaction,
@@ -136,7 +122,7 @@ Tool outputs typically dominate an agent's context, and the agent can usually re
 
 ```python
 from pydantic_ai import Agent
-from pydantic_ai_harness.experimental.compaction import ClearToolResults
+from pydantic_ai_harness.compaction import ClearToolResults
 
 agent = Agent(
     'openai:gpt-4o',
@@ -155,7 +141,7 @@ There is no default `file_key`: identifying a file read is agent-specific, and a
 ```python
 from pydantic_ai import Agent
 from pydantic_ai.messages import ToolCallPart
-from pydantic_ai_harness.experimental.compaction import DeduplicateFileReads
+from pydantic_ai_harness.compaction import DeduplicateFileReads
 
 
 def file_key(call: ToolCallPart) -> str | None:
@@ -175,7 +161,7 @@ When the conversation exceeds the configured threshold, `SlidingWindow` discards
 
 ```python
 from pydantic_ai import Agent
-from pydantic_ai_harness.experimental.compaction import SlidingWindow
+from pydantic_ai_harness.compaction import SlidingWindow
 
 agent = Agent(
     'openai:gpt-4o',
@@ -191,7 +177,7 @@ When old context still matters but must be compressed, `SummarizingCompaction` s
 
 ```python
 from pydantic_ai import Agent
-from pydantic_ai_harness.experimental.compaction import SummarizingCompaction
+from pydantic_ai_harness.compaction import SummarizingCompaction
 
 agent = Agent(
     'openai:gpt-4o',
@@ -217,7 +203,7 @@ The summary call is a real request to the model, so its full usage -- tokens **a
 
 ```python
 from pydantic_ai import Agent
-from pydantic_ai_harness.experimental.compaction import LimitWarner
+from pydantic_ai_harness.compaction import LimitWarner
 
 agent = Agent(
     'openai:gpt-4o',
@@ -255,22 +241,22 @@ The span name is the static `compact_messages`; the strategy is an attribute, no
 
 ## Out of scope
 
-These strategies compress or drop context *inside* the window. Moving large tool outputs *out* of the window -- overflowing them to a file the agent (or a subagent) can query on demand -- is a separate capability ([overflow](overflow.md)), not lossy truncation. Prefer it over capping individual tool outputs.
+These strategies compress or drop context *inside* the window. Moving large tool outputs *out* of the window -- overflowing them to a file the agent (or a subagent) can query on demand -- is a separate capability ([overflowing tool output](overflowing-tool-output.md)), not lossy truncation. Prefer it over capping individual tool outputs.
 
 ## API reference
 
 The recommended default is `TieredCompaction`; the other strategies below can be used standalone or plugged in as its tiers.
 
-::: pydantic_ai_harness.experimental.compaction.TieredCompaction
+::: pydantic_ai_harness.compaction.TieredCompaction
 
-::: pydantic_ai_harness.experimental.compaction.ClampOversizedMessages
+::: pydantic_ai_harness.compaction.ClampOversizedMessages
 
-::: pydantic_ai_harness.experimental.compaction.ClearToolResults
+::: pydantic_ai_harness.compaction.ClearToolResults
 
-::: pydantic_ai_harness.experimental.compaction.DeduplicateFileReads
+::: pydantic_ai_harness.compaction.DeduplicateFileReads
 
-::: pydantic_ai_harness.experimental.compaction.SlidingWindow
+::: pydantic_ai_harness.compaction.SlidingWindow
 
-::: pydantic_ai_harness.experimental.compaction.SummarizingCompaction
+::: pydantic_ai_harness.compaction.SummarizingCompaction
 
-::: pydantic_ai_harness.experimental.compaction.LimitWarner
+::: pydantic_ai_harness.compaction.LimitWarner

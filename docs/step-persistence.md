@@ -9,22 +9,7 @@ description: Record what an agent did at each boundary, save provider-valid snap
 
 It is not a full graph-state checkpoint. Capability-state restore, workspace snapshots, and graph-node resume are out of scope and tracked separately (see `pydantic-ai-harness` issues #149 and #196).
 
-!!! warning "Experimental"
-    `StepPersistence` and the `media` stores live under `pydantic_ai_harness.experimental` and may change or be removed in any release, without a deprecation period. There is no top-level export -- import them from the experimental path:
-
-    ```python
-    from pydantic_ai_harness.experimental.step_persistence import StepPersistence
-    from pydantic_ai_harness.experimental.media import S3MediaStore
-    ```
-
-    Importing either package emits a `HarnessExperimentalWarning`. Silence all harness experimental warnings with a single filter (no per-capability lines needed):
-
-    ```python
-    import warnings
-    from pydantic_ai_harness.experimental import HarnessExperimentalWarning
-
-    warnings.filterwarnings('ignore', category=HarnessExperimentalWarning)
-    ```
+[Source](https://github.com/pydantic/pydantic-ai-harness/tree/main/pydantic_ai_harness/step_persistence/)
 
 ## What it gives you
 
@@ -39,7 +24,7 @@ It is not a full graph-state checkpoint. Capability-state restore, workspace sna
 import asyncio
 
 from pydantic_ai import Agent
-from pydantic_ai_harness.experimental.step_persistence import StepPersistence, InMemoryStepStore
+from pydantic_ai_harness.step_persistence import StepPersistence, InMemoryStepStore
 
 store = InMemoryStepStore()
 librarian = Agent(
@@ -69,7 +54,7 @@ The orchestrator pattern -- one logical agent serving many turns -- uses `conver
 import asyncio
 
 from pydantic_ai import Agent
-from pydantic_ai_harness.experimental.step_persistence import StepPersistence, InMemoryStepStore
+from pydantic_ai_harness.step_persistence import StepPersistence, InMemoryStepStore
 
 store = InMemoryStepStore()
 orchestrator = Agent(
@@ -120,7 +105,7 @@ pydantic_ai already has `message_history=` for "carry on with this prior context
 import asyncio
 
 from pydantic_ai import Agent
-from pydantic_ai_harness.experimental.step_persistence import (
+from pydantic_ai_harness.step_persistence import (
     StepPersistence,
     InMemoryStepStore,
     continue_run,
@@ -177,7 +162,7 @@ It is auto-inferred for in-process delegation: when an orchestrator's tool synch
 import asyncio
 
 from pydantic_ai import Agent
-from pydantic_ai_harness.experimental.step_persistence import StepPersistence, InMemoryStepStore
+from pydantic_ai_harness.step_persistence import StepPersistence, InMemoryStepStore
 
 store = InMemoryStepStore()
 orchestrator = Agent(
@@ -279,7 +264,7 @@ Side-effect deduplication is the orchestrator's responsibility. Tools that write
 
 ```python
 from pydantic_ai import RunContext
-from pydantic_ai_harness.experimental.step_persistence import annotate_tool_effect
+from pydantic_ai_harness.step_persistence import annotate_tool_effect
 
 
 @orchestrator.tool
@@ -323,8 +308,8 @@ All three implement the same async `StepStore` protocol, so capability hooks nev
 Override the destination by passing your own `MediaStore`:
 
 ```python
-from pydantic_ai_harness.experimental.step_persistence import FileStepStore
-from pydantic_ai_harness.experimental.media import S3MediaStore
+from pydantic_ai_harness.step_persistence import FileStepStore
+from pydantic_ai_harness.media import S3MediaStore
 
 store = FileStepStore(
     'runs',
@@ -342,7 +327,7 @@ store = FileStepStore(
 Opt out entirely (keep bytes inline in the snapshot JSON/row):
 
 ```python
-from pydantic_ai_harness.experimental.step_persistence import FileStepStore, SqliteStepStore
+from pydantic_ai_harness.step_persistence import FileStepStore, SqliteStepStore
 
 FileStepStore('runs', media_store=None)
 SqliteStepStore(database='runs.db', media_store=None)
@@ -361,7 +346,7 @@ Each store accepts a `public_url=` callable that turns the canonical `media+sha2
 Static base URL (public R2 bucket, CDN):
 
 ```python
-from pydantic_ai_harness.experimental.media import S3MediaStore, make_static_public_url
+from pydantic_ai_harness.media import S3MediaStore, make_static_public_url
 
 store = S3MediaStore(
     bucket='my-bucket',
@@ -376,7 +361,7 @@ store = S3MediaStore(
 Presigned or rotating-signature URL -- pass any async callable that takes `(uri, MediaContext)`:
 
 ```python
-from pydantic_ai_harness.experimental.media import MediaContext, S3MediaStore
+from pydantic_ai_harness.media import MediaContext, S3MediaStore
 
 
 async def presign(uri: str, ctx: MediaContext) -> str:
@@ -416,7 +401,7 @@ All fields default; new fields are added non-breakingly as use cases emerge. Pas
 Default is `<sha256>.bin`. `DiskMediaStore` and `S3MediaStore` accept overrides to fit existing layouts; `SqliteMediaStore` does not (its primary key is the digest, so a user-chosen key would either break dedup or be a no-op):
 
 ```python
-from pydantic_ai_harness.experimental.media import DiskMediaStore, MediaContext
+from pydantic_ai_harness.media import DiskMediaStore, MediaContext
 
 
 def by_media_type(uri: str, ctx: MediaContext) -> str:
@@ -452,9 +437,9 @@ DynamoDB, Postgres, Redis, GCS, and other backends are out of scope for this rel
 
 ## Related
 
-- [Capabilities overview](../index.md)
-- [Code Mode](../capabilities/code-mode.md)
+- [Capabilities overview](index.md)
+- [Code Mode](code-mode.md)
 
 ## API reference
 
-::: pydantic_ai_harness.experimental.step_persistence.StepPersistence
+::: pydantic_ai_harness.step_persistence.StepPersistence

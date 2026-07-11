@@ -8,8 +8,10 @@ description: Back a Pydantic AI agent's instructions with a Logfire-managed prom
 `ManagedPrompt` backs an agent's instructions with a
 [Logfire-managed prompt](https://logfire.pydantic.dev/docs/reference/advanced/prompt-management/),
 so you can iterate on your system prompt from the Logfire UI -- versioned, labelled, and rolled
-out -- without touching code or redeploying. It's a Pydantic AI [capability](../index.md), so you
+out -- without touching code or redeploying. It's a Pydantic AI [capability](index.md), so you
 wire it in through the `capabilities=` parameter on `Agent`.
+
+[Source](https://github.com/pydantic/pydantic-ai-harness/tree/main/pydantic_ai_harness/logfire/)
 
 Install the `logfire` extra:
 

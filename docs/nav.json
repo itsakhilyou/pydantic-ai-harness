@@ -3,28 +3,22 @@
     "label": "Pydantic AI Harness",
     "items": [
       { "label": "Overview", "slug": "index" },
-      {
-        "label": "Capabilities",
-        "items": [
-          { "label": "Code Mode", "slug": "capabilities/code-mode" },
-          { "label": "Shell", "slug": "capabilities/shell" },
-          { "label": "FileSystem", "slug": "capabilities/filesystem" },
-          { "label": "Managed Prompt", "slug": "capabilities/managed-prompt" }
-        ]
-      },
-      {
-        "label": "Experimental",
-        "items": [
-          { "label": "Subagents", "slug": "experimental/subagents" },
-          { "label": "Context", "slug": "experimental/context" },
-          { "label": "Planning", "slug": "experimental/planning" },
-          { "label": "Compaction", "slug": "experimental/compaction" },
-          { "label": "Pydantic AI Docs", "slug": "experimental/docs" },
-          { "label": "Overflow", "slug": "experimental/overflow" },
-          { "label": "Authoring", "slug": "experimental/authoring" },
-          { "label": "Step Persistence", "slug": "experimental/step-persistence" }
-        ]
-      }
+      { "label": "Code Mode", "slug": "code-mode" },
+      { "label": "FileSystem", "slug": "filesystem" },
+      { "label": "Shell", "slug": "shell" },
+      { "label": "Context", "slug": "context" },
+      { "label": "Pydantic AI Docs", "slug": "pydantic-ai-docs" },
+      { "label": "Compaction", "slug": "compaction" },
+      { "label": "Overflowing Tool Output", "slug": "overflowing-tool-output" },
+      { "label": "Step Persistence", "slug": "step-persistence" },
+      { "label": "Media", "slug": "media" },
+      { "label": "Subagents", "slug": "subagents" },
+      { "label": "Dynamic Workflow", "slug": "dynamic-workflow" },
+      { "label": "Planning", "slug": "planning" },
+      { "label": "Runtime Authoring", "slug": "runtime-authoring" },
+      { "label": "Guardrails", "slug": "guardrails" },
+      { "label": "Managed Prompt", "slug": "managed-prompt" },
+      { "label": "ACP", "slug": "acp" }
     ]
   }
 ]

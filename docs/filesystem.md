@@ -10,6 +10,8 @@ search, find, create, and inspect -- all scoped to a single `root_dir`. Every pa
 resolved and containment-checked (symlinks included) before any I/O, and access
 is filtered through allow / deny / protected glob patterns.
 
+[Source](https://github.com/pydantic/pydantic-ai-harness/tree/main/pydantic_ai_harness/filesystem/)
+
 ## The problem
 
 Letting an agent touch the filesystem directly is risky: path traversal
@@ -179,7 +181,7 @@ Pass `custom_capability_types` so the spec loader knows how to instantiate
 
 - [Pydantic AI capabilities](/ai/core-concepts/capabilities/)
 - [Toolsets](/ai/tools-toolsets/toolsets/)
-- [the capabilities overview](../index.md)
+- [the capabilities overview](index.md)
 
 ## API reference
 

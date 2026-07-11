@@ -20,7 +20,7 @@ Pydantic AI core ships the agent loop, model providers, the capabilities/hooks a
 
 **Pydantic AI Harness** is where everything else lives: standalone capabilities that make specific categories of agents powerful, or that are still finding their final shape. Context management, memory, guardrails, file system access, code execution, multi-agent orchestration -- these are the building blocks you pick and choose based on what your agent needs to do.
 
-The harness is also where new capabilities *start*. It ships as a separate package so capabilities can iterate faster without the strict backward-compatibility requirements of core. As a capability stabilizes and proves itself broadly essential, it can graduate into core -- [code mode](capabilities/code-mode.md) is an early candidate.
+The harness is also where new capabilities *start*. It ships as a separate package so capabilities can iterate faster without the strict backward-compatibility requirements of core. As a capability stabilizes and proves itself broadly essential, it can graduate into core -- [code mode](code-mode.md) is an early candidate.
 
 Many capabilities benefit from a "fall up" pattern: they typically start as a local implementation that works with every model, then gain provider-native support that uses the provider's built-in API when available -- auto-switching between the two. This is how [web search](/ai/core-concepts/capabilities/#provider-adaptive-tools), [web fetch](/ai/core-concepts/capabilities/#provider-adaptive-tools), and [image generation](/ai/core-concepts/capabilities/#provider-adaptive-tools) already work in core, and the same approach is coming for skills, code mode, and context compaction.
 
@@ -33,8 +33,10 @@ uv add pydantic-ai-harness
 Some capabilities need an extra to pull in their optional dependencies:
 
 ```bash
-uv add "pydantic-ai-harness[codemode]"   # Code Mode (adds the Monty sandbox)
-uv add "pydantic-ai-harness[logfire]"    # Managed Prompt (Logfire-managed prompts)
+uv add "pydantic-ai-harness[codemode]"          # Code Mode (adds the Monty sandbox)
+uv add "pydantic-ai-harness[dynamic-workflow]"  # Dynamic Workflow (adds the Monty sandbox)
+uv add "pydantic-ai-harness[logfire]"           # Managed Prompt (Logfire-managed prompts)
+uv add "pydantic-ai-harness[acp]"               # ACP (Agent Client Protocol SDK)
 ```
 
 The `code-mode` extra is also supported as an alias for `codemode`.
@@ -109,12 +111,24 @@ Each capability is a self-contained battery you drop into an agent's `capabiliti
 
 | Capability | What it does | Extra |
 |---|---|---|
-| [Code Mode](capabilities/code-mode.md) | Wraps the agent's tools into a single `run_code` tool, sandboxed by [Monty](https://github.com/pydantic/monty). The model writes Python that calls the tools as functions -- with loops, conditionals, `asyncio.gather`, and local filtering -- collapsing N tool calls into one model round-trip. | `codemode` |
-| [FileSystem](capabilities/filesystem.md) | Sandboxed file access scoped to a root directory: read, write, edit, search, and find files. Rejects path traversal above the root, resolves symlinks before authorizing, and keeps `.git/`, `.env`, key files, and secrets read-only by default. | -- |
-| [Shell](capabilities/shell.md) | Command execution in a subprocess rooted at a working directory, gated by allowlists, denylists, timeouts, and optional environment-variable stripping (including a preset for common LLM provider credentials). | -- |
-| [Managed Prompt](capabilities/managed-prompt.md) | Backs an agent's instructions with a [Logfire-managed prompt](https://logfire.pydantic.dev/docs/reference/advanced/prompt-management/), so you can version, label, and roll out prompt changes from the Logfire UI without redeploying -- with a code default that keeps the agent working when no remote value is available. | `logfire` |
+| [Code Mode](code-mode.md) | Wraps the agent's tools into a single `run_code` tool, sandboxed by [Monty](https://github.com/pydantic/monty). The model writes Python that calls the tools as functions -- with loops, conditionals, `asyncio.gather`, and local filtering -- collapsing N tool calls into one model round-trip. | `codemode` |
+| [FileSystem](filesystem.md) | Sandboxed file access scoped to a root directory: read, write, edit, search, and find files. Rejects path traversal above the root, resolves symlinks before authorizing, and keeps `.git/`, `.env`, key files, and secrets read-only by default. | -- |
+| [Shell](shell.md) | Command execution in a subprocess rooted at a working directory, gated by allowlists, denylists, timeouts, and optional environment-variable stripping (including a preset for common LLM provider credentials). | -- |
+| [Context](context.md) | Auto-loads repo context -- `CLAUDE.md`/`AGENTS.md` and repository structure -- so the agent starts a run already oriented in the project. | -- |
+| [Pydantic AI Docs](pydantic-ai-docs.md) | An on-demand `read_pyai_docs` tool that pulls Pydantic AI documentation into the run when the agent needs it, instead of preloading it. | -- |
+| [Compaction](compaction.md) | Keeps a run within token limits: sliding-window trimming, LLM-powered summarization of older messages, and warnings before the context or iteration ceiling is hit. | -- |
+| [Overflowing Tool Output](overflowing-tool-output.md) | Reduces an oversized tool return when it is produced -- truncate, spill to a queryable file, or summarize -- so a large payload does not persist in history and get re-sent every request. | -- |
+| [Step Persistence](step-persistence.md) | Saves and restores full conversation state; snapshot, resume (`continue_run`), and fork (`fork_run`) a run. | -- |
+| [Media](media.md) | Offloads large `BinaryContent` to content-addressed stores (local or S3) so big media does not bloat message history. | -- |
+| [Subagents](subagents.md) | Delegates subtasks to specialized child agents through a delegate tool. | -- |
+| [Dynamic Workflow](dynamic-workflow.md) | Orchestrates sub-agents from a model-written Python script -- fan-out, chaining, and voting in a single tool call. | `dynamic-workflow` |
+| [Planning](planning.md) | Breaks a complex task into a structured plan before execution and tracks progress against it. | -- |
+| [Runtime Authoring](runtime-authoring.md) | Lets an agent author, validate, and load real capabilities at runtime. | -- |
+| [Guardrails](guardrails.md) | Validates user input before a run starts and model output after it completes -- block or redact, with structured results. | -- |
+| [Managed Prompt](managed-prompt.md) | Backs an agent's instructions with a [Logfire-managed prompt](https://logfire.pydantic.dev/docs/reference/advanced/prompt-management/), so you can version, label, and roll out prompt changes from the Logfire UI without redeploying -- with a code default that keeps the agent working when no remote value is available. | `logfire` |
+| [ACP](acp.md) *(experimental)* | Serves an agent to editors (Zed, etc.) over the [Agent Client Protocol](https://agentclientprotocol.com) -- streamed text, diff-rendered edits, and tool approval. | `acp` |
 
-Additional capabilities live under `pydantic_ai_harness.experimental` -- they emit a `HarnessExperimentalWarning` on import and may change or be removed in any release. They're documented in the Experimental section.
+Most capabilities are stable within the [version policy](#version-policy) below. [ACP](acp.md) is the exception -- it is still experimental, imported from `pydantic_ai_harness.experimental.acp`, and may change or be removed in a future release.
 
 ## Build your own
 

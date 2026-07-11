@@ -7,22 +7,7 @@ description: Discover and load a repo's accumulated coding-assistant context eng
 
 `RepoContext` discovers and loads a repo's accumulated coding-assistant context engineering (CE): the instruction files (`CLAUDE.md`/`AGENTS.md`) scattered across the tree and the assets under `.claude`/`.agents`/`.codex`/`.grok` (skills, sub-agents, hooks).
 
-!!! warning "Experimental capability"
-    `RepoContext` lives under `pydantic_ai_harness.experimental` and has no top-level export. Import it from the experimental path:
-
-    ```python
-    from pydantic_ai_harness.experimental.context import RepoContext
-    ```
-
-    Importing any experimental capability emits a `HarnessExperimentalWarning`. Anything under `experimental` may change or be removed in any release, without a deprecation period. Silence all harness experimental warnings with a single filter:
-
-    ```python
-    import warnings
-
-    from pydantic_ai_harness.experimental import HarnessExperimentalWarning
-
-    warnings.filterwarnings('ignore', category=HarnessExperimentalWarning)
-    ```
+[Source](https://github.com/pydantic/pydantic-ai-harness/tree/main/pydantic_ai_harness/context/)
 
 ## The problem
 
@@ -36,7 +21,7 @@ A repo accumulates CE for whatever coding assistant worked in it: instruction fi
 from pathlib import Path
 
 from pydantic_ai import Agent
-from pydantic_ai_harness.experimental.context import RepoContext
+from pydantic_ai_harness.context import RepoContext
 
 agent = Agent(
     'anthropic:claude-sonnet-4-6',
@@ -68,7 +53,7 @@ from pathlib import Path
 
 from pydantic_ai import Agent
 from pydantic_ai_harness import FileSystem
-from pydantic_ai_harness.experimental.context import RepoContext
+from pydantic_ai_harness.context import RepoContext
 
 agent = Agent(
     'anthropic:claude-sonnet-4-6',
@@ -123,8 +108,8 @@ RepoContext(
 
 ## API reference
 
-::: pydantic_ai_harness.experimental.context.RepoContext
+::: pydantic_ai_harness.context.RepoContext
 
-::: pydantic_ai_harness.experimental.context.AgentContextInventory
+::: pydantic_ai_harness.context.AgentContextInventory
 
-::: pydantic_ai_harness.experimental.context.AssetRoot
+::: pydantic_ai_harness.context.AssetRoot

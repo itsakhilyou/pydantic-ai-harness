@@ -7,21 +7,7 @@ description: Give an agent a structured, self-updating task plan through a singl
 
 `Planning` gives the model a structured, self-updating task plan through a single `write_plan` tool -- and surfaces the current plan back to the model every turn without ever invalidating the prompt cache.
 
-!!! warning "Experimental"
-    This capability lives under `pydantic_ai_harness.experimental` and may change or be removed in any release, without a deprecation period. Import it from the experimental path -- there is no top-level export:
-
-    ```python
-    from pydantic_ai_harness.experimental.planning import Planning
-    ```
-
-    Importing any experimental capability emits a `HarnessExperimentalWarning`. Silence all harness experimental warnings with a single filter (no per-capability lines needed):
-
-    ```python
-    import warnings
-    from pydantic_ai_harness.experimental import HarnessExperimentalWarning
-
-    warnings.filterwarnings('ignore', category=HarnessExperimentalWarning)
-    ```
+[Source](https://github.com/pydantic/pydantic-ai-harness/tree/main/pydantic_ai_harness/planning/)
 
 ## The problem
 
@@ -42,7 +28,7 @@ Construct an `Agent` with `Planning()` in its `capabilities`. The `write_plan` t
 
 ```python
 from pydantic_ai import Agent
-from pydantic_ai_harness.experimental.planning import Planning
+from pydantic_ai_harness.planning import Planning
 
 agent = Agent('anthropic:claude-sonnet-4-6', capabilities=[Planning()])
 
@@ -76,7 +62,7 @@ The plan is never injected into the system prompt or instructions. Static usage 
 ## Configuration
 
 ```python
-from pydantic_ai_harness.experimental.planning import Planning
+from pydantic_ai_harness.planning import Planning
 
 Planning(
     guidance=None,      # static system-prompt guidance; None = default, '' = omit
@@ -94,7 +80,7 @@ Plan state is per-run (a fresh, isolated plan each run via `for_run`), so it doe
 ```python
 from pydantic_ai import Agent
 from pydantic_ai.messages import ToolReturnPart
-from pydantic_ai_harness.experimental.planning import Planning
+from pydantic_ai_harness.planning import Planning
 
 agent = Agent('anthropic:claude-sonnet-4-6', capabilities=[Planning()])
 
@@ -128,7 +114,7 @@ capabilities:
 
 ```python
 from pydantic_ai import Agent
-from pydantic_ai_harness.experimental.planning import Planning
+from pydantic_ai_harness.planning import Planning
 
 agent = Agent.from_file('agent.yaml', custom_capability_types=[Planning])
 result = agent.run_sync('...')
@@ -148,8 +134,8 @@ capabilities:
 - [Pydantic AI capabilities](/ai/core-concepts/capabilities/)
 - [Hooks](/ai/core-concepts/hooks/) -- `wrap_model_request` is the ephemeral injection point used here
 - [Anthropic prompt caching](https://docs.claude.com/en/docs/build-with-claude/prompt-caching)
-- [Code Mode](../capabilities/code-mode.md) -- another prompt-cache-aware harness capability
+- [Code Mode](code-mode.md) -- another prompt-cache-aware harness capability
 
 ## API reference
 
-::: pydantic_ai_harness.experimental.planning.Planning
+::: pydantic_ai_harness.planning.Planning
