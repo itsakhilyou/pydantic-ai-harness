@@ -5,11 +5,13 @@ description: A menu of strategies -- clear, dedupe, trim, or summarize -- for ke
 
 # Compaction
 
-Compaction is a menu of strategies for keeping an agent's conversation history within a model's context window. Each strategy is a Pydantic AI `Capability` that runs in the `before_model_request` hook, editing the message history just before each request goes out. The edits **persist** into the run's message history, so a trim, clear, or summary carries forward to later steps -- it is not recomputed from the full history every turn.
+Compaction is a menu of strategies for keeping an agent's conversation history within a model's context window. Each strategy is a Pydantic AI `Capability` that edits the message history just before each request goes out. The edits **persist** into the run's message history, so a trim, clear, or summary carries forward to later steps -- it is not recomputed from the full history every turn.
 
 All strategies preserve tool-call / tool-return **pairing**. Core does not validate this, and a provider rejects an orphaned pair, so the pairing guarantee is what makes these safe to drop into an agent. The zero-LLM strategies never call a model; only `SummarizingCompaction` (and `TieredCompaction` when it escalates that far) spends tokens.
 
 [Source](https://github.com/pydantic/pydantic-ai-harness/tree/main/pydantic_ai_harness/compaction/)
+
+> The API may change between releases. Where practical, breaking changes ship with a deprecation warning.
 
 ## The problem
 

@@ -13,6 +13,8 @@ the reduction is not recomputed per request.
 
 [Source](https://github.com/pydantic/pydantic-ai-harness/tree/main/pydantic_ai_harness/overflowing_tool_output/)
 
+> The API may change between releases. Where practical, breaking changes ship with a deprecation warning.
+
 ## The problem
 
 A tool can return a payload large enough to dominate the context window: a big file read, a

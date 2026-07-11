@@ -48,10 +48,12 @@ well before now, or that was built against unreleased Pydantic AI changes.
 Every released capability ships two hand-maintained docs that must stay in sync
 with the code and with each other:
 
-- the **README** next to the implementation (`pydantic_ai_harness/<capability>/README.md`),
-  which serves GitHub and PyPI, and
-- the **unified doc** on the docs site (`docs/capabilities/<capability>.md`, or
-  `docs/experimental/<capability>.md` for experimental capabilities).
+- the **README** next to the implementation (`pydantic_ai_harness/<capability>/README.md`,
+  or `pydantic_ai_harness/experimental/<capability>/README.md` for ACP), which
+  serves GitHub and PyPI, and
+- the **unified doc** on the docs site, flat under `docs/<capability>.md`. The
+  sidebar is a flat list under "Pydantic AI Harness" -- no `capabilities/` or
+  `experimental/` subdirectories.
 
 Checks:
 
@@ -61,16 +63,39 @@ Checks:
 - The two do not contradict each other or the source on extras, option names,
   defaults, or safety caveats.
 - Every snippet in both docs is runnable: all imports present, class/param names
-  match the source, model ids unchanged from what the source uses.
-- The unified doc ends with a `## API reference` section containing one or more
-  `::: pydantic_ai_harness...` autodoc blocks covering the capability's public
-  class(es) -- some capabilities (e.g. compaction, subagents) export several
-  (auto-expanded from the docstring, not hand-written), uses relative `.md`
-  links to other harness pages, and links Pydantic AI docs with root-relative
-  internal links `/ai/<section>/<page>/` (verify the route resolves on the live
-  `pydantic.dev/docs` site before using it).
+  match the source, model ids unchanged from what the source uses. Imports use
+  the canonical module path (never `pydantic_ai_harness.experimental.*` for a
+  graduated capability).
+- **Purpose-first lead.** The opening paragraph of each page and README states
+  what the capability is for and when to reach for it -- no internal hook or
+  class name (`before_model_request`, `after_tool_execute`, ...) before the
+  purpose. Mechanism belongs lower down.
+- **Name matches the capability.** The doc filename, its `# H1`, and the
+  README's `# H1` all use the capability's descriptive name (e.g.
+  "Overflowing Tool Output", not "Overflow"; "Runtime Authoring", not
+  "Authoring").
+- **Source link.** Each page links its source module
+  (`https://github.com/pydantic/pydantic-ai-harness/tree/main/pydantic_ai_harness/<module>/`)
+  so a reading agent can verify behavior. Where the capability exposes a public
+  class, the page may also end with a `## API reference` section of
+  `::: pydantic_ai_harness...` autodoc blocks (auto-expanded from the docstring,
+  not hand-written).
+- **Stability framing.** Graduated capabilities carry the soft note "The API may
+  change between releases..." mirrored from their README -- NOT a
+  `HarnessExperimentalWarning` block or "removed in any release" wording. ACP is
+  the only page that keeps an `!!! warning "Experimental"` (it may still be
+  removed).
+- Links: harness-internal links are relative `.md`; Pydantic AI docs use
+  root-relative internal links `/ai/<section>/<page>/` (verify the route resolves
+  on the live `pydantic.dev/docs` site before using it).
 - Docs explain composition constraints and safety implications.
 - The PR links an issue.
+
+The mechanical half of these checks (README present + linked, flat page present,
+source link present, name matches, no experimental strings on non-ACP pages, no
+hook name in the lead) is enforced by `tests/test_docs_parity.py`. The semantic
+half (does the prose match the code, are snippets truly runnable) is what the
+reviewer below is for.
 
 This is the last documentation gate before merge. Run the `docs-parity-reviewer`
 subagent (`.agents/agents/docs-parity-reviewer.md`) on the change as the final

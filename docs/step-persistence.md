@@ -11,6 +11,8 @@ It is not a full graph-state checkpoint. Capability-state restore, workspace sna
 
 [Source](https://github.com/pydantic/pydantic-ai-harness/tree/main/pydantic_ai_harness/step_persistence/)
 
+> The API may change between releases. Where practical, breaking changes ship with a deprecation warning.
+
 ## What it gives you
 
 1. **Append-only step events.** Every interesting boundary (run start/end, model request, tool call, failure) appends a `StepEvent`. A run killed mid-tool-call still leaves a usable event trail.

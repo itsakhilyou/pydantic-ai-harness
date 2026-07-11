@@ -1,4 +1,4 @@
-# PyaiDocs
+# Pydantic AI Docs
 
 > [!NOTE]
 > Import this capability from its submodule -- there is no top-level `pydantic_ai_harness` re-export:

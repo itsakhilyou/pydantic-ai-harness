@@ -9,6 +9,8 @@ description: Discover and load a repo's accumulated coding-assistant context eng
 
 [Source](https://github.com/pydantic/pydantic-ai-harness/tree/main/pydantic_ai_harness/context/)
 
+> The API may change between releases. Where practical, breaking changes ship with a deprecation warning.
+
 ## The problem
 
 A repo accumulates CE for whatever coding assistant worked in it: instruction files (`CLAUDE.md`/`AGENTS.md`) scattered across the tree, and assets under `.claude`/`.agents`/`.codex`/`.grok` (skills, sub-agents, hooks). An agent that loads only the top-level instruction file misses the ancestor context and has no idea the rest of the setup exists, so it can neither honor it nor translate it.

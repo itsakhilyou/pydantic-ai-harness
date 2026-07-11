@@ -1,4 +1,4 @@
-# Guardrails
+# Input & Output Guardrails
 
 Validate the user prompt before it reaches the model, and the model output before it reaches the caller.
 

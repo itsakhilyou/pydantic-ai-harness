@@ -9,6 +9,8 @@ description: Let an agent write, validate, and persist real pydantic-ai capabili
 
 [Source](https://github.com/pydantic/pydantic-ai-harness/tree/main/pydantic_ai_harness/runtime_authoring/)
 
+> The API may change between releases. Where practical, breaking changes ship with a deprecation warning.
+
 ## The problem
 
 A coding agent often discovers, mid-task, that it wants a behavior its host does not yet have: a guardrail, an extra instruction, a tool, a request hook. The capability surface to express that already exists -- but normally only a developer can write a capability class, wire it into the agent, and restart. The agent itself cannot extend its own host while it runs.

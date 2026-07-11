@@ -9,6 +9,8 @@ description: Let an agent delegate self-contained tasks to named child agents vi
 
 [Source](https://github.com/pydantic/pydantic-ai-harness/tree/main/pydantic_ai_harness/subagents/)
 
+> The API may change between releases. Where practical, breaking changes ship with a deprecation warning.
+
 ## The problem
 
 A single agent that does everything accumulates a large tool set and a long context. Splitting the work across specialized sub-agents keeps each context focused, but wiring up delegation by hand means writing a tool per agent, forwarding deps, threading usage limits, and telling the model what it can delegate to.

@@ -1,4 +1,4 @@
-# Media
+# Media Externalization
 
 > [!NOTE]
 > Import these helpers from their submodule -- there is no top-level `pydantic_ai_harness` re-export:

@@ -9,6 +9,8 @@ description: Give an agent a tool that locates and returns Pydantic AI documenta
 
 [Source](https://github.com/pydantic/pydantic-ai-harness/tree/main/pydantic_ai_harness/docs/)
 
+> The API may change between releases. Where practical, breaking changes ship with a deprecation warning.
+
 ## The problem
 
 An agent that authors Pydantic AI capabilities, hooks, tools, or toolsets needs the current docs for those APIs. Preloading the docs into the system prompt spends context the agent rarely needs in full, and pins a snapshot that drifts from `main`.

@@ -1,4 +1,4 @@
-# Overflow capability
+# Overflowing Tool Output
 
 > [!NOTE]
 > Import this capability from its submodule -- there is no top-level `pydantic_ai_harness` re-export:
@@ -12,7 +12,7 @@
 A tool can return a payload large enough to dominate the context window. Tool returns
 persist in history as `ToolReturnPart`s, so an oversized one is re-sent on every later
 model request -- paying its token cost for the rest of the run. `OverflowingToolOutput`
-intercepts a return in the `after_tool_execute` hook, reduces it once, and lets the reduced
+intercepts a return when it is produced, reduces it once, and lets the reduced
 form persist. The reduction is not recomputed per request.
 
 This is the overflow-to-file follow-up the `compaction` README names as out of scope: it

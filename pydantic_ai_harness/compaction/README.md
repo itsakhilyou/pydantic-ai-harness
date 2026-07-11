@@ -1,4 +1,4 @@
-# Compaction capabilities
+# Compaction
 
 > [!NOTE]
 > Import these capabilities from their submodule -- there is no top-level `pydantic_ai_harness` re-export:
@@ -10,8 +10,8 @@
 > The API may change between releases. Where practical, breaking changes ship with a deprecation warning.
 
 A menu of strategies for keeping an agent's conversation history within a model's context
-window. Each is a Pydantic AI `Capability` that runs in the `before_model_request` hook; edits
-**persist** into the run's message history, so a trim/clear/summary carries forward to later
+window. Each is a Pydantic AI `Capability` that edits the message history just before each
+request goes out; edits **persist** into the run's message history, so a trim/clear/summary carries forward to later
 steps (it is not recomputed from the full history every turn).
 
 All strategies preserve tool-call / tool-return **pairing** -- core does not validate this, and a

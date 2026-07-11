@@ -20,6 +20,8 @@ A conversation that carries images, audio, or other `BinaryContent` inlines thos
     )
     ```
 
+> The API may change between releases. Where practical, breaking changes ship with a deprecation warning.
+
 ## Building blocks, not a capability
 
 These are building blocks. There is no class you add to `Agent(capabilities=[...])` yet. [`StepPersistence`](step-persistence.md) already uses them to keep snapshots small when messages carry `BinaryContent`, and a forthcoming `MediaExternalizer` capability will reuse the same stores to rewrite `BinaryContent` into URL parts before the model sees them.

@@ -1,4 +1,4 @@
-# StepPersistence
+# Step Persistence
 
 > [!NOTE]
 > Import `StepPersistence` and the `media` stores from their submodules -- there is no top-level
