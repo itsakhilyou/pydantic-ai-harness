@@ -7,6 +7,8 @@ description: Validate the user prompt before it reaches the model and the model 
 
 Guardrails put a validation layer on the two edges of an agent run: the prompt on its way *in* to the model, and the output on its way *out* to the caller. Reach for them when unstructured input or output must be screened before it is acted on -- a prompt-injection attempt you never want to send, PII you must redact, an off-topic request you want to refuse cheaply, or an answer that must cite its sources before you show it. Without a guardrail the framework sends whatever the user typed and returns whatever the model produced, verbatim; a guardrail interposes a callable you control that gets the final say.
 
+> The API may change between releases. Where practical, breaking changes ship with a deprecation warning.
+
 ## The problem
 
 Agents take unstructured input from users and return unstructured output to callers. On its own the framework does not reason about "this is unsafe to send" or "this is unsafe to show" -- a prompt-injection attempt reaches the model as-is, and any output the model produces is returned untouched. You need a place to inspect the value and decide what happens next.
