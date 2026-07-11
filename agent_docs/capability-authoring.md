@@ -46,7 +46,8 @@ submodule (`from pydantic_ai_harness.<name> import ...`).
 Naming: the module name is the capability name, one module per capability or
 strategy. Prefer a longer descriptive name over a terse one (e.g.
 `overflowing_tool_output`, not `overflow`). A known term is fine as-is (e.g.
-`compaction`).
+`compaction`). If you are unsure what to name a capability, ask the user (via the
+ask-user tool) rather than guessing -- a name is a public commitment once shipped.
 
 When a capability's module path changes, keep the old path working as a
 `DeprecationWarning` shim so existing imports do not break.
