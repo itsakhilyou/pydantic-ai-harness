@@ -68,7 +68,10 @@ def test_capability_has_readme(package: Path) -> None:
 def test_capability_linked_from_top_readme(package: Path) -> None:
     top_readme = (_ROOT / 'README.md').read_text(encoding='utf-8')
     link_target = f'{package.relative_to(_ROOT).as_posix()}/'
-    assert link_target in top_readme, (
+    # Require an actual Markdown link to the package, not just the path appearing
+    # anywhere (prose or an unrelated URL would otherwise satisfy the check).
+    linked = any(t.startswith(link_target) for t in _markdown_link_targets(top_readme))
+    assert linked, (
         f'{package.relative_to(_ROOT)} is not linked from the top-level README.md. '
         f'Add a row for it (linking `{link_target}`) to the "What\'s available today" or "Roadmap" tables '
         'so the README stays in step with the code.'
@@ -103,6 +106,34 @@ def _capability_doc_pages() -> list[Path]:
 
 _CAPABILITY_DOC_PAGES = _capability_doc_pages()
 
+# Each capability doc page maps to its source module (for the source-link check)
+# and its expected H1 (for the heading check). Keeping this explicit makes the
+# checks page-specific: a page that links the wrong module, or carries a generic
+# or empty heading, fails instead of passing on a substring match.
+_CAPABILITY_PAGE_META = {
+    'code-mode.md': ('code_mode', 'Code Mode'),
+    'filesystem.md': ('filesystem', 'FileSystem'),
+    'shell.md': ('shell', 'Shell'),
+    'managed-prompt.md': ('logfire', 'Managed Prompt'),
+    'context.md': ('context', 'Context'),
+    'pydantic-ai-docs.md': ('docs', 'Pydantic AI Docs'),
+    'compaction.md': ('compaction', 'Compaction'),
+    'overflowing-tool-output.md': ('overflowing_tool_output', 'Overflowing Tool Output'),
+    'step-persistence.md': ('step_persistence', 'Step Persistence'),
+    'media.md': ('media', 'Media Externalization'),
+    'subagents.md': ('subagents', 'Subagents'),
+    'dynamic-workflow.md': ('dynamic_workflow', 'Dynamic Workflow'),
+    'planning.md': ('planning', 'Planning'),
+    'runtime-authoring.md': ('runtime_authoring', 'Runtime Authoring'),
+    'guardrails.md': ('guardrails', 'Input & Output Guardrails'),
+    'acp.md': ('experimental/acp', 'ACP (Agent Client Protocol)'),
+}
+
+
+def _markdown_link_targets(text: str) -> list[str]:
+    """Every `](target)` destination in the text -- so a bare path mention is not a link."""
+    return re.findall(r'\]\(([^)\s]+)\)', text)
+
 
 def _strip_frontmatter(text: str) -> str:
     if text.startswith('---\n'):
@@ -115,6 +146,8 @@ def _strip_frontmatter(text: str) -> str:
 def _heading_problem(h1: str) -> str | None:
     """Return why an H1 fails the name rule, or None if it is fine."""
     name = h1[2:].strip() if h1.startswith('# ') else h1.strip()
+    if not name:
+        return 'missing H1 heading'
     if name.lower() in _FORBIDDEN_HEADINGS:
         return f'"{name}" is a short/legacy form -- use the full capability name'
     for word in name.split():
@@ -165,21 +198,33 @@ def _lead_paragraph(text: str) -> str:
 def test_capability_doc_pages_discovered() -> None:
     # Guard against a moved docs root making every check below vacuously pass.
     assert len(_CAPABILITY_DOC_PAGES) >= 12
+    # A new capability page must declare its module + expected heading here, so
+    # the source-link and heading checks below stay page-specific.
+    unmapped = sorted(p.name for p in _CAPABILITY_DOC_PAGES if p.name not in _CAPABILITY_PAGE_META)
+    assert not unmapped, f'add {unmapped} to _CAPABILITY_PAGE_META (source module + expected heading)'
 
 
 @pytest.mark.parametrize('page', _CAPABILITY_DOC_PAGES, ids=lambda p: p.name)
 def test_doc_page_links_its_source(page: Path) -> None:
-    text = page.read_text(encoding='utf-8')
-    assert _SOURCE_LINK in text, (
-        f'{page.relative_to(_ROOT)} has no source-code link. Add a link to '
-        f'`https://{_SOURCE_LINK}<module>/` so a reading agent can verify behavior.'
+    module, _ = _CAPABILITY_PAGE_META[page.name]
+    expected = f'{_SOURCE_LINK}{module}/'
+    targets = _markdown_link_targets(page.read_text(encoding='utf-8'))
+    assert any(expected in t for t in targets), (
+        f'{page.relative_to(_ROOT)} must link its own source module as a Markdown link '
+        f'(target containing `{expected}`), not just mention the prefix or link a different module.'
     )
 
 
 @pytest.mark.parametrize('page', _CAPABILITY_DOC_PAGES, ids=lambda p: p.name)
 def test_doc_page_heading_matches_capability(page: Path) -> None:
-    problem = _heading_problem(_h1(page.read_text(encoding='utf-8')))
-    assert problem is None, f'{page.relative_to(_ROOT)}: {problem}'
+    _, expected_name = _CAPABILITY_PAGE_META[page.name]
+    h1 = _h1(page.read_text(encoding='utf-8'))
+    assert h1, f'{page.relative_to(_ROOT)} has no H1 heading.'
+    actual = h1[2:].strip()
+    assert actual == expected_name, (
+        f'{page.relative_to(_ROOT)} H1 is "{actual}"; expected "{expected_name}" '
+        '(doc filename, H1, and capability name must agree).'
+    )
 
 
 @pytest.mark.parametrize('page', _CAPABILITY_DOC_PAGES, ids=lambda p: p.name)

@@ -5,7 +5,7 @@ description: Content-addressed stores and walker helpers that move large BinaryC
 
 # Media Externalization
 
-A conversation that carries images, audio, or other `BinaryContent` inlines those bytes into every message. Persist that history and each snapshot re-serializes the payloads; the same image referenced by ten messages is ten copies of the bytes. Media externalization solves that: content-addressed stores write each payload once, keyed by its own hash, and leave a short `media://` URI in its place. Reach for it whenever binary payloads would otherwise balloon what you store or send.
+A conversation that carries images, audio, or other `BinaryContent` inlines those bytes into every message. Persist that history and each snapshot re-serializes the payloads; the same image referenced by ten messages is ten copies of the bytes. Media externalization solves that: content-addressed stores write each payload once, keyed by its own hash, and leave a short `media+sha256://` URI in its place. Reach for it whenever binary payloads would otherwise balloon what you store or send.
 
 !!! note "Import path"
     Import these helpers from their submodule -- there is no top-level `pydantic_ai_harness` re-export:
@@ -51,7 +51,7 @@ from pydantic_ai_harness.media import DiskMediaStore, externalize_media, restore
 
 store = DiskMediaStore(directory='./media')
 
-# Replace BinaryContent larger than the threshold with media:// URIs.
+# Replace BinaryContent larger than the threshold with media+sha256:// URIs.
 lean = await externalize_media(message, media_store=store, threshold_bytes=32_000)
 
 # Later, rehydrate the URIs back into BinaryContent.
@@ -62,7 +62,7 @@ full = await restore_media(lean, media_store=store)
 
 ## Public URLs
 
-When a store is fronted by a CDN, a local HTTP server, or a signed-URL service, pass a `public_url=` resolver (or use `make_static_public_url`) to turn a stored `media://` URI into a URL the model can fetch directly. Without a resolver, `public_url(...)` returns `None`.
+When a store is fronted by a CDN, a local HTTP server, or a signed-URL service, pass a `public_url=` resolver (or use `make_static_public_url`) to turn a stored `media+sha256://` URI into a URL the model can fetch directly. Without a resolver, `public_url(...)` returns `None`.
 
 A static base URL, for a public bucket or CDN:
 
@@ -142,7 +142,7 @@ If your strategy depends on `ctx.media_type`, the same context must be supplied 
 | `KeyStrategy`, `default_key_strategy` | On-store key layout |
 | `PublicUrlResolver`, `make_static_public_url` | Resolve a stored URI to a public URL |
 | `externalize_media`, `restore_media` | Walk a message node to externalize / rehydrate payloads |
-| `media_uri_for`, `parse_media_uri` | Compute and parse a `media://` URI |
+| `media_uri_for`, `parse_media_uri` | Compute and parse a `media+sha256://` URI |
 
 Source: [`pydantic_ai_harness/media/`](https://github.com/pydantic/pydantic-ai-harness/tree/main/pydantic_ai_harness/media/).
 

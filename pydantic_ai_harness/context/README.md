@@ -68,7 +68,7 @@ from pathlib import Path
 
 from pydantic_ai import Agent
 from pydantic_ai_harness import FileSystem
-from pydantic_ai_harness.experimental.context import RepoContext
+from pydantic_ai_harness.context import RepoContext
 
 agent = Agent(
     'anthropic:claude-sonnet-4-6',

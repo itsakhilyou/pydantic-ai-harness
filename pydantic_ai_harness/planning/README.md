@@ -60,7 +60,7 @@ The plan is never injected into the system prompt or instructions. Static usage 
 ## Configuration
 
 ```python
-from pydantic_ai_harness.experimental.planning import Planning
+from pydantic_ai_harness.planning import Planning
 
 Planning(
     guidance=None,      # static system-prompt guidance; None = default, '' = omit
