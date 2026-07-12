@@ -54,6 +54,16 @@ def _harness_import_targets(tree: ast.AST) -> Iterable[tuple[str, str | None]]:
                     yield alias.name, None
 
 
+def _is_missing_harness_module(exc_name: str | None) -> bool:
+    """True when an ImportError is a genuinely absent harness module, not a missing extra.
+
+    A missing optional dependency (e.g. `acp` in the `slim` CI job) raises
+    `ModuleNotFoundError` naming the third-party package, not the harness module --
+    the harness module exists, its extra just isn't installed.
+    """
+    return exc_name is not None and exc_name.startswith(_HARNESS)
+
+
 def _snippet_problem(source: str) -> str | None:
     """Return why a snippet is invalid, or `None` if it parses and its harness imports resolve."""
     try:
@@ -67,7 +77,9 @@ def _snippet_problem(source: str) -> str | None:
                 warnings.simplefilter('ignore')  # a deprecated shim path still resolves; existence is what we check
                 imported = importlib.import_module(module)
         except ImportError as exc:
-            return f'imports `{module}`, which does not exist: {exc}'
+            if _is_missing_harness_module(exc.name):
+                return f'imports `{module}`, which does not exist: {exc}'
+            continue  # missing optional extra in this environment; the harness module exists
         if name is not None and not hasattr(imported, name):
             return f'imports `{name}` from `{module}`, but that name does not exist'
     return None
@@ -108,3 +120,19 @@ def test_snippet_problem_detects_each_failure_mode() -> None:
     assert 'does not parse' in (_snippet_problem('def (:') or '')
     assert 'does not exist' in (_snippet_problem('from pydantic_ai_harness.nope import X') or '')
     assert 'does not exist' in (_snippet_problem('from pydantic_ai_harness import NoSuchCapability') or '')
+
+
+def test_missing_harness_module_classification() -> None:
+    assert _is_missing_harness_module('pydantic_ai_harness.experimental.nope') is True
+    assert _is_missing_harness_module('acp') is False  # a missing extra, not a harness module
+    assert _is_missing_harness_module(None) is False
+
+
+def test_missing_optional_extra_is_not_a_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Simulate the `slim` environment: the harness module exists, but importing it
+    # fails because its third-party extra is absent. That is not a broken snippet.
+    def _extra_missing(module: str) -> object:
+        raise ModuleNotFoundError("No module named 'acp'", name='acp')
+
+    monkeypatch.setattr(importlib, 'import_module', _extra_missing)
+    assert _snippet_problem('from pydantic_ai_harness.experimental.acp import run_acp_stdio') is None
