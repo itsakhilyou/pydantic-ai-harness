@@ -120,11 +120,14 @@ class Memory(AbstractCapability[AgentDepsT]):
         """Resolve this run's store and `{namespace}/{agent_name}` scope prefix.
 
         Namespace and agent-name segments are validated even though they are
-        app-supplied -- defense in depth in front of any store.
+        app-supplied -- defense in depth in front of any store. Malformed
+        namespaces are REJECTED, never normalized: silently dropping empty
+        segments would collapse `victim`, `/victim`, and `victim//` into one
+        scope and merge tenants that the app believes are distinct.
         """
         store = self.store_resolver(ctx) if self.store_resolver is not None else self.store
         namespace = self.namespace(ctx) if callable(self.namespace) else self.namespace
-        scope = '/'.join(segment for segment in (*namespace.split('/'), self.agent_name) if segment)
+        scope = f'{namespace}/{self.agent_name}' if namespace else self.agent_name
         validate_store_path(scope)
         return store, scope
 
@@ -177,6 +180,8 @@ class Memory(AbstractCapability[AgentDepsT]):
         is not spec-constructible (it takes a live connection pool); wire it
         up in code.
         """
+        if args:
+            raise ValueError(f'Memory.from_spec takes keyword options only; got positional value(s): {args!r}')
         backend = kwargs.pop('backend', 'memory')
         if backend == 'memory':
             return cls(store=InMemoryStore(), **kwargs)

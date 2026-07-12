@@ -6,15 +6,15 @@ import os
 import re
 import sqlite3
 import tempfile
-from collections.abc import Iterator
-from contextlib import contextmanager
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Protocol, runtime_checkable
+from typing import Protocol, TypeVar, runtime_checkable
 
 import anyio.to_thread
 
 _VALID_SEGMENT_RE = re.compile(r'[A-Za-z0-9_.-]{1,200}')
+_T = TypeVar('_T')
 
 
 def validate_store_path(path: str) -> None:
@@ -92,7 +92,11 @@ class FileStore:
 
     Every access validates the path (`validate_store_path`) and additionally
     jails the resolved location inside `directory` after symlink resolution, so
-    a bug in any layer above cannot escape the root. Writes are atomic
+    a bug in any layer above cannot escape the root. The jail defends against
+    hostile path *values* (the model is the adversary); it does not defend
+    against a concurrent local process rewriting the store tree between check
+    and use -- restrict the directory with OS permissions if local actors are
+    untrusted (same threat model as the `FileSystem` capability). Writes are atomic
     (`mkstemp` + `os.replace`); blocking IO runs in a worker thread via
     `anyio.to_thread` so capability hooks never stall the event loop.
 
@@ -201,9 +205,8 @@ class SqliteMemoryStore:
         self._connection = connection
         self._schema_ready = False
 
-    @contextmanager
-    def _session(self) -> Iterator[sqlite3.Connection]:
-        """Yield a schema-ready connection, committing on success."""
+    def _run(self, operation: Callable[[sqlite3.Connection], _T]) -> _T:
+        """Run `operation` on a schema-ready connection, committing on success."""
         if self._connection is not None:
             connection = self._connection
         else:
@@ -214,8 +217,9 @@ class SqliteMemoryStore:
             if not self._schema_ready:
                 connection.execute(_MEMORY_SCHEMA)
                 self._schema_ready = True
-            yield connection
+            result = operation(connection)
             connection.commit()
+            return result
         finally:
             if connection is not self._connection:
                 connection.close()
@@ -225,38 +229,46 @@ class SqliteMemoryStore:
         return await anyio.to_thread.run_sync(self._sync_read, path)
 
     def _sync_read(self, path: str) -> str | None:
-        with self._session() as connection:
+        def op(connection: sqlite3.Connection) -> str | None:
             row = connection.execute('SELECT content FROM memory_files WHERE path = ?', (path,)).fetchone()
-        return None if row is None else str(row[0])
+            return None if row is None else str(row[0])
+
+        return self._run(op)
 
     async def write(self, path: str, content: str) -> None:
         """Upsert `content` at `path`."""
         await anyio.to_thread.run_sync(self._sync_write, path, content)
 
     def _sync_write(self, path: str, content: str) -> None:
-        with self._session() as connection:
+        def op(connection: sqlite3.Connection) -> None:
             connection.execute(
                 'INSERT INTO memory_files (path, content) VALUES (?, ?) '
                 'ON CONFLICT (path) DO UPDATE SET content = excluded.content',
                 (path, content),
             )
 
+        self._run(op)
+
     async def delete(self, path: str) -> None:
         """Delete `path` if it exists (idempotent)."""
         await anyio.to_thread.run_sync(self._sync_delete, path)
 
     def _sync_delete(self, path: str) -> None:
-        with self._session() as connection:
+        def op(connection: sqlite3.Connection) -> None:
             connection.execute('DELETE FROM memory_files WHERE path = ?', (path,))
+
+        self._run(op)
 
     async def list_paths(self, prefix: str = '') -> list[str]:
         """Return all stored paths starting with `prefix`, sorted."""
         return await anyio.to_thread.run_sync(self._sync_list_paths, prefix)
 
     def _sync_list_paths(self, prefix: str) -> list[str]:
-        with self._session() as connection:
+        def op(connection: sqlite3.Connection) -> list[str]:
             rows = connection.execute(
                 "SELECT path FROM memory_files WHERE path LIKE ? ESCAPE '\\' ORDER BY path",
                 (f'{_escape_like_prefix(prefix)}%',),
             ).fetchall()
-        return [str(row[0]) for row in rows]
+            return [str(row[0]) for row in rows]
+
+        return self._run(op)

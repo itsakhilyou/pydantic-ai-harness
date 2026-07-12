@@ -361,6 +361,13 @@ class TestResolveScope:
         with pytest.raises(ValueError):
             Memory[None](agent_name='a b').resolve_scope(_ctx())
 
+    @pytest.mark.parametrize('degenerate', ['/victim', 'victim/', 'victim//other', '/'])
+    def test_degenerate_namespaces_rejected_not_normalized(self, degenerate: str) -> None:
+        # Silently dropping empty segments would collapse `victim`, `/victim`, and
+        # `victim//` into one scope and merge tenants the app believes are distinct.
+        with pytest.raises(ValueError, match='invalid memory path'):
+            Memory[None](namespace=degenerate).resolve_scope(_ctx())
+
     def test_store_resolver_wins(self) -> None:
         special = InMemoryStore()
         capability = Memory[None](store_resolver=lambda ctx: special)
@@ -537,6 +544,11 @@ class TestMemoryCapability:
     def test_from_spec_unknown_backend_raises(self) -> None:
         with pytest.raises(ValueError, match='unknown backend'):
             Memory.from_spec(backend='cloud')
+
+    def test_from_spec_rejects_positional_values(self) -> None:
+        # A positional spec payload must not be silently dropped in favour of defaults.
+        with pytest.raises(ValueError, match='keyword options only'):
+            Memory.from_spec('sqlite')
 
     def test_store_satisfies_protocol(self) -> None:
         assert isinstance(InMemoryStore(), MemoryStore)
