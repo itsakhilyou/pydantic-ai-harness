@@ -293,3 +293,14 @@ def test_graduated_doc_page_has_no_experimental_framing(page: Path) -> None:
 def test_capability_readme_heading_matches_capability(package: Path) -> None:
     problem = _heading_problem(_h1((package / 'README.md').read_text(encoding='utf-8')))
     assert problem is None, f'{package.relative_to(_ROOT) / "README.md"}: {problem}'
+
+
+@pytest.mark.parametrize('package', _CAPABILITY_PACKAGES, ids=lambda p: str(p.relative_to(_ROOT)))
+def test_capability_readme_links_source(package: Path) -> None:
+    module = package.relative_to(_ROOT / 'pydantic_ai_harness').as_posix()
+    expected = f'{_SOURCE_LINK}{module}/'
+    targets = _markdown_link_targets((package / 'README.md').read_text(encoding='utf-8'))
+    assert any(expected in t for t in targets), (
+        f'{package.relative_to(_ROOT) / "README.md"} must link its own source module '
+        f'(a Markdown link containing `{expected}`), so parity tooling can find the implementation.'
+    )

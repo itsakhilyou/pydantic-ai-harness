@@ -11,6 +11,8 @@
 
 Give an agent a tool that locates and returns Pydantic AI documentation on demand.
 
+[Source](https://github.com/pydantic/pydantic-ai-harness/tree/main/pydantic_ai_harness/docs/)
+
 ## The problem
 
 An agent that authors Pydantic AI capabilities, hooks, tools, or toolsets needs the

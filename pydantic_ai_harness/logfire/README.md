@@ -9,6 +9,8 @@ Install the extra:
 pip install 'pydantic-ai-harness[logfire]'
 ```
 
+[Source](https://github.com/pydantic/pydantic-ai-harness/tree/main/pydantic_ai_harness/logfire/)
+
 ## `ManagedPrompt`
 
 Back an agent's instructions with a Logfire-managed

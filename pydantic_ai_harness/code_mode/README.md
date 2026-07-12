@@ -2,6 +2,8 @@
 
 Replace individual tool calls with a single sandboxed Python execution environment.
 
+[Source](https://github.com/pydantic/pydantic-ai-harness/tree/main/pydantic_ai_harness/code_mode/)
+
 ## The problem
 
 Standard tool calling requires one model round-trip per tool call. An agent that needs to fetch 10 items and process each one makes 11+ model calls -- slow, expensive, and context-heavy.

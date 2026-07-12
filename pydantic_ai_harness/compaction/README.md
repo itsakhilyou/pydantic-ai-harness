@@ -17,6 +17,8 @@ steps (it is not recomputed from the full history every turn).
 All strategies preserve tool-call / tool-return **pairing** -- core does not validate this, and a
 provider rejects an orphaned pair. The zero-LLM strategies never call a model.
 
+[Source](https://github.com/pydantic/pydantic-ai-harness/tree/main/pydantic_ai_harness/compaction/)
+
 ## The menu
 
 | Capability | Cost | What it does | Reach for it when |

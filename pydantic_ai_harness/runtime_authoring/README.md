@@ -11,6 +11,8 @@
 
 Let an agent author, validate, and persist real pydantic-ai capabilities at runtime.
 
+[Source](https://github.com/pydantic/pydantic-ai-harness/tree/main/pydantic_ai_harness/runtime_authoring/)
+
 ## The problem
 
 A coding agent often discovers, mid-task, that it wants a behavior its host does not

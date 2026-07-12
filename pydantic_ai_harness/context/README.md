@@ -11,6 +11,8 @@
 
 Discover and load a repo's accumulated coding-assistant context engineering (CE).
 
+[Source](https://github.com/pydantic/pydantic-ai-harness/tree/main/pydantic_ai_harness/context/)
+
 ## The problem
 
 A repo accumulates CE for whatever coding assistant worked in it: instruction

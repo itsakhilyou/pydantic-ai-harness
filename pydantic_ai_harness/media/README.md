@@ -19,6 +19,8 @@ Content-addressed stores and walker helpers that move large binary payloads out 
 
 These are building blocks, not a capability. There is no class you add to `Agent(capabilities=[...])` yet. [`StepPersistence`](../step_persistence/) uses them to keep snapshots small when messages carry `BinaryContent`. A forthcoming `MediaExternalizer` capability will reuse the same stores to rewrite `BinaryContent` into URL parts before the model sees them.
 
+[Source](https://github.com/pydantic/pydantic-ai-harness/tree/main/pydantic_ai_harness/media/)
+
 ## Why
 
 A conversation that carries images, audio, or other `BinaryContent` inlines those bytes into every message. Persist that history and each snapshot re-serializes the payloads. Content-addressed storage writes each payload once, keyed by its own hash, and leaves a short `media://` URI in its place. The same bytes are stored once no matter how many messages or snapshots reference them.
