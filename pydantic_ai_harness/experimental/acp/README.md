@@ -225,7 +225,7 @@ Each completed turn reports its token counts (input/output/total, plus cached to
 
 ## API
 
-```python
+```python {test="skip"}
 run_acp_stdio(            # async; serve until the client disconnects
     agent,
     *,

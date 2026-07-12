@@ -211,7 +211,7 @@ A model id is any string a Pydantic AI model accepts, so newer models not yet in
 
 ## API
 
-```python
+```python {test="skip"}
 run_acp_stdio(            # async; serve until the client disconnects
     agent,
     *,

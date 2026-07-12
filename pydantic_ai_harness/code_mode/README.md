@@ -248,7 +248,7 @@ Code runs inside [Monty](https://github.com/pydantic/monty), a sandboxed Python 
 
 ## API
 
-```python
+```python {test="skip"}
 CodeMode(
     tools: ToolSelector = 'all',        # 'all', list[str], callable, or dict
     max_retries: int = 3,               # retries on sandbox execution errors

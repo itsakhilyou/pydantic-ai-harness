@@ -160,7 +160,7 @@ Any exception raised by the guard propagates as-is -- use `InputBlocked` / `Outp
 
 ## API
 
-```python
+```python {test="skip"}
 @dataclass
 class GuardResult:
     action: Literal['allow', 'block', 'replace', 'retry']
