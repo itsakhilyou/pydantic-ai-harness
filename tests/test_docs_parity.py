@@ -195,6 +195,44 @@ def _lead_paragraph(text: str) -> str:
     return ' '.join(collected)
 
 
+def test_strip_frontmatter_handles_missing_close() -> None:
+    assert _strip_frontmatter('---\ntitle: x\n---\nbody') == '\nbody'
+    # Opened but never closed -- returned unchanged rather than swallowing the file.
+    assert _strip_frontmatter('---\nnot closed') == '---\nnot closed'
+    assert _strip_frontmatter('no frontmatter') == 'no frontmatter'
+
+
+def test_h1_missing_returns_empty() -> None:
+    assert _h1('# Title\nbody') == '# Title'
+    assert _h1('just prose, no heading') == ''
+
+
+def test_heading_problem_flags_each_failure_mode() -> None:
+    assert _heading_problem('') == 'missing H1 heading'
+    assert _heading_problem('# Overflow') is not None  # forbidden short form
+    assert _heading_problem('# SubAgents') is not None  # ClassName-style
+    assert _heading_problem('# FileSystem') is None  # allowlisted ClassName
+    assert _heading_problem('# Code Mode') is None
+
+
+def test_lead_paragraph_skips_preamble_and_fences() -> None:
+    doc = (
+        '---\ntitle: x\n---\n'
+        '# Title\n\n'
+        '```python\ncode\n```\n\n'
+        '> a note\n'
+        '[Source](x)\n'
+        '    indented body\n\n'
+        'The real lead.\n\n'
+        'second paragraph\n'
+    )
+    # Fenced block, blockquote, link, and indented lines are skipped; collection
+    # stops at the blank line after the first prose paragraph.
+    assert _lead_paragraph(doc) == 'The real lead.'
+    # A lead that runs to EOF exercises multi-line collection and loop exhaustion.
+    assert _lead_paragraph('# T\n\nline one\nline two') == 'line one line two'
+
+
 def test_capability_doc_pages_discovered() -> None:
     # Guard against a moved docs root making every check below vacuously pass.
     assert len(_CAPABILITY_DOC_PAGES) >= 12
