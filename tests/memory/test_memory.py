@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import sqlite3
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -16,7 +17,16 @@ from pydantic_ai.models.function import AgentInfo, FunctionModel
 from pydantic_ai.models.test import TestModel
 from pydantic_ai.tools import RunContext
 
-from pydantic_ai_harness.memory import FileStore, InMemoryStore, Memory, MemoryStore, MemoryToolset
+from pydantic_ai_harness.memory import (
+    FileStore,
+    InMemoryStore,
+    Memory,
+    MemoryStore,
+    MemoryToolset,
+    PostgresMemoryStore,
+    PostgresPool,
+    SqliteMemoryStore,
+)
 from pydantic_ai_harness.memory._store import validate_store_path
 from pydantic_ai_harness.memory._toolset import (
     list_subfiles,
@@ -208,6 +218,119 @@ class TestFileStore:
         store = FileStore(tmp_path)
         await store.write('a/deep/x.md', 'one')
         assert await store.list_paths() == ['a/deep/x.md']
+
+
+class TestSqliteMemoryStore:
+    async def test_crud_and_listing(self, tmp_path: Path) -> None:
+        store = SqliteMemoryStore(database=tmp_path / 'memory.db')
+        assert await store.read('main/x.md') is None
+        assert await store.list_paths() == []
+        await store.write('main/x.md', 'one')
+        await store.write('main/x.md', 'one-updated')  # upsert
+        await store.write('other/y.md', 'two')
+        assert await store.read('main/x.md') == 'one-updated'
+        assert await store.list_paths('main/') == ['main/x.md']
+        await store.delete('main/x.md')
+        await store.delete('main/x.md')  # idempotent
+        assert await store.list_paths() == ['other/y.md']
+
+    async def test_caller_owned_connection(self) -> None:
+        connection = sqlite3.connect(':memory:', check_same_thread=False)
+        try:
+            store = SqliteMemoryStore(connection=connection)
+            await store.write('main/x.md', 'one')
+            assert await store.read('main/x.md') == 'one'
+        finally:
+            connection.close()
+
+    def test_requires_exactly_one_of_database_or_connection(self) -> None:
+        with pytest.raises(ValueError, match='exactly one'):
+            SqliteMemoryStore()
+        connection = sqlite3.connect(':memory:')
+        try:
+            with pytest.raises(ValueError, match='exactly one'):
+                SqliteMemoryStore(database=':memory:', connection=connection)
+        finally:
+            connection.close()
+
+    async def test_like_wildcards_in_prefix_are_literal(self, tmp_path: Path) -> None:
+        # Scope segments may legally contain `_` (a LIKE wildcard) -- it must not
+        # match arbitrary characters, or one tenant could list another's paths.
+        store = SqliteMemoryStore(database=tmp_path / 'memory.db')
+        await store.write('user_1/main/MEMORY.md', 'a')
+        await store.write('userX1/main/MEMORY.md', 'b')
+        assert await store.list_paths('user_1/') == ['user_1/main/MEMORY.md']
+
+    def test_satisfies_protocol(self) -> None:
+        assert isinstance(SqliteMemoryStore(database=':memory:'), MemoryStore)
+
+
+@dataclass
+class FakePool:
+    """Asyncpg-shaped fake: implements `PostgresPool` over a dict."""
+
+    rows: dict[str, str] = field(default_factory=dict[str, str])
+    statements: list[str] = field(default_factory=list[str])
+
+    async def execute(self, query: str, *args: object) -> object:
+        self.statements.append(query)
+        if query.startswith('CREATE TABLE'):
+            return 'CREATE TABLE'
+        if query.startswith('INSERT'):
+            path, content = args
+            assert isinstance(path, str) and isinstance(content, str)
+            self.rows[path] = content
+            return 'INSERT 0 1'
+        assert query.startswith('DELETE')
+        path = args[0]
+        assert isinstance(path, str)
+        self.rows.pop(path, None)
+        return 'DELETE 1'
+
+    async def fetchval(self, query: str, *args: object) -> object:
+        self.statements.append(query)
+        path = args[0]
+        assert isinstance(path, str)
+        return self.rows.get(path)
+
+    async def fetch(self, query: str, *args: object) -> list[tuple[str]]:
+        self.statements.append(query)
+        prefix = args[0]
+        assert isinstance(prefix, str)
+        return [(path,) for path in sorted(self.rows) if path.startswith(prefix)]
+
+
+class TestPostgresMemoryStore:
+    async def test_crud_and_listing(self) -> None:
+        store = PostgresMemoryStore(FakePool())
+        assert await store.read('main/x.md') is None
+        await store.write('main/x.md', 'one')
+        await store.write('main/x.md', 'one-updated')  # upsert
+        await store.write('other/y.md', 'two')
+        assert await store.read('main/x.md') == 'one-updated'
+        assert await store.list_paths('main/') == ['main/x.md']
+        await store.delete('main/x.md')
+        await store.delete('main/x.md')  # idempotent
+        assert await store.list_paths() == ['other/y.md']
+
+    async def test_schema_created_once_and_statements_parametrized(self) -> None:
+        pool = FakePool()
+        store = PostgresMemoryStore(pool, table='memories')
+        await store.write('a', '1')
+        await store.read('a')
+        await store.list_paths()
+        creates = [statement for statement in pool.statements if statement.startswith('CREATE TABLE')]
+        assert len(creates) == 1
+        assert 'memories' in creates[0]
+        assert all('$1' in statement for statement in pool.statements if not statement.startswith('CREATE'))
+
+    def test_rejects_invalid_table_name(self) -> None:
+        with pytest.raises(ValueError, match='invalid table name'):
+            PostgresMemoryStore(FakePool(), table='memories; DROP TABLE users')
+
+    def test_satisfies_protocols(self) -> None:
+        assert isinstance(FakePool(), PostgresPool)
+        assert isinstance(PostgresMemoryStore(FakePool()), MemoryStore)
 
 
 class TestResolveScope:
@@ -406,6 +529,10 @@ class TestMemoryCapability:
         capability = Memory.from_spec(backend='file', directory=str(tmp_path), agent_name='bot')
         assert isinstance(capability.store, FileStore)
         assert capability.agent_name == 'bot'
+
+    def test_from_spec_sqlite_backend(self, tmp_path: Path) -> None:
+        capability = Memory.from_spec(backend='sqlite', database=str(tmp_path / 'mem.db'))
+        assert isinstance(capability.store, SqliteMemoryStore)
 
     def test_from_spec_unknown_backend_raises(self) -> None:
         with pytest.raises(ValueError, match='unknown backend'):

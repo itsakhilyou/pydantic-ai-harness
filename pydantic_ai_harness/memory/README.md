@@ -61,13 +61,35 @@ agent = Agent(
 
 ## Persistence
 
-The default `InMemoryStore` lives for the **process only** — memories survive across `Agent.run` calls but not restarts. Persist across sessions with one argument:
+The default `InMemoryStore` lives for the **process only** — memories survive across `Agent.run` calls but not restarts. Four stores ship in the box; anything else is a four-method `MemoryStore` protocol away (path = key column, namespace = key prefix).
+
+| Store | Fits | Notes |
+| --- | --- | --- |
+| `InMemoryStore()` | tests, ephemeral agents | default; process-lifetime |
+| `FileStore(directory)` | CLI / local / single-host | atomic writes, path-jailed inside its directory, blocking IO off the event loop |
+| `SqliteMemoryStore(database=...)` | single-host apps wanting one durable file | stdlib `sqlite3`, WAL; or pass a caller-owned `connection=` (must be `check_same_thread=False`) |
+| `PostgresMemoryStore(pool)` | production multi-user apps | caller-owned pool; upserts are atomic per statement, so cross-process writers are safe |
 
 ```python
 Memory(store=FileStore('.agent-memory'))
+Memory(store=SqliteMemoryStore(database='.agent-memory.db'))
 ```
 
-`FileStore` suits CLI/local/single-host agents: atomic writes, path-jailed inside its directory, blocking IO off the event loop. Production web applications should implement the four-method `MemoryStore` protocol over their database (path = key column, namespace = indexed prefix).
+`PostgresMemoryStore` is deliberately **driver-agnostic**: it talks to a minimal `PostgresPool` protocol (`execute` / `fetchval` / `fetch`, `$1`-style parameters), so `pydantic-ai-harness` gains no database dependency — an `asyncpg.Pool` satisfies it out of the box:
+
+```python
+import asyncpg
+
+from pydantic_ai_harness.memory import Memory, PostgresMemoryStore
+
+pool = await asyncpg.create_pool('postgres://...')
+agent_memory = Memory(
+    store=PostgresMemoryStore(pool),           # optional: table='agent_memory'
+    namespace=lambda ctx: ctx.deps.user_id,
+)
+```
+
+The pool is caller-owned — create it at app startup, close it at shutdown; the store never manages connection lifecycle.
 
 ## Multi-user applications
 
@@ -123,7 +145,7 @@ capabilities:
   - Memory: {backend: file, directory: .agent-memory, agent_name: main}
 ```
 
-`backend: memory` (default) or `backend: file`; any other value raises rather than silently losing durability. Callables (`namespace`, `store_resolver`) are not spec-serializable.
+`backend: memory` (default), `backend: file`, or `backend: sqlite` (with `database`); any other value raises rather than silently losing durability. Callables (`namespace`, `store_resolver`) and `PostgresMemoryStore` (a live pool) are not spec-constructible.
 
 ## Composing with FileSystem
 

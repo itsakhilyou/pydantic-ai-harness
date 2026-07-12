@@ -169,10 +169,13 @@ class Memory(AbstractCapability[AgentDepsT]):
     def from_spec(cls, *args: Any, **kwargs: Any) -> Memory[Any]:
         """Construct from a serialised spec.
 
-        Supports `backend='memory'` (default) or `backend='file'` (with
-        `directory`, default `.agent-memory`). Raises `ValueError` for any
+        Supports `backend='memory'` (default), `backend='file'` (with
+        `directory`, default `.agent-memory`), or `backend='sqlite'` (with
+        `database`, default `.agent-memory.db`). Raises `ValueError` for any
         other `backend` value -- silently falling back to in-memory storage
-        would turn a typo into accidental non-durability.
+        would turn a typo into accidental non-durability. `PostgresMemoryStore`
+        is not spec-constructible (it takes a live connection pool); wire it
+        up in code.
         """
         backend = kwargs.pop('backend', 'memory')
         if backend == 'memory':
@@ -182,7 +185,12 @@ class Memory(AbstractCapability[AgentDepsT]):
 
             directory = kwargs.pop('directory', '.agent-memory')
             return cls(store=FileStore(directory), **kwargs)
-        raise ValueError(f'unknown backend {backend!r}; expected `memory` or `file`')
+        if backend == 'sqlite':
+            from pydantic_ai_harness.memory._store import SqliteMemoryStore
+
+            database = kwargs.pop('database', '.agent-memory.db')
+            return cls(store=SqliteMemoryStore(database=database), **kwargs)
+        raise ValueError(f'unknown backend {backend!r}; expected `memory`, `file`, or `sqlite`')
 
     @classmethod
     def get_serialization_name(cls) -> str | None:

@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import os
 import re
+import sqlite3
 import tempfile
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol, runtime_checkable
@@ -159,3 +162,101 @@ class FileStore:
                 if relative.startswith(prefix):
                     found.append(relative)
         return sorted(found)
+
+
+_MEMORY_SCHEMA = 'CREATE TABLE IF NOT EXISTS memory_files (path TEXT PRIMARY KEY, content TEXT NOT NULL)'
+
+
+def _escape_like_prefix(prefix: str) -> str:
+    r"""Escape LIKE wildcards in a listing prefix (scope segments may contain `_`)."""
+    return prefix.replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_')
+
+
+class SqliteMemoryStore:
+    """SQLite-backed store: a single file holds every memory across namespaces.
+
+    Pass either `database=` (path; connections opened short-lived per call,
+    with WAL enabled) or `connection=` (caller-owned `sqlite3.Connection`).
+    A caller-owned connection **must** be created with
+    `check_same_thread=False` -- store methods dispatch SQL onto worker
+    threads via `anyio.to_thread`, so the stdlib default raises
+    `sqlite3.ProgrammingError` on first use. The `database=` path sets this
+    internally; `connection=` cannot, so it is the caller's responsibility.
+
+    Schema: `memory_files(path TEXT PRIMARY KEY, content TEXT NOT NULL)`,
+    created lazily on first use (`CREATE TABLE IF NOT EXISTS` is idempotent,
+    so the ready-flag race between worker threads is benign). Paths are
+    opaque keys -- always bound as parameters, never interpolated.
+    """
+
+    def __init__(
+        self,
+        *,
+        database: str | Path | None = None,
+        connection: sqlite3.Connection | None = None,
+    ) -> None:
+        if (database is None) == (connection is None):
+            raise ValueError('provide exactly one of `database=` or `connection=`')
+        self._database = database
+        self._connection = connection
+        self._schema_ready = False
+
+    @contextmanager
+    def _session(self) -> Iterator[sqlite3.Connection]:
+        """Yield a schema-ready connection, committing on success."""
+        if self._connection is not None:
+            connection = self._connection
+        else:
+            assert self._database is not None
+            connection = sqlite3.connect(self._database, check_same_thread=False)
+            connection.execute('PRAGMA journal_mode=WAL')
+        try:
+            if not self._schema_ready:
+                connection.execute(_MEMORY_SCHEMA)
+                self._schema_ready = True
+            yield connection
+            connection.commit()
+        finally:
+            if connection is not self._connection:
+                connection.close()
+
+    async def read(self, path: str) -> str | None:
+        """Return the content at `path`, or `None` if it does not exist."""
+        return await anyio.to_thread.run_sync(self._sync_read, path)
+
+    def _sync_read(self, path: str) -> str | None:
+        with self._session() as connection:
+            row = connection.execute('SELECT content FROM memory_files WHERE path = ?', (path,)).fetchone()
+        return None if row is None else str(row[0])
+
+    async def write(self, path: str, content: str) -> None:
+        """Upsert `content` at `path`."""
+        await anyio.to_thread.run_sync(self._sync_write, path, content)
+
+    def _sync_write(self, path: str, content: str) -> None:
+        with self._session() as connection:
+            connection.execute(
+                'INSERT INTO memory_files (path, content) VALUES (?, ?) '
+                'ON CONFLICT (path) DO UPDATE SET content = excluded.content',
+                (path, content),
+            )
+
+    async def delete(self, path: str) -> None:
+        """Delete `path` if it exists (idempotent)."""
+        await anyio.to_thread.run_sync(self._sync_delete, path)
+
+    def _sync_delete(self, path: str) -> None:
+        with self._session() as connection:
+            connection.execute('DELETE FROM memory_files WHERE path = ?', (path,))
+
+    async def list_paths(self, prefix: str = '') -> list[str]:
+        """Return all stored paths starting with `prefix`, sorted."""
+        return await anyio.to_thread.run_sync(self._sync_list_paths, prefix)
+
+    def _sync_list_paths(self, prefix: str) -> list[str]:
+        with self._session() as connection:
+            rows = connection.execute(
+                "SELECT path FROM memory_files WHERE path LIKE ? ESCAPE '\\' ORDER BY path",
+                (f'{_escape_like_prefix(prefix)}%',),
+            ).fetchall()
+        return [str(row[0]) for row in rows]
