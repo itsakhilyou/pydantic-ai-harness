@@ -154,6 +154,46 @@ The last expression in the code snippet is automatically captured as the return 
 
 State persists between `run_code` calls within the same agent run -- variables, imports, and function definitions carry over. Pass `restart: true` in the tool call to reset state.
 
+## Temporal durable execution
+
+Code mode works with Pydantic AI's Temporal integration, but the Temporal worker must pass `pydantic_monty`
+through its workflow import sandbox. Monty's native module manages the subprocess pool used to execute code. Passing
+the module through keeps that pool outside the per-workflow import sandbox without disabling sandboxing for the rest
+of the workflow.
+
+Add a custom workflow runner to the `Worker` that runs the durable agent:
+
+```python
+from pydantic_ai.durable_exec.temporal import PydanticAIPlugin
+from temporalio.client import Client
+from temporalio.worker import Worker
+from temporalio.worker.workflow_sandbox import SandboxedWorkflowRunner, SandboxRestrictions
+
+workflow_runner = SandboxedWorkflowRunner(
+    restrictions=SandboxRestrictions.default.with_passthrough_modules('pydantic_monty')
+)
+
+client = await Client.connect(
+    'localhost:7233',
+    plugins=[PydanticAIPlugin()],
+)
+
+async with Worker(
+    client,
+    task_queue='code-mode',
+    workflows=[CodeModeWorkflow],
+    workflow_runner=workflow_runner,
+):
+    ...
+```
+
+`PydanticAIPlugin` merges its normal passthrough modules into the runner's restrictions. The workflow remains
+sandboxed, and the same runner can be passed to Temporal's `Replayer`.
+
+Monty code runs again when Temporal replays the workflow. Keep external state access out of the code sandbox: do not
+connect `os_access` or `mount` to changing host state. Put filesystem, network, clock, and environment access in tools
+so `TemporalAgent` can execute those calls as activities and record their results in workflow history.
+
 ## Observability
 
 Nested tool calls inside `run_code` produce their own spans when instrumented with [Logfire](https://pydantic.dev/logfire) or any OpenTelemetry backend. The `run_code` tool return includes metadata with all nested calls:
