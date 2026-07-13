@@ -3,10 +3,9 @@
 Verifies that the snapshot-based execution loop (`feed_start`/`resume`)
 works with Temporal's workflow sandbox and history replay.
 
-Monty executes snippets in subprocess workers. Passing `pydantic_monty`
-through Temporal's import sandbox keeps its native module and subprocess pool
-outside the per-workflow sandbox while the rest of the workflow remains
-sandboxed.
+Monty executes snippets in subprocess workers. The worker pool is created once
+per agent run when `CodeModeToolset` is entered and reused by every `run_code`
+call, rather than spawned per call.
 
 These tests start a local Temporal dev server via
 `WorkflowEnvironment.start_local()` -- the Temporal SDK downloads and
@@ -187,9 +186,7 @@ async def test_code_mode_runs_in_temporal_workflow(client: Client) -> None:
     This is the core regression test for the `call_soon_threadsafe` issue:
     the old `feed_run_async` approach hung because Temporal's sandboxed
     event loop doesn't implement `call_soon_threadsafe`. The snapshot
-    approach (`feed_start`/`resume`) avoids threads entirely. The worker passes
-    `pydantic_monty` through the import sandbox so Monty's subprocess pool can
-    run without disabling Temporal's sandbox for the workflow.
+    approach (`feed_start`/`resume`) avoids threads entirely.
     """
     _captured_tool_defs.clear()
     workflow_id = 'test_code_mode_temporal_1'
