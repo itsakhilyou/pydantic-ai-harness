@@ -164,6 +164,8 @@ of the workflow.
 Add a custom workflow runner to the `Worker` that runs the durable agent:
 
 ```python
+from pydantic_ai.durable_exec.temporal import PydanticAIPlugin
+from temporalio.client import Client
 from temporalio.worker import Worker
 from temporalio.worker.workflow_sandbox import SandboxedWorkflowRunner, SandboxRestrictions
 
@@ -171,16 +173,22 @@ workflow_runner = SandboxedWorkflowRunner(
     restrictions=SandboxRestrictions.default.with_passthrough_modules('pydantic_monty')
 )
 
-worker = Worker(
+client = await Client.connect(
+    'localhost:7233',
+    plugins=[PydanticAIPlugin()],
+)
+
+async with Worker(
     client,
     task_queue='code-mode',
     workflows=[CodeModeWorkflow],
     workflow_runner=workflow_runner,
-)
+):
+    ...
 ```
 
-Use this runner alongside `PydanticAIPlugin`; the plugin merges its normal passthrough modules into the runner's
-restrictions. The workflow remains sandboxed, and the same runner can be passed to Temporal's `Replayer`.
+`PydanticAIPlugin` merges its normal passthrough modules into the runner's restrictions. The workflow remains
+sandboxed, and the same runner can be passed to Temporal's `Replayer`.
 
 Monty code runs again when Temporal replays the workflow. Keep external state access out of the code sandbox: do not
 connect `os_access` or `mount` to changing host state. Put filesystem, network, clock, and environment access in tools

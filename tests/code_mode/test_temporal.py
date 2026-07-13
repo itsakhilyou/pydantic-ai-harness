@@ -16,6 +16,8 @@ runs `temporalite` automatically.
 from __future__ import annotations
 
 import json
+import subprocess
+import sys
 from collections.abc import AsyncIterator
 from datetime import timedelta
 from typing import Any
@@ -33,7 +35,11 @@ try:
     from temporalio.common import RetryPolicy
     from temporalio.testing import WorkflowEnvironment
     from temporalio.worker import Replayer, Worker
-    from temporalio.worker.workflow_sandbox import SandboxedWorkflowRunner, SandboxRestrictions
+    from temporalio.worker.workflow_sandbox import (
+        RestrictedWorkflowAccessError,
+        SandboxedWorkflowRunner,
+        SandboxRestrictions,
+    )
     from temporalio.workflow import ActivityConfig
 except ImportError:  # pragma: lax no cover
     pytest.skip('temporalio not installed', allow_module_level=True)
@@ -158,6 +164,19 @@ class CodeModeWorkflow:
         }
 
 
+@workflow.defn
+class SandboxRestrictionWorkflow:
+    """Probe that passing Monty through does not allow Python subprocess calls."""
+
+    @workflow.run
+    async def run(self) -> str:
+        try:
+            subprocess.run([sys.executable, '-c', 'pass'], check=True)
+        except RestrictedWorkflowAccessError as e:
+            return e.qualified_name
+        return 'subprocess was allowed'
+
+
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
@@ -178,7 +197,7 @@ async def test_code_mode_runs_in_temporal_workflow(client: Client) -> None:
     async with Worker(
         client,
         task_queue=TASK_QUEUE,
-        workflows=[CodeModeWorkflow],
+        workflows=[CodeModeWorkflow, SandboxRestrictionWorkflow],
         plugins=[AgentPlugin(temporal_code_mode_agent)],
         workflow_runner=_workflow_runner(),
     ):
@@ -188,8 +207,14 @@ async def test_code_mode_runs_in_temporal_workflow(client: Client) -> None:
             id=workflow_id,
             task_queue=TASK_QUEUE,
         )
+        sandbox_result = await client.execute_workflow(
+            SandboxRestrictionWorkflow.run,
+            id='test_code_mode_temporal_sandbox_restrictions',
+            task_queue=TASK_QUEUE,
+        )
 
     assert result['output'] == 'done: 7'
+    assert sandbox_result == 'subprocess.run.__call__'
 
     messages = json.loads(result['messages'])
     assert len(messages) == 4
