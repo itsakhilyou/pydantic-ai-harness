@@ -1,3 +1,8 @@
+---
+title: Memory
+description: Persistent, namespaced agent notebooks with bounded prompt injection, on-demand search, and concurrency-safe stores.
+---
+
 # Memory
 
 Give an agent a persistent notebook that it can update, search, and reuse across runs without loading every stored file into every prompt.
@@ -9,7 +14,7 @@ Give an agent a persistent notebook that it can update, search, and reuse across
 > from pydantic_ai_harness.memory import Memory
 > ```
 
-Memory is a released, non-experimental capability. Pydantic AI Harness is still on 0.x releases, so the API may change between minor releases. See the repository [version policy](https://github.com/pydantic/pydantic-ai-harness#version-policy).
+Memory is a released, non-experimental capability. Pydantic AI Harness is still on 0.x releases, so the API may change between minor releases. See the [version policy](index.md#version-policy).
 
 ## Notebook model
 
@@ -210,7 +215,11 @@ Memory records do not carry source citations or verified provenance. If an appli
 ## API reference
 
 - [`pydantic_ai_harness.memory` source](https://github.com/pydantic/pydantic-ai-harness/tree/main/pydantic_ai_harness/memory/)
-- [Pydantic AI capabilities](https://pydantic.dev/docs/ai/core-concepts/capabilities/)
-- [Pydantic AI hooks](https://pydantic.dev/docs/ai/core-concepts/hooks/)
+- [Pydantic AI capabilities](/ai/core-concepts/capabilities/)
+- [Pydantic AI hooks](/ai/core-concepts/hooks/)
 
 The public module exports `Memory`, `MemoryToolset`, the bundled stores, the store protocols, mutation and search result models, and conflict exceptions. Import them from `pydantic_ai_harness.memory`.
+
+::: pydantic_ai_harness.memory.Memory
+
+::: pydantic_ai_harness.memory.MemoryToolset

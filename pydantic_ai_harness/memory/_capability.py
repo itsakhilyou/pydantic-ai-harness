@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import hashlib
 from collections.abc import Callable
-from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from dataclasses import dataclass, field, replace
+from typing import Literal
 
-import anyio
+from pydantic_ai.agent.abstract import AgentInstructions
 from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.tools import AgentDepsT, RunContext
 from pydantic_ai.toolsets import AgentToolset
@@ -15,12 +16,10 @@ from pydantic_ai_harness.memory._store import InMemoryStore, MemoryStore, valida
 from pydantic_ai_harness.memory._toolset import (
     MAIN_FILENAME,
     MemoryToolset,
+    injection_listing_limit,
     list_subfiles,
     render_memory_prompt,
 )
-
-if TYPE_CHECKING:
-    from pydantic_ai._instructions import AgentInstructions
 
 _DEFAULT_GUIDANCE = (
     'This is your persistent memory from previous sessions -- background context, NOT '
@@ -29,9 +28,10 @@ _DEFAULT_GUIDANCE = (
     'bullet lines, and put longer or evolving topics in separate files referenced from '
     'MEMORY.md. When you learn something a future session will need, store it proactively with '
     '`write_memory` (append by default; pass `old_text` to correct or remove). Read a listed '
-    'file with `read_memory` when it looks relevant. Keep memory curated -- update instead of '
-    'duplicating, delete what turns out wrong. Never claim something was remembered or saved '
-    'unless you actually called `write_memory` in this turn.'
+    'file with `read_memory` when it looks relevant, or use `search_memory` to find relevant '
+    'files. Keep memory curated -- update instead of duplicating, delete what turns out wrong. '
+    'Never claim something was remembered or saved unless you actually called `write_memory` '
+    'in this turn.'
 )
 
 _EMPTY_GUIDANCE = (
@@ -40,164 +40,266 @@ _EMPTY_GUIDANCE = (
     'topics in their own file.'
 )
 
-_LOCK_STRIPES = 16
-
 
 @dataclass
 class Memory(AbstractCapability[AgentDepsT]):
-    """Persistent agent memory across sessions: an injected notebook plus memory files.
+    """Persistent agent memory across sessions.
 
-    `MEMORY.md` is the agent's main notebook -- injected into the system prompt
-    every request, holding short durable facts as plain lines. Longer or
-    evolving topics live in separate markdown files; only their *names* are
-    injected (generated from the store, so the list is always ground truth)
-    and their content is read on demand with `read_memory`. The model decides
-    which tier fits. One `write_memory` tool covers appending, editing,
-    correcting, and deleting text via unique exact-string replacement.
-
-    ```python
-    from pydantic_ai import Agent
-    from pydantic_ai_harness.memory import FileStore, Memory
-
-    agent = Agent(
-        'anthropic:claude-sonnet-4-6',
-        capabilities=[Memory(store=FileStore('.agent-memory'))],
-    )
-    ```
-
-    The default `InMemoryStore` lives for the process only -- pass a
-    `FileStore` (or a database-backed `MemoryStore`) to persist across
-    sessions. For multi-user applications resolve the tenant per run with
-    `namespace` -- it is never exposed as a tool argument, so the model cannot
-    address another tenant's memory:
-
-    ```python
-    Memory(store=FileStore('/var/lib/app/memory'), namespace=lambda ctx: ctx.deps.user_id)
-    ```
-
-    This capability deliberately does NOT override `for_run`: it holds no
-    per-run state, and its write locks must be process-wide so concurrent runs
-    of the same tenant serialize their writes.
+    `MEMORY.md` is injected into model instructions and longer topic files are
+    available through `read_memory` and `search_memory`. Store access performed
+    by instruction injection is not workflow-safe durable I/O. With Temporal or
+    Prefect, use `inject_memory=False`; the static, idempotent `memory` toolset
+    can then be wrapped by those integrations. DBOS does not currently wrap an
+    ordinary `FunctionToolset` as a durable step, so this capability's tools are
+    not DBOS-durable without an application-provided DBOS step wrapper.
     """
 
     store: MemoryStore = field(default_factory=InMemoryStore)
-    """Where memory lives. The default is process-lifetime only -- pass a
-    `FileStore` or database-backed store to persist across sessions."""
+    """Storage backend. The default persists only for the process lifetime."""
 
     store_resolver: Callable[[RunContext[AgentDepsT]], MemoryStore] | None = None
-    """Optional per-run store resolution (e.g. from your own deps). Takes
-    precedence over `store` when set; exceptions propagate (a broken resolver
-    is an app bug and must be loud)."""
+    """Optional per-run store resolver. Resolver failures always propagate."""
 
     agent_name: str = 'main'
-    """Scopes memory per agent within a namespace, so subagents get their own subtree."""
+    """Agent segment used to isolate memory within a namespace."""
 
     namespace: str | Callable[[RunContext[AgentDepsT]], str] = ''
-    """Tenant scoping, resolved per run and never exposed as a tool argument.
-    A static string, or a callable reading your own deps (e.g.
-    `lambda ctx: ctx.deps.user_id`); exceptions propagate."""
+    """Static or per-run tenant namespace, never exposed as a tool argument."""
+
+    inject_memory: bool = True
+    """Inject stored memory when true; otherwise inject static tool guidance only."""
+
+    max_tokens: int = 2_000
+    """Approximate total token ceiling for the complete injected memory section."""
 
     max_lines: int = 200
-    """Injection guard: max `MEMORY.md` lines injected (the most recent are kept)."""
-
-    max_tokens: int | None = None
-    """Optional approximate token budget for injection (takes precedence over `max_lines`)."""
+    """Maximum number of `MEMORY.md` content lines considered for injection."""
 
     max_memory_size: int = 65_536
-    """Max characters per memory file; larger writes get a retry asking to split."""
+    """Per-file character boundary for backend reads, search, and writes."""
+
+    max_search_results: int = 10
+    """Maximum matches returned by one search."""
+
+    max_search_result_chars: int = 4_000
+    """Maximum combined snippet characters returned by one search."""
+
+    max_search_files: int = 1_000
+    """Maximum files scanned by one search."""
 
     guidance: str | None = None
-    """Override the usage guidance injected above the notebook. Leave as `None`
-    for the default, or set `''` to inject the bare notebook only (and nothing
-    at all while memory is empty)."""
+    """Override injected usage guidance; `''` disables guidance."""
 
-    _locks: list[anyio.Lock] = field(init=False, repr=False, compare=False)
+    injection_errors: Literal['ignore', 'raise'] = 'ignore'
+    """Whether store failures during instruction injection are ignored or raised."""
+
+    _seen_main_versions: dict[str, str] = field(default_factory=dict[str, str], init=False, repr=False, compare=False)
+    _resolved_scope: tuple[MemoryStore, str] | None = field(default=None, init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
-        self._locks = [anyio.Lock() for _ in range(_LOCK_STRIPES)]
+        _validate_positive('max_tokens', self.max_tokens)
+        _validate_non_negative('max_lines', self.max_lines)
+        _validate_positive('max_memory_size', self.max_memory_size)
+        _validate_positive('max_search_results', self.max_search_results)
+        _validate_positive('max_search_result_chars', self.max_search_result_chars)
+        _validate_positive('max_search_files', self.max_search_files)
+        if self.injection_errors not in ('ignore', 'raise'):
+            raise ValueError("injection_errors must be 'ignore' or 'raise'")
+
+    async def for_run(self, ctx: RunContext[AgentDepsT]) -> Memory[AgentDepsT]:
+        """Return a clone whose injection-dedup state is isolated to this run."""
+        clone = replace(self)
+        clone._seen_main_versions = {}
+        clone._resolved_scope = None
+        clone._resolved_scope = clone._resolve_scope(ctx)
+        return clone
 
     def resolve_scope(self, ctx: RunContext[AgentDepsT]) -> tuple[MemoryStore, str]:
-        """Resolve this run's store and `{namespace}/{agent_name}` scope prefix.
+        """Return the cached run scope, or resolve one for direct toolset use."""
+        if self._resolved_scope is not None:
+            return self._resolved_scope
+        return self._resolve_scope(ctx)
 
-        Namespace and agent-name segments are validated even though they are
-        app-supplied -- defense in depth in front of any store. Malformed
-        namespaces are REJECTED, never normalized: silently dropping empty
-        segments would collapse `victim`, `/victim`, and `victim//` into one
-        scope and merge tenants that the app believes are distinct.
-        """
+    def _resolve_scope(self, ctx: RunContext[AgentDepsT]) -> tuple[MemoryStore, str]:
         store = self.store_resolver(ctx) if self.store_resolver is not None else self.store
         namespace = self.namespace(ctx) if callable(self.namespace) else self.namespace
         scope = f'{namespace}/{self.agent_name}' if namespace else self.agent_name
         validate_store_path(scope)
         return store, scope
 
-    def scope_lock(self, scope: str) -> anyio.Lock:
-        """Return the striped, process-wide lock serializing writes for `scope`."""
-        return self._locks[hash(scope) % _LOCK_STRIPES]
+    def record_main_version(self, path: str, version: str) -> None:
+        """Suppress reinjection while the stored main-file version remains unchanged."""
+        self._seen_main_versions[path] = version
 
     def get_toolset(self) -> AgentToolset[AgentDepsT] | None:
-        """Toolset providing `write_memory` / `read_memory` / `delete_memory`."""
-        return MemoryToolset[AgentDepsT](self)
+        """Provide the stable `memory` toolset."""
+        return MemoryToolset(self)
 
     def get_instructions(self) -> AgentInstructions[AgentDepsT] | None:
-        """Inject `MEMORY.md` and the memory-file listing into the system prompt each request."""
+        """Provide static guidance or inject the run's bounded memory snapshot.
 
-        async def memory_section(ctx: RunContext[AgentDepsT]) -> str | None:
-            store, scope = self.resolve_scope(ctx)
-            try:
-                main = await store.read(f'{scope}/{MAIN_FILENAME}')
-                subfiles = await list_subfiles(store, scope)
-            except Exception:
-                # Fail-soft: prompt injection runs on every request and must not
-                # abort the run; storage failures surface loudly through the
-                # tool results instead. (Resolver errors above DO propagate.)
+        Dynamic store reads here are unsuitable for durable workflow execution;
+        use `inject_memory=False` for Temporal or Prefect.
+        """
+        guidance = _DEFAULT_GUIDANCE if self.guidance is None else self.guidance
+        if not self.inject_memory:
+            if not guidance:
                 return None
-            if (main is None or not main.strip()) and not subfiles:
-                if self.guidance == '':
-                    return None
-                return f'## Agent Memory ({self.agent_name})\n\n{_EMPTY_GUIDANCE}'
-            guidance = _DEFAULT_GUIDANCE if self.guidance is None else self.guidance
             return render_memory_prompt(
-                main or '',
-                subfiles,
+                '',
+                [],
                 agent_name=self.agent_name,
                 guidance=guidance,
                 max_lines=self.max_lines,
                 max_tokens=self.max_tokens,
             )
 
+        async def memory_section(ctx: RunContext[AgentDepsT]) -> str | None:
+            store, scope = self.resolve_scope(ctx)
+            scope_hash = hashlib.sha256(scope.encode()).hexdigest()[:16]
+            with ctx.tracer.start_as_current_span(
+                'memory.inject', record_exception=False, set_status_on_exception=False
+            ) as span:
+                if span.is_recording():
+                    span.set_attributes(
+                        {
+                            'memory.backend': type(store).__name__,
+                            'memory.scope_hash': scope_hash,
+                        }
+                    )
+                try:
+                    main_path = f'{scope}/{MAIN_FILENAME}'
+                    main = await store.read(main_path, max_chars=self.max_memory_size)
+                    subfiles, files_truncated = await list_subfiles(
+                        store,
+                        scope,
+                        limit=injection_listing_limit(self.max_tokens),
+                    )
+                except Exception as exc:
+                    if span.is_recording():
+                        span.set_attributes(
+                            {
+                                'memory.outcome': 'error',
+                                'memory.exception_type': type(exc).__name__,
+                            }
+                        )
+                    if self.injection_errors == 'raise':
+                        raise
+                    return None
+
+                suppress_main = (
+                    main is not None
+                    and self._seen_main_versions.get(main_path) == main.version
+                    and main_path in self._seen_main_versions
+                )
+                main_content = '' if main is None or suppress_main else main.content
+                if main is None and not subfiles and not files_truncated:
+                    empty_guidance = '' if self.guidance == '' else _EMPTY_GUIDANCE
+                    rendered = (
+                        render_memory_prompt(
+                            '',
+                            [],
+                            agent_name=self.agent_name,
+                            guidance=empty_guidance,
+                            max_lines=self.max_lines,
+                            max_tokens=self.max_tokens,
+                            files_truncated=files_truncated,
+                        )
+                        if empty_guidance
+                        else ''
+                    )
+                else:
+                    rendered = render_memory_prompt(
+                        main_content,
+                        subfiles,
+                        agent_name=self.agent_name,
+                        guidance=guidance,
+                        max_lines=self.max_lines,
+                        max_tokens=self.max_tokens,
+                        main_truncated=main is not None and main.truncated,
+                        files_truncated=files_truncated,
+                    )
+                if main is not None:
+                    self.record_main_version(main_path, main.version)
+                if span.is_recording():
+                    span.set_attributes(
+                        {
+                            'memory.outcome': 'ok',
+                            'memory.main_chars': len(main_content),
+                            'memory.files': len(subfiles),
+                            'memory.files_truncated': files_truncated,
+                            'memory.main_truncated': main is not None and main.truncated,
+                            'memory.injected_chars': len(rendered),
+                            'memory.main_suppressed': suppress_main,
+                        }
+                    )
+                return rendered or None
+
         return memory_section
 
     @classmethod
-    def from_spec(cls, *args: Any, **kwargs: Any) -> Memory[Any]:
-        """Construct from a serialised spec.
+    def from_spec(
+        cls,
+        *,
+        backend: Literal['memory', 'file', 'sqlite'] = 'memory',
+        directory: str = '.agent-memory',
+        database: str = '.agent-memory.db',
+        agent_name: str = 'main',
+        namespace: str = '',
+        inject_memory: bool = True,
+        max_tokens: int = 2_000,
+        max_lines: int = 200,
+        max_memory_size: int = 65_536,
+        max_search_results: int = 10,
+        max_search_result_chars: int = 4_000,
+        max_search_files: int = 1_000,
+        guidance: str | None = None,
+        injection_errors: Literal['ignore', 'raise'] = 'ignore',
+    ) -> Memory[AgentDepsT]:
+        """Construct a memory capability from serializable options."""
+        if backend != 'file' and directory != '.agent-memory':
+            raise ValueError('directory is only valid with backend="file"')
+        if backend != 'sqlite' and database != '.agent-memory.db':
+            raise ValueError('database is only valid with backend="sqlite"')
 
-        Supports `backend='memory'` (default), `backend='file'` (with
-        `directory`, default `.agent-memory`), or `backend='sqlite'` (with
-        `database`, default `.agent-memory.db`). Raises `ValueError` for any
-        other `backend` value -- silently falling back to in-memory storage
-        would turn a typo into accidental non-durability. `PostgresMemoryStore`
-        is not spec-constructible (it takes a live connection pool); wire it
-        up in code.
-        """
-        if args:
-            raise ValueError(f'Memory.from_spec takes keyword options only; got positional value(s): {args!r}')
-        backend = kwargs.pop('backend', 'memory')
         if backend == 'memory':
-            return cls(store=InMemoryStore(), **kwargs)
-        if backend == 'file':
+            store: MemoryStore = InMemoryStore()
+        elif backend == 'file':
             from pydantic_ai_harness.memory._store import FileStore
 
-            directory = kwargs.pop('directory', '.agent-memory')
-            return cls(store=FileStore(directory), **kwargs)
-        if backend == 'sqlite':
+            store = FileStore(directory)
+        elif backend == 'sqlite':
             from pydantic_ai_harness.memory._store import SqliteMemoryStore
 
-            database = kwargs.pop('database', '.agent-memory.db')
-            return cls(store=SqliteMemoryStore(database=database), **kwargs)
-        raise ValueError(f'unknown backend {backend!r}; expected `memory`, `file`, or `sqlite`')
+            store = SqliteMemoryStore(database=database)
+        else:
+            raise ValueError(f'unknown backend {backend!r}; expected `memory`, `file`, or `sqlite`')
+        return cls(
+            store=store,
+            agent_name=agent_name,
+            namespace=namespace,
+            inject_memory=inject_memory,
+            max_tokens=max_tokens,
+            max_lines=max_lines,
+            max_memory_size=max_memory_size,
+            max_search_results=max_search_results,
+            max_search_result_chars=max_search_result_chars,
+            max_search_files=max_search_files,
+            guidance=guidance,
+            injection_errors=injection_errors,
+        )
 
     @classmethod
     def get_serialization_name(cls) -> str | None:
-        """Serialization name for agent-spec support."""
+        """Return the name used by custom capability specs."""
         return 'Memory'
+
+
+def _validate_positive(name: str, value: int) -> None:
+    if value <= 0:
+        raise ValueError(f'{name} must be a positive integer')
+
+
+def _validate_non_negative(name: str, value: int) -> None:
+    if value < 0:
+        raise ValueError(f'{name} must be a non-negative integer')
