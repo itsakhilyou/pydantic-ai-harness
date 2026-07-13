@@ -170,12 +170,6 @@ anyio_mode = 'auto'
 [tool.coverage.run]
 branch = true
 source = ['pydantic_ai_harness', 'tests']
-# `test_temporal.py` is skipped wholesale -- CodeMode cannot run inside a Temporal
-# workflow with pydantic-monty >=0.0.19b2 (subprocess workers vs the workflow
-# sandbox; see the module docstring). Its body never executes, so exclude the
-# file from coverage rather than pepper every fixture and assertion with pragmas.
-# Drop this once the test is unskipped.
-omit = ['*/tests/code_mode/test_temporal.py']
 
 [tool.coverage.paths]
 source = ['.', '/home/runner/work/pydantic-ai-harness/pydantic-ai-harness']

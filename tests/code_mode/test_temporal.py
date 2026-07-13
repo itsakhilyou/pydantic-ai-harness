@@ -1,8 +1,12 @@
 """Temporal integration tests for CodeMode.
 
 Verifies that the snapshot-based execution loop (`feed_start`/`resume`)
-works inside a Temporal workflow sandbox, which forbids threads and
-`call_soon_threadsafe`.
+works with Temporal's workflow sandbox and history replay.
+
+Monty executes snippets in subprocess workers. Passing `pydantic_monty`
+through Temporal's import sandbox keeps its native module and subprocess pool
+outside the per-workflow sandbox while the rest of the workflow remains
+sandboxed.
 
 These tests start a local Temporal dev server via
 `WorkflowEnvironment.start_local()` -- the Temporal SDK downloads and
@@ -28,7 +32,8 @@ try:
     from temporalio.client import Client
     from temporalio.common import RetryPolicy
     from temporalio.testing import WorkflowEnvironment
-    from temporalio.worker import Worker
+    from temporalio.worker import Replayer, Worker
+    from temporalio.worker.workflow_sandbox import SandboxedWorkflowRunner, SandboxRestrictions
     from temporalio.workflow import ActivityConfig
 except ImportError:  # pragma: lax no cover
     pytest.skip('temporalio not installed', allow_module_level=True)
@@ -50,9 +55,25 @@ BASE_ACTIVITY_CONFIG = ActivityConfig(
 )
 
 
+def _workflow_runner() -> SandboxedWorkflowRunner:
+    return SandboxedWorkflowRunner(
+        restrictions=SandboxRestrictions.default.with_passthrough_modules(
+            'pydantic_monty',
+            # Coverage imports parser modules lazily while tracing workflow code.
+            'coverage',
+        )
+    )
+
+
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
+
+
+@pytest.fixture(scope='module')
+def anyio_backend() -> str:
+    """Temporal's Python SDK runs on asyncio."""
+    return 'asyncio'
 
 
 @pytest.fixture(scope='module')
@@ -142,39 +163,29 @@ class CodeModeWorkflow:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.skip(
-    reason=(
-        'CodeMode cannot execute inside a Temporal workflow with pydantic-monty >=0.0.19b2. '
-        'That release dropped in-process execution (the old `MontyRepl`): `Monty()` now runs '
-        "every snippet in a pool of subprocess workers communicating over IPC. Temporal's "
-        'workflow sandbox forbids spawning subprocesses and blocking I/O, so `with Monty()` '
-        'hangs instead of completing. Re-enable once monty offers a sandbox-safe (in-process) '
-        'execution path, or once run_code is dispatched through a Temporal activity (which may '
-        'run subprocesses).'
-    )
-)
 async def test_code_mode_runs_in_temporal_workflow(client: Client) -> None:
     """CodeMode's snapshot-based execution loop works inside a Temporal workflow.
 
     This is the core regression test for the `call_soon_threadsafe` issue:
     the old `feed_run_async` approach hung because Temporal's sandboxed
     event loop doesn't implement `call_soon_threadsafe`. The snapshot
-    approach (`feed_start`/`resume`) avoids threads entirely.
-
-    Skipped: monty >=0.0.19b2 executes in subprocess workers, which the Temporal
-    workflow sandbox forbids -- see the `skip` reason above.
+    approach (`feed_start`/`resume`) avoids threads entirely. The worker passes
+    `pydantic_monty` through the import sandbox so Monty's subprocess pool can
+    run without disabling Temporal's sandbox for the workflow.
     """
     _captured_tool_defs.clear()
+    workflow_id = 'test_code_mode_temporal_1'
     async with Worker(
         client,
         task_queue=TASK_QUEUE,
         workflows=[CodeModeWorkflow],
         plugins=[AgentPlugin(temporal_code_mode_agent)],
+        workflow_runner=_workflow_runner(),
     ):
         result = await client.execute_workflow(
             CodeModeWorkflow.run,
             args=['Calculate 3 + 4'],
-            id='test_code_mode_temporal_1',
+            id=workflow_id,
             task_queue=TASK_QUEUE,
         )
 
@@ -239,3 +250,11 @@ async def test_code_mode_runs_in_temporal_workflow(client: Client) -> None:
         assert run_code_td.description is not None
         assert 'async def add' in run_code_td.description
         assert run_code_td.parameters_json_schema['properties']['code']['type'] == 'string'
+
+    history = await client.get_workflow_handle(workflow_id).fetch_history()
+    replay_result = await Replayer(
+        workflows=[CodeModeWorkflow],
+        plugins=[PydanticAIPlugin()],
+        workflow_runner=_workflow_runner(),
+    ).replay_workflow(history)
+    assert replay_result.replay_failure is None
