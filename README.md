@@ -136,16 +136,15 @@ It composes with the rest of the harness:
 
 [Full tutorial →](pydantic_ai_harness/dynamic_workflow/)
 
-## Capability matrix
+## Harness capabilities and roadmap
 
-We studied leading coding agents, agent frameworks, and Claw-style assistants to map every capability area that matters for production agents. Each one is tracked as an [issue](https://github.com/pydantic/pydantic-ai-harness/issues) in this repo.
+This table lists capabilities shipped by this package and active proposals for additional harness capabilities.
 
 **Vote on whatever is linked in the Status column** -- PRs if we're actively building it, issues if it's planned -- to help us decide what to work on next.
 
 | Category | Capability | Description | Status | Community&nbsp;alternatives |
 |---|---|---|---|---|
 | **Tools &&nbsp;execution** | **Code mode** | Sandboxed Python execution via [Monty](https://github.com/pydantic/monty) -- one `run_code` call replaces N tool calls | :white_check_mark: [Docs](pydantic_ai_harness/code_mode/) | |
-| | **Tool search** | Progressive tool discovery for large tool sets | :white_check_mark: [Pydantic&nbsp;AI](https://pydantic.dev/docs/ai/tools-toolsets/toolsets/#deferred-loading) | |
 | | **File system** | Read, write, edit, search files with path traversal prevention | :white_check_mark: [Docs](pydantic_ai_harness/filesystem/) | [pydantic-ai-backend](https://github.com/vstorm-co/pydantic-ai-backend) (vstorm&#8209;co) |
 | | **Shell** | Execute commands with allowlists, denylists, and timeouts | :white_check_mark: [Docs](pydantic_ai_harness/shell/) | [pydantic-ai-backend](https://github.com/vstorm-co/pydantic-ai-backend) (vstorm&#8209;co) |
 | | **Repo context injection** | Auto-load CLAUDE.md/AGENTS.md and repo structure | :white_check_mark: [Docs](pydantic_ai_harness/context/) | [pydantic-deep](https://github.com/vstorm-co/pydantic-deepagents) (vstorm&#8209;co) |
@@ -168,12 +167,8 @@ We studied leading coding agents, agent frameworks, and Claw-style assistants to
 | | **Planning** | Break complex tasks into structured plans before execution | :white_check_mark: [Docs](pydantic_ai_harness/planning/) | |
 | | **Runtime authoring** | Let an agent author, validate, and load real capabilities at runtime | :white_check_mark: [Docs](pydantic_ai_harness/runtime_authoring/) | |
 | | **Task tracking** | Track tasks, subtasks, and dependencies | :memo: [#65](https://github.com/pydantic/pydantic-ai-harness/issues/65) | [pydantic-ai-todo](https://github.com/vstorm-co/pydantic-ai-todo) (vstorm&#8209;co) |
-| | **Teams** | Multi-agent teams with shared state and message bus | :memo: [#195](https://github.com/pydantic/pydantic-ai-harness/issues/195) | [pydantic-deep](https://github.com/vstorm-co/pydantic-deepagents) (vstorm&#8209;co) |
 | **Safety &&nbsp;guardrails** | **Input guardrails** | Validate user input before the agent run starts | :white_check_mark: [Docs](pydantic_ai_harness/guardrails/) | [pydantic-ai-shields](https://github.com/vstorm-co/pydantic-ai-shields) (vstorm&#8209;co) |
 | | **Output guardrails** | Validate model output after the run completes | :white_check_mark: [Docs](pydantic_ai_harness/guardrails/) | [pydantic-ai-shields](https://github.com/vstorm-co/pydantic-ai-shields) (vstorm&#8209;co) |
-| | **Cost/token budgets** | Enforce token and cost limits per run | :construction: [PR&nbsp;#182](https://github.com/pydantic/pydantic-ai-harness/pull/182) | [pydantic-ai-shields](https://github.com/vstorm-co/pydantic-ai-shields) (vstorm&#8209;co) |
-| | **Tool access control** | Block tools or require approval before execution | :construction: [PR&nbsp;#182](https://github.com/pydantic/pydantic-ai-harness/pull/182) | [pydantic-ai-shields](https://github.com/vstorm-co/pydantic-ai-shields) (vstorm&#8209;co) |
-| | **Async guardrails** | Run validation concurrently with model requests | :construction: [PR&nbsp;#182](https://github.com/pydantic/pydantic-ai-harness/pull/182) | [pydantic-ai-shields](https://github.com/vstorm-co/pydantic-ai-shields) (vstorm&#8209;co) |
 | | **Secret masking** | Detect and redact secrets in agent I/O | :construction: [PR&nbsp;#172](https://github.com/pydantic/pydantic-ai-harness/pull/172) | [pydantic-ai-shields](https://github.com/vstorm-co/pydantic-ai-shields) (vstorm&#8209;co) |
 | | **Approval workflows** | Require human approval for sensitive operations | :construction: [PR&nbsp;#173](https://github.com/pydantic/pydantic-ai-harness/pull/173) | [Pydantic&nbsp;AI](https://ai.pydantic.dev/deferred-tools/#human-in-the-loop-tool-approval) (built&#8209;in) |
 | | **Tool budget** | Limit total tool calls or cost per run | :construction: [PR&nbsp;#168](https://github.com/pydantic/pydantic-ai-harness/pull/168) | |
