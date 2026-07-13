@@ -434,23 +434,19 @@ class TestListDirectory:
         result = await toolset.list_directory('empty')
         assert result == '(empty directory)'
 
-    async def test_list_hides_protected_entries(self, fs_root: Path) -> None:
-        # .env is protected by the default toolset fixture; .git is hidden by
-        # the dotfile filter, but a directory that is itself explicitly
-        # protected is also hidden from listings.
-        (fs_root / 'visible.txt').write_text('ok\n')
+    async def test_list_shows_protected_entries(self, fs_root: Path) -> None:
+        (fs_root / 'protected.txt').write_text('protected marker\n')
         ts = FileSystemToolset(
             root_dir=fs_root,
             allowed_patterns=[],
             denied_patterns=[],
-            protected_patterns=['.env', '.env.*'],
+            protected_patterns=['*'],
             max_read_lines=2000,
             max_search_results=1000,
             max_find_results=1000,
         )
-        result = await ts.list_directory('.')
-        assert 'visible.txt' in result
-        assert '.env' not in result
+
+        assert 'protected.txt' in await ts.list_directory('.')
 
     async def test_list_root_allowed_patterns_filters_entries(self, fs_root: Path) -> None:
         # A file-shaped allowed pattern must not make the root unlistable: '.'
@@ -540,23 +536,19 @@ class TestSearchFiles:
         result = await ts.search_files('findme')
         assert 'truncated at 50 matches' in result
 
-    async def test_search_skips_protected_contents(self, fs_root: Path) -> None:
-        # The .env file has matching content but should be filtered by the
-        # recursive walker before its bytes are read.
-        (fs_root / 'visible.txt').write_text('SECRET=matchme\n')
-        (fs_root / '.env').write_text('SECRET=matchme\n')
+    async def test_search_includes_protected_files(self, fs_root: Path) -> None:
+        (fs_root / 'protected.txt').write_text('protected marker\n')
         ts = FileSystemToolset(
             root_dir=fs_root,
             allowed_patterns=[],
             denied_patterns=[],
-            protected_patterns=['.env', '.env.*'],
+            protected_patterns=['*'],
             max_read_lines=2000,
             max_search_results=1000,
             max_find_results=1000,
         )
-        result = await ts.search_files('matchme')
-        assert 'visible.txt' in result
-        assert '.env' not in result
+
+        assert 'protected.txt:1:protected marker' in await ts.search_files('protected marker')
 
     async def test_search_skips_denied_files(self, fs_root: Path) -> None:
         (fs_root / 'visible.txt').write_text('lookhere\n')
@@ -639,21 +631,19 @@ class TestFindFiles:
         result = await ts.find_files('*.dat')
         assert 'truncated at 5 matches' in result
 
-    async def test_find_hides_protected_entries(self, fs_root: Path) -> None:
-        (fs_root / 'visible.txt').write_text('ok\n')
-        (fs_root / '.env').write_text('SECRET=abc\n')
+    async def test_find_includes_protected_files(self, fs_root: Path) -> None:
+        (fs_root / 'protected.txt').write_text('protected marker\n')
         ts = FileSystemToolset(
             root_dir=fs_root,
             allowed_patterns=[],
             denied_patterns=[],
-            protected_patterns=['.env', '.env.*'],
+            protected_patterns=['*'],
             max_read_lines=2000,
             max_search_results=1000,
             max_find_results=1000,
         )
-        result = await ts.find_files('*')
-        assert 'visible.txt' in result
-        assert '.env' not in result
+
+        assert 'protected.txt' in await ts.find_files('*.txt')
 
     async def test_find_hides_denied_entries(self, fs_root: Path) -> None:
         (fs_root / 'visible.txt').write_text('ok\n')
@@ -1106,7 +1096,7 @@ class TestPatternCanonicalization:
         with pytest.raises(ModelRetry, match='denied'):
             await ts.read_file('config/./secret.txt')
 
-    async def test_root_level_secrets_hidden_from_search(self, fs_root: Path) -> None:
+    async def test_root_level_secrets_readable_but_protected_from_write(self, fs_root: Path) -> None:
         (fs_root / 'secrets.yaml').write_text('api: PRIVATE KEY material\n')
         ts = FileSystemToolset(
             root_dir=fs_root,
@@ -1117,6 +1107,6 @@ class TestPatternCanonicalization:
             max_search_results=1000,
             max_find_results=1000,
         )
-        # `**/secrets*` must protect a root-level secrets file, not just nested ones.
-        result = await ts.search_files('PRIVATE KEY')
-        assert 'secrets.yaml' not in result
+        assert 'secrets.yaml:1:api: PRIVATE KEY material' in await ts.search_files('PRIVATE KEY')
+        with pytest.raises(ModelRetry, match='protected'):
+            await ts.write_file('secrets.yaml', 'changed\n')

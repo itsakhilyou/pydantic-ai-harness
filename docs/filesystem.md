@@ -116,19 +116,20 @@ The three rules apply at two different granularities:
   `create_directory`) gates the operation's target path. You must name a path
   that the patterns permit.
 - **Walkers** (`list_directory`, `search_files`, `find_files`) gate their root
-  by deny/protected patterns, but **not** by `allowed_patterns` -- a directory
-  root like `.` never matches a file pattern such as `src/*.py`, so requiring
-  it to would make every listing fail. Instead, the root is always walked and
-  each **entry** is filtered against all three lists. A directory listing can
-  never surface a path the agent couldn't otherwise read or write.
+  by denied patterns, but **not** by `allowed_patterns` -- a directory root
+  like `.` never matches a file pattern such as `src/*.py`, so requiring it to
+  would make every listing fail. Instead, the root is walked and each
+  **entry** is filtered with read-level access against `allowed_patterns` and
+  `denied_patterns`. A directory listing cannot surface a path the agent
+  couldn't otherwise read.
 
 So with `allowed_patterns=['*.py']`, `list_directory('.')` succeeds and shows
 only the `.py` entries; `read_file('notes.md')` is rejected.
 
-Note that the walkers filter entries with write-level access, so
-`protected_patterns` matches are omitted from `list_directory`, `search_files`,
-and `find_files` output even though those exact paths remain directly readable
-via `read_file`/`file_info`.
+Matching `protected_patterns` alone does not hide an entry. Protected paths
+that pass the allowed, denied, and dotfile filters remain visible to all three
+walkers and directly readable via `read_file`/`file_info`; write operations
+reject them.
 
 !!! note
     Dotfiles and dot-directories (`.git`, `.env`, `.github`, ...) are skipped by
