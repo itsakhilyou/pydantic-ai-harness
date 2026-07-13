@@ -6,7 +6,8 @@ import inspect
 import keyword
 import re
 import warnings
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Generator, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from typing import Annotated, Any
 
@@ -45,7 +46,7 @@ except ImportError as _import_error:  # pragma: no cover
     raise ImportError(
         'pydantic-monty is required for CodeMode. Install it with: pip install "pydantic-ai-harness[code-mode]"'
     ) from _import_error
-from typing_extensions import NotRequired, TypedDict
+from typing_extensions import NotRequired, Self, TypedDict
 
 from pydantic_ai_harness._monty_exec import MontyExecutor, PrintCapture, is_sandbox_panic
 
@@ -289,6 +290,13 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
     # (`session.dump()`), reloaded into a fresh session on the next call.
     _repl_state: bytes | None = field(default=None, init=False, repr=False)
 
+    # The Monty worker pool, created in `__aenter__` and reused by every `run_code` call for
+    # the lifetime of the entered toolset (one pool per agent run, rather than one per call).
+    # `None` when the toolset was not entered through its lifecycle -- `call_tool` then falls
+    # back to a per-call pool. init=False so `for_run` copies start poolless and each entered
+    # copy creates its own; `for_run_step` copies borrow the entered instance's pool by reference.
+    _monty_pool: Monty | None = field(default=None, init=False, repr=False, compare=False)
+
     # Catalog string stashed during `get_tools` (when `dynamic_catalog`) and read back by
     # `get_instructions` in the same step. Empty when there's nothing to surface.
     _last_catalog: str = field(default='', init=False, repr=False)
@@ -309,9 +317,40 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
             return self
         new_self = replace(self, wrapped=new_wrapped)
         new_self._repl_state = self._repl_state
+        new_self._monty_pool = self._monty_pool
         new_self._warned_deferred = self._warned_deferred
         new_self._last_catalog = self._last_catalog
         return new_self
+
+    async def __aenter__(self) -> Self:
+        """Create the Monty worker pool for this toolset's lifetime, then enter the wrapped toolset.
+
+        The pool is created before entering the wrapped toolset so that a failure to spawn workers
+        (e.g. inside a durable-execution sandbox that forbids subprocesses) fails fast without
+        leaving the wrapped toolset half-entered.
+        """
+        self._monty_pool = Monty().__enter__()
+        await self.wrapped.__aenter__()
+        return self
+
+    async def __aexit__(self, *args: Any) -> bool | None:
+        """Exit the wrapped toolset, then tear down the worker pool."""
+        assert self._monty_pool is not None
+        monty_pool = self._monty_pool
+        self._monty_pool = None
+        try:
+            return await self.wrapped.__aexit__(*args)
+        finally:
+            monty_pool.__exit__(*args)
+
+    @contextmanager
+    def _acquire_pool(self) -> Generator[Monty]:
+        """Yield the pool created in `__aenter__`; if the toolset was not entered, spin up a per-call pool."""
+        if self._monty_pool is not None:
+            yield self._monty_pool
+        else:
+            with Monty() as pool:
+                yield pool
 
     async def get_instructions(
         self, ctx: RunContext[AgentDepsT]
@@ -546,7 +585,7 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
         capture = PrintCapture()
 
         try:
-            with Monty() as monty_pool:
+            with self._acquire_pool() as monty_pool:
                 with monty_pool.checkout(type_check=type_check, type_check_stubs=type_check_stubs) as session:
                     if self._repl_state is not None:
                         session.load(self._repl_state)
