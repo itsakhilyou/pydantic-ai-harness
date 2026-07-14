@@ -71,6 +71,10 @@ class TestConstruction:
         with pytest.raises(ValueError, match='Specify allowed_services or denied_services, not both.'):
             _toolset(allowed_services=['s3'], denied_services=['dynamodb'])
 
+    def test_non_positive_max_output_chars_rejected(self) -> None:
+        with pytest.raises(ValueError, match='max_output_chars must be a positive integer.'):
+            _toolset(max_output_chars=0)
+
 
 class TestAwsCli:
     async def test_injects_endpoint_region_and_command(self, tmp_path: Path) -> None:
@@ -333,12 +337,12 @@ class TestContainerManagement:
 
     async def test_managed_defaults_to_edge_port_when_endpoint_has_no_port(self, tmp_path: Path) -> None:
         docker, log = _docker_stub(tmp_path)
-        with pytest.raises(LocalStackError, match='did not become ready within 0.05s'):
+        with pytest.raises(LocalStackError, match='did not become ready within 0.3s'):
             async with _toolset(
                 endpoint_url='http://localhost',
                 manage_container=True,
                 docker_path=docker,
-                startup_timeout=0.05,
+                startup_timeout=0.3,
             ):
                 pass  # pragma: no cover
         log_text = log.read_text()

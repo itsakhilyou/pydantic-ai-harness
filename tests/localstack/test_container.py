@@ -68,6 +68,14 @@ def _failing_docker_stub(tmp_path: Path) -> str:
     return str(stub)
 
 
+def _hanging_docker_stub(tmp_path: Path) -> str:
+    """A fake `docker` CLI that never returns, standing in for an unresponsive daemon."""
+    stub = tmp_path / 'docker-hang'
+    stub.write_text('#!/bin/sh\nsleep 30\n')
+    stub.chmod(stub.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
+    return str(stub)
+
+
 class TestProperties:
     def test_endpoint_url(self, tmp_path: Path) -> None:
         docker, _ = _docker_stub(tmp_path)
@@ -235,10 +243,10 @@ class TestLifecycle:
     async def test_readiness_timeout_stops_container(self, tmp_path: Path) -> None:
         docker, log = _docker_stub(tmp_path)
         port = unused_tcp_port()
-        with pytest.raises(LocalStackError, match='did not become ready within 0.05s'):
-            async with LocalStackContainer(
-                docker_path=docker, host_port=port, startup_timeout=0.05, poll_interval=0.01
-            ):
+        # startup_timeout must clear `docker run` (the stub subprocess) so the deadline
+        # is spent on readiness polling, which never succeeds against the unused port.
+        with pytest.raises(LocalStackError, match='did not become ready within 0.3s'):
+            async with LocalStackContainer(docker_path=docker, host_port=port, startup_timeout=0.3, poll_interval=0.01):
                 pass  # pragma: no cover
         assert 'stop container-abc123' in log.read_text()
 
@@ -251,6 +259,17 @@ class TestLifecycle:
         with pytest.raises(LocalStackError, match='Failed to start LocalStack container: boom: port in use'):
             async with LocalStackContainer(docker_path=_failing_docker_stub(tmp_path)):
                 pass  # pragma: no cover
+
+    async def test_start_timeout_when_docker_hangs(self, tmp_path: Path) -> None:
+        with pytest.raises(LocalStackError, match='did not become ready within 0.05s'):
+            async with LocalStackContainer(docker_path=_hanging_docker_stub(tmp_path), startup_timeout=0.05):
+                pass  # pragma: no cover
+
+    async def test_stop_timeout_is_swallowed_when_docker_hangs(self, tmp_path: Path) -> None:
+        container = LocalStackContainer(docker_path=_hanging_docker_stub(tmp_path), startup_timeout=0.05)
+        container._container_id = 'stuck'
+        await container.__aexit__(None, None, None)
+        assert container.container_id is None
 
     async def test_exit_without_start_is_safe(self, tmp_path: Path) -> None:
         docker, log = _docker_stub(tmp_path)

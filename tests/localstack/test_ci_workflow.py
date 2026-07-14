@@ -29,6 +29,16 @@ def test_localstack_ci_authenticates_with_an_auth_token() -> None:
 
     # The single image requires a token since LocalStack 2026.03.0; the deprecated
     # LOCALSTACK_ACKNOWLEDGE_ACCOUNT_REQUIREMENT bypass expired and must not return.
-    assert '      LOCALSTACK_AUTH_TOKEN: ${{ secrets.LOCALSTACK_AUTH_TOKEN }}' in lines
     assert "      LOCALSTACK_REQUIRE_AUTH_TOKEN: '1'" in lines
     assert not any('LOCALSTACK_ACKNOWLEDGE_ACCOUNT_REQUIREMENT' in line for line in lines)
+
+
+def test_localstack_ci_scopes_the_auth_token_to_the_test_step() -> None:
+    lines = _workflow_lines()
+
+    # The token is scoped to the integration-test step, not the job-level env, so
+    # the checkout and setup steps never receive the secret.
+    run_index = lines.index('      - run: make integration-localstack')
+    step_block = lines[run_index : run_index + 4]
+    assert '          LOCALSTACK_AUTH_TOKEN: ${{ secrets.LOCALSTACK_AUTH_TOKEN }}' in step_block
+    assert '      LOCALSTACK_AUTH_TOKEN: ${{ secrets.LOCALSTACK_AUTH_TOKEN }}' not in lines

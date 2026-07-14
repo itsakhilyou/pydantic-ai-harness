@@ -160,10 +160,9 @@ jobs:
     # satisfies zizmor's secrets-outside-env audit (same pattern as the release job).
     environment: localstack-integration
     env:
-      # Since LocalStack 2026.03.0 the single image requires an auth token to
-      # start, so the live tests need it. LOCALSTACK_REQUIRE_AUTH_TOKEN makes a
-      # missing token fail the job instead of silently skipping the container tests.
-      LOCALSTACK_AUTH_TOKEN: ${{ secrets.LOCALSTACK_AUTH_TOKEN }}
+      # LOCALSTACK_REQUIRE_AUTH_TOKEN makes a missing token fail the job instead
+      # of silently skipping the container tests. The token itself is scoped to
+      # the test step below so checkout/setup steps never see the secret.
       LOCALSTACK_REQUIRE_AUTH_TOKEN: '1'
       LOCALSTACK_AWS_CLI: aws
       LOCALSTACK_IMAGE: localstack/localstack
@@ -188,6 +187,9 @@ jobs:
       - run: aws --version
 
       - run: make integration-localstack
+        env:
+          # Since LocalStack 2026.03.0 the single image requires an auth token to start.
+          LOCALSTACK_AUTH_TOKEN: ${{ secrets.LOCALSTACK_AUTH_TOKEN }}
 
   coverage:
     needs: [test]

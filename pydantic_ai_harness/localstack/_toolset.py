@@ -77,6 +77,8 @@ class LocalStackToolset(FunctionToolset[AgentDepsT]):
         super().__init__()
         if allowed_services and denied_services:
             raise ValueError('Specify allowed_services or denied_services, not both.')
+        if max_output_chars <= 0:
+            raise ValueError('max_output_chars must be a positive integer.')
 
         self._endpoint_url = endpoint_url
         self._region = region

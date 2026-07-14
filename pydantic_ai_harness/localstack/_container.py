@@ -85,10 +85,18 @@ class LocalStackContainer:
         return self._container_id
 
     async def __aenter__(self) -> Self:
-        """Start the container and wait for it to become ready."""
-        self._container_id = await self._start()
+        """Start the container and wait for it to become ready.
+
+        `startup_timeout` bounds the whole sequence, so an unresponsive Docker
+        daemon that hangs `docker run` fails here rather than blocking forever.
+        """
         try:
-            await self._wait_until_ready()
+            with anyio.fail_after(self._startup_timeout):
+                self._container_id = await self._start()
+                await self._wait_until_ready()
+        except TimeoutError as e:
+            await self._stop()
+            raise LocalStackError(f'LocalStack did not become ready within {self._startup_timeout}s.') from e
         except BaseException:
             await self._stop()
             raise
@@ -162,15 +170,11 @@ class LocalStackContainer:
         return result.stdout.decode('utf-8', errors='replace').strip()
 
     async def _wait_until_ready(self) -> None:
-        """Poll the health endpoint until LocalStack responds or the timeout elapses."""
+        """Poll the health endpoint until LocalStack responds; `__aenter__` bounds the wait."""
         url = self._readiness_url
-        try:
-            with anyio.fail_after(self._startup_timeout):
-                async with httpx.AsyncClient() as client:
-                    while not await self._is_ready(client, url):
-                        await anyio.sleep(self._poll_interval)
-        except TimeoutError as e:
-            raise LocalStackError(f'LocalStack did not become ready within {self._startup_timeout}s.') from e
+        async with httpx.AsyncClient() as client:
+            while not await self._is_ready(client, url):
+                await anyio.sleep(self._poll_interval)
 
     async def _is_ready(self, client: httpx.AsyncClient, url: str) -> bool:
         """Return True once the health endpoint answers with HTTP 200."""
@@ -188,6 +192,7 @@ class LocalStackContainer:
         self._container_id = None
         with anyio.CancelScope(shield=True):
             try:
-                await anyio.run_process([self._docker_path, 'stop', container_id], check=False)
-            except FileNotFoundError:
+                with anyio.fail_after(self._startup_timeout):
+                    await anyio.run_process([self._docker_path, 'stop', container_id], check=False)
+            except (FileNotFoundError, TimeoutError):
                 pass
