@@ -337,12 +337,12 @@ class TestContainerManagement:
 
     async def test_managed_defaults_to_edge_port_when_endpoint_has_no_port(self, tmp_path: Path) -> None:
         docker, log = _docker_stub(tmp_path)
-        with pytest.raises(LocalStackError, match='did not become ready within 0.3s'):
+        with pytest.raises(LocalStackError, match='did not become ready within 1.0s'):
             async with _toolset(
                 endpoint_url='http://localhost',
                 manage_container=True,
                 docker_path=docker,
-                startup_timeout=0.3,
+                startup_timeout=1.0,
             ):
                 pass  # pragma: no cover
         log_text = log.read_text()

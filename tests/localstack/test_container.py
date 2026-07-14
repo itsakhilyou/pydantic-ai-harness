@@ -71,7 +71,8 @@ def _failing_docker_stub(tmp_path: Path) -> str:
 def _hanging_docker_stub(tmp_path: Path) -> str:
     """A fake `docker` CLI that never returns, standing in for an unresponsive daemon."""
     stub = tmp_path / 'docker-hang'
-    stub.write_text('#!/bin/sh\nsleep 30\n')
+    # `exec` so the shell becomes `sleep`, letting the timeout's kill reap a single process.
+    stub.write_text('#!/bin/sh\nexec sleep 30\n')
     stub.chmod(stub.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
     return str(stub)
 
@@ -243,10 +244,10 @@ class TestLifecycle:
     async def test_readiness_timeout_stops_container(self, tmp_path: Path) -> None:
         docker, log = _docker_stub(tmp_path)
         port = unused_tcp_port()
-        # startup_timeout must clear `docker run` (the stub subprocess) so the deadline
-        # is spent on readiness polling, which never succeeds against the unused port.
-        with pytest.raises(LocalStackError, match='did not become ready within 0.3s'):
-            async with LocalStackContainer(docker_path=docker, host_port=port, startup_timeout=0.3, poll_interval=0.01):
+        # startup_timeout also bounds `docker run` (the stub subprocess); keep it well
+        # above subprocess-spawn time so the readiness poll, not the launch, times out.
+        with pytest.raises(LocalStackError, match='did not become ready within 1.0s'):
+            async with LocalStackContainer(docker_path=docker, host_port=port, startup_timeout=1.0, poll_interval=0.01):
                 pass  # pragma: no cover
         assert 'stop container-abc123' in log.read_text()
 
@@ -261,7 +262,7 @@ class TestLifecycle:
                 pass  # pragma: no cover
 
     async def test_start_timeout_when_docker_hangs(self, tmp_path: Path) -> None:
-        with pytest.raises(LocalStackError, match='did not become ready within 0.05s'):
+        with pytest.raises(LocalStackError, match='Docker did not start the LocalStack container within 0.05s'):
             async with LocalStackContainer(docker_path=_hanging_docker_stub(tmp_path), startup_timeout=0.05):
                 pass  # pragma: no cover
 

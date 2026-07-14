@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import os
+import subprocess
 from collections.abc import Mapping
 from pathlib import Path
 
 import anyio
+import anyio.to_thread
 import httpx
 from typing_extensions import Self
 
@@ -85,18 +87,10 @@ class LocalStackContainer:
         return self._container_id
 
     async def __aenter__(self) -> Self:
-        """Start the container and wait for it to become ready.
-
-        `startup_timeout` bounds the whole sequence, so an unresponsive Docker
-        daemon that hangs `docker run` fails here rather than blocking forever.
-        """
+        """Start the container and wait for it to become ready."""
+        self._container_id = await self._start()
         try:
-            with anyio.fail_after(self._startup_timeout):
-                self._container_id = await self._start()
-                await self._wait_until_ready()
-        except TimeoutError as e:
-            await self._stop()
-            raise LocalStackError(f'LocalStack did not become ready within {self._startup_timeout}s.') from e
+            await self._wait_until_ready()
         except BaseException:
             await self._stop()
             raise
@@ -151,18 +145,37 @@ class LocalStackContainer:
         environment.update(container_environment)
         return environment
 
+    async def _run_docker(self, argv: list[str], environment: Mapping[str, str]) -> subprocess.CompletedProcess[bytes]:
+        """Run a docker command in a worker thread, bounded by `startup_timeout`.
+
+        A blocking `subprocess.run` with a timeout is used instead of an async
+        subprocess because it kills and reaps the child when the timeout fires.
+        Cancelling an async subprocess mid-run can leave a dangling process on
+        the asyncio backend, so an unresponsive daemon would otherwise leak a
+        process (and emit unraisable-exception warnings) instead of failing cleanly.
+        """
+        docker_env = dict(environment)
+
+        def run() -> subprocess.CompletedProcess[bytes]:
+            return subprocess.run(argv, env=docker_env, capture_output=True, timeout=self._startup_timeout)
+
+        return await anyio.to_thread.run_sync(run)
+
     async def _start(self) -> str:
         """Launch the container detached and return its id."""
         container_environment = self._effective_environment()
         try:
-            result = await anyio.run_process(
+            result = await self._run_docker(
                 self._run_argv(container_environment),
-                env=self._docker_environment(container_environment),
-                check=False,
+                self._docker_environment(container_environment),
             )
         except FileNotFoundError as e:
             raise LocalStackError(
                 f'Docker CLI {self._docker_path!r} not found. Install Docker to manage LocalStack.'
+            ) from e
+        except subprocess.TimeoutExpired as e:
+            raise LocalStackError(
+                f'Docker did not start the LocalStack container within {self._startup_timeout}s.'
             ) from e
         if result.returncode != 0:
             stderr = result.stderr.decode('utf-8', errors='replace').strip()
@@ -170,11 +183,15 @@ class LocalStackContainer:
         return result.stdout.decode('utf-8', errors='replace').strip()
 
     async def _wait_until_ready(self) -> None:
-        """Poll the health endpoint until LocalStack responds; `__aenter__` bounds the wait."""
+        """Poll the health endpoint until LocalStack responds or `startup_timeout` elapses."""
         url = self._readiness_url
-        async with httpx.AsyncClient() as client:
-            while not await self._is_ready(client, url):
-                await anyio.sleep(self._poll_interval)
+        try:
+            with anyio.fail_after(self._startup_timeout):
+                async with httpx.AsyncClient() as client:
+                    while not await self._is_ready(client, url):
+                        await anyio.sleep(self._poll_interval)
+        except TimeoutError as e:
+            raise LocalStackError(f'LocalStack did not become ready within {self._startup_timeout}s.') from e
 
     async def _is_ready(self, client: httpx.AsyncClient, url: str) -> bool:
         """Return True once the health endpoint answers with HTTP 200."""
@@ -192,7 +209,6 @@ class LocalStackContainer:
         self._container_id = None
         with anyio.CancelScope(shield=True):
             try:
-                with anyio.fail_after(self._startup_timeout):
-                    await anyio.run_process([self._docker_path, 'stop', container_id], check=False)
-            except (FileNotFoundError, TimeoutError):
+                await self._run_docker([self._docker_path, 'stop', container_id], self._docker_environment({}))
+            except (FileNotFoundError, subprocess.TimeoutExpired):
                 pass

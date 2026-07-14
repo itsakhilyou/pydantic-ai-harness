@@ -33,6 +33,15 @@ def test_localstack_ci_authenticates_with_an_auth_token() -> None:
     assert not any('LOCALSTACK_ACKNOWLEDGE_ACCOUNT_REQUIREMENT' in line for line in lines)
 
 
+def test_localstack_ci_gates_the_aggregate_check() -> None:
+    lines = _workflow_lines()
+
+    # The aggregate `check` job must depend on localstack-integration so a live
+    # test failure blocks merges rather than passing silently.
+    needs = next(line for line in lines if line.strip().startswith('needs: [lint, test'))
+    assert 'localstack-integration' in needs
+
+
 def test_localstack_ci_scopes_the_auth_token_to_the_test_step() -> None:
     lines = _workflow_lines()
 
