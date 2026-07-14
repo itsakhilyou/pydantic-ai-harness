@@ -116,8 +116,16 @@ _RUN_CODE_DESCRIPTION_TAIL = """\
 State is preserved between calls (REPL-style). Set `restart: true` to reset state.
 
 The last expression's value is automatically captured as the return value -- you do **not** need to \
-`print()` it. Avoid `print()` for return values as it produces Python string representations, not \
-structured data. Use `print()` only for supplementary logging or debug output.
+`print()` it. End the snippet with the value to return as a bare expression. A final assignment stores \
+the value but does not return it. For example:
+
+```python
+result = some_expression
+result
+```
+
+Avoid `print()` for return values as it produces Python string representations, not structured data. \
+Use `print()` only for supplementary logging or debug output.
 
 Returns the last expression's value directly. If `print()` was also called, returns \
 `{"output": "<printed text>", "result": <last expression>}`.\
@@ -149,15 +157,15 @@ def _functions_header(*, has_sync: bool, has_async: bool) -> str:
     if has_async and not has_sync:
         return base + (
             ' All tool functions are async: invoke them with `await`,'
-            ' e.g. `result = await tool_name(arg=value)`.'
+            ' e.g. `await tool_name(arg=value)`.'
             ' Calling without `await` returns an unresolved future, not the value.'
         )
     if has_sync and not has_async:
-        return base + (' All tool functions are synchronous: call them directly, e.g. `result = tool_name(arg=value)`.')
+        return base + (' All tool functions are synchronous: call them directly, e.g. `tool_name(arg=value)`.')
     return base + (
         ' Async functions (`async def`) must be invoked with `await`,'
-        ' e.g. `result = await tool_name(arg=value)`.'
-        ' Sync functions (`def`) are called directly, e.g. `result = tool_name(arg=value)`.'
+        ' e.g. `await tool_name(arg=value)`.'
+        ' Sync functions (`def`) are called directly, e.g. `tool_name(arg=value)`.'
     )
 
 

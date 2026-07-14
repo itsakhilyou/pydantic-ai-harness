@@ -236,6 +236,20 @@ class TestCodeMode:
         # The base description must tell the model to await tool calls.
         assert 'await' in description
 
+    async def test_run_code_description_explains_final_expression_return(self) -> None:
+        """The model is told how to return a value after assigning it."""
+        wrapper = CodeMode[object]().get_wrapper_toolset(_build_function_toolset(add))
+        assert isinstance(wrapper, CodeModeToolset)
+
+        tools = await wrapper.get_tools(build_run_context(None))
+        description = tools['run_code'].tool_def.description
+
+        assert description is not None
+        assert 'End the snippet with the value to return as a bare expression.' in description
+        assert 'result = some_expression\nresult' in description
+        assert 'e.g. `await tool_name(arg=value)`.' in description
+        assert 'e.g. `result = await tool_name(arg=value)`.' not in description
+
     async def test_run_code_executes_call_through_monty(self) -> None:
         """End-to-end: `run_code` runs Python in Monty and dispatches to a sync wrapped tool."""
         toolset = _build_function_toolset(add)
