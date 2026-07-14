@@ -233,6 +233,79 @@ own writes, but those writes do **not** reach the host. Pass `mode='read-write'`
 
 > Monty-specific: these hooks use Monty's `AbstractOS`/`MountDir` types.
 
+## Durable execution
+
+### Temporal
+
+Monty executes snippets in subprocess workers, and Temporal's workflow sandbox
+forbids the environment and filesystem access the pool needs to spawn them (a
+workflow task that blocked on a subprocess would also trip the SDK's deadlock
+detector). Plain `CodeMode` therefore refuses to start inside a workflow. Use
+`TemporalCodeMode` instead, which moves sandbox execution into activities:
+
+```python
+from pydantic_ai import Agent
+from pydantic_ai.durable_exec.temporal import AgentPlugin, TemporalAgent
+from pydantic_ai_harness.code_mode.temporal import CodeModePlugin, TemporalCodeMode
+
+code_mode = TemporalCodeMode()
+agent = Agent('openai:gpt-5', name='my_agent', capabilities=[code_mode])
+temporal_agent = TemporalAgent(agent)
+
+worker = Worker(
+    client,
+    task_queue='my-queue',
+    workflows=[MyWorkflow],
+    plugins=[AgentPlugin(temporal_agent), CodeModePlugin(code_mode)],
+)
+```
+
+A `start` activity feeds the snippet into Monty and drives it until it needs
+tool results, then returns the suspended interpreter as a serialized dump. The
+workflow dispatches the pending tool calls through the regular toolset path,
+so each nested tool call stays its own recorded, retryable activity. A
+`resume` activity restores the dump (typically on a different worker process)
+and continues. The workflow itself never touches Monty: on history replay,
+sandbox segments are served from recorded activity results instead of being
+re-executed, and workflow-only workers do not need the `monty` binary.
+
+`TemporalCodeMode` adds three settings on top of `CodeMode`:
+
+- `activity_name` distinguishes activity names when several differently
+  configured instances share one worker. A single instance can serve several
+  agents.
+- `request_timeout` (default 60s) is the per-segment watchdog enforced by the
+  Monty pool. Model-written code can loop forever; the watchdog kills the
+  worker and reports a retryable "code took too long" error to the model
+  instead of leaving the activity to time out and retry the same loop.
+- `activity_config` sets the Temporal options for the sandbox activities
+  (default: 120s start-to-close, 3 attempts).
+
+Temporal-specific caveats:
+
+- Interpreter dumps and tool results travel through activity payloads, which
+  Temporal caps at 2MB by default. A REPL holding very large values can exceed
+  that.
+- `mount` entries with `mode='overlay'` lose their writes at each suspension:
+  overlay writes do not survive across a tool call in the same snippet.
+  Read-only and read-write mounts must point at paths available on every
+  activity worker.
+- `os_access` handlers run inside activities and may run again when an
+  activity is retried.
+- Tool exceptions re-enter the sandbox rebuilt from their type name and
+  message, so `except SomeCustomError` in sandbox code only matches built-in
+  exception types.
+- A Monty worker crash (or `request_timeout` kill) resets the REPL session and
+  surfaces as a model retry, where the local path lets `MontyCrashedError`
+  propagate and fail the run.
+- The sandbox activities do not heartbeat, so a worker crash mid-segment is
+  detected when the activity `start_to_close_timeout` expires.
+
+### DBOS
+
+DBOS places no restrictions on subprocesses in workflows, so plain `CodeMode`
+works with `DBOSAgent` as-is.
+
 ## Sandbox restrictions
 
 Code runs inside [Monty](https://github.com/pydantic/monty), a sandboxed Python subset. Key restrictions:

@@ -1280,8 +1280,11 @@ async def test_cancellation_closes_unscheduled_coroutines() -> None:
             task = asyncio.ensure_future(executor.run(state))
             await started.wait()
             task.cancel()
-            with pytest.raises(asyncio.CancelledError):
-                await task
+            # `gather(return_exceptions=True)` instead of `pytest.raises(...): await task`:
+            # a CancelledError thrown into a bare `await task` leaves coverage unable to
+            # record the with-body branch arc on Python 3.14.
+            await asyncio.gather(task, return_exceptions=True)
+            assert task.cancelled()
 
 
 # --- Runtime reveal --------------------------------------------------------

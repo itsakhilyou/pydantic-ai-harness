@@ -8,6 +8,7 @@ loaded by the project (no extra dev dependency needed).
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 from typing import Any, TypeVar
 
@@ -1606,6 +1607,29 @@ class TestCodeMode:
         tools = await wrapper.get_tools(ctx)
         with pytest.raises(_Boom):
             await wrapper.call_tool('run_code', {'code': 'await add(a=1, b=2)'}, ctx, tools['run_code'])
+
+    async def test_enter_without_temporalio_imported(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # The Temporal-workflow guard in `__aenter__` must be a no-op when temporalio was
+        # never imported. Other test modules import temporalio at collection time, so drop
+        # it from `sys.modules` to reproduce an environment without it.
+        monkeypatch.delitem(sys.modules, 'temporalio.workflow', raising=False)
+        wrapper = CodeMode[None]().get_wrapper_toolset(_build_function_toolset(add))
+        assert isinstance(wrapper, CodeModeToolset)
+        async with wrapper:
+            pass
+
+    async def test_wrapped_enter_failure_tears_down_pool(self) -> None:
+        # `__aexit__` is never called when `__aenter__` raises, so a wrapped toolset
+        # that fails to enter must not leak the already-spawned Monty worker pool.
+        class _ExplodingToolset(FunctionToolset[None]):
+            async def __aenter__(self) -> _ExplodingToolset:
+                raise RuntimeError('wrapped enter failed')
+
+        wrapper = CodeMode[None]().get_wrapper_toolset(_ExplodingToolset(tools=[add], id='exploding'))
+        assert isinstance(wrapper, CodeModeToolset)
+        with pytest.raises(RuntimeError, match='wrapped enter failed'):
+            await wrapper.__aenter__()
+        assert wrapper._monty_pool is None  # pyright: ignore[reportPrivateUsage]
 
     # ---------------------------------------------------------------------------
     # Sequential tool resolution

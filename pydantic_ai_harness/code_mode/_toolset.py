@@ -5,6 +5,7 @@ from __future__ import annotations
 import inspect
 import keyword
 import re
+import sys
 import warnings
 from collections.abc import Callable, Generator, Sequence
 from contextlib import contextmanager
@@ -48,7 +49,7 @@ except ImportError as _import_error:  # pragma: no cover
     ) from _import_error
 from typing_extensions import NotRequired, Self, TypedDict
 
-from pydantic_ai_harness._monty_exec import MontyExecutor, PrintCapture, is_sandbox_panic
+from pydantic_ai_harness._monty_exec import DispatchFn, MontyExecutor, PrintCapture, is_sandbox_panic
 
 # A raw OS callback. Return `pydantic_monty.NOT_HANDLED` to defer the call to the
 # sandbox's default, which leaves it unavailable.
@@ -172,6 +173,19 @@ _TOOL_SEARCH_ADDENDUM = (
 )
 
 _INVALID_IDENT_CHARS = re.compile(r'[^a-zA-Z0-9_]')
+
+
+def _in_temporal_workflow() -> bool:
+    """Whether this code is executing inside a Temporal workflow sandbox.
+
+    Checked without importing `temporalio` (an optional dependency): if the module
+    was never imported, no workflow can be running in this process.
+    """
+    workflow_module = sys.modules.get('temporalio.workflow')
+    if workflow_module is None:
+        return False
+    in_workflow: Callable[[], bool] = workflow_module.in_workflow
+    return in_workflow()
 
 
 def _is_code_execution_tool(tool_def: ToolDefinition) -> bool:
@@ -329,8 +343,23 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
         (e.g. inside a durable-execution sandbox that forbids subprocesses) fails fast without
         leaving the wrapped toolset half-entered.
         """
+        if _in_temporal_workflow():
+            raise UserError(
+                'CodeMode cannot spawn Monty subprocess workers inside a Temporal workflow: the workflow '
+                'sandbox forbids the environment and filesystem access the pool needs, and blocking on a '
+                'subprocess would trip the workflow deadlock detector. Use `TemporalCodeMode` from '
+                '`pydantic_ai_harness.code_mode.temporal`, which runs Monty inside Temporal activities.'
+            )
         self._monty_pool = Monty().__enter__()
-        await self.wrapped.__aenter__()
+        try:
+            await self.wrapped.__aenter__()
+        except BaseException:
+            # `__aexit__` is never called when `__aenter__` raises, so tear the
+            # pool down here or its subprocess workers leak.
+            monty_pool = self._monty_pool
+            self._monty_pool = None
+            monty_pool.__exit__(None, None, None)
+            raise
         return self
 
     async def __aexit__(self, *args: Any) -> bool | None:
@@ -457,7 +486,7 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
         )
         return result
 
-    async def call_tool(  # noqa: C901
+    async def call_tool(
         self, name: str, tool_args: dict[str, Any], ctx: RunContext[AgentDepsT], tool: ToolsetTool[AgentDepsT]
     ) -> Any:
         """Execute Python code in the sandbox, or pass through to a native tool."""
@@ -568,71 +597,20 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
             return _TOOL_RETURN_CONTENT_TA.dump_python(result)
 
         # Static type checking on fresh REPL sessions (first call or after
-        # restart). Monty type-checks each fed snippet before executing it when
-        # the session is checked out with `type_check=True`, so a type error
-        # surfaces as `MontyTypingError` from `feed_start` before any tool runs.
-        # Skipped on subsequent (loaded) sessions: accumulated REPL state
-        # (variables from prior snippets) is invisible to the stateless checker,
-        # and `load` does not restore the checker's accumulated context anyway.
-        # `skip_type_check` is passed to `feed_start` too (not just `type_check`
-        # at checkout) so a loaded session never type-checks even if it lands on
-        # a pooled worker that a prior checkout left in type-check mode. Because
-        # `feed_start` raises before completing, `_repl_state` is left None on a
-        # type error, so the next retry is type-checked again.
+        # restart). Skipped on subsequent (loaded) sessions: accumulated REPL
+        # state (variables from prior snippets) is invisible to the stateless
+        # checker, and `load` does not restore the checker's accumulated
+        # context anyway.
         type_check = fresh_repl and bool(callable_defs)
-        type_check_stubs = self._build_type_check_stubs(callable_defs) if type_check else None
 
-        capture = PrintCapture()
-
-        try:
-            with self._acquire_pool() as monty_pool:
-                with monty_pool.checkout(type_check=type_check, type_check_stubs=type_check_stubs) as session:
-                    if self._repl_state is not None:
-                        session.load(self._repl_state)
-                    monty_state = session.feed_start(
-                        code,
-                        print_callback=capture,
-                        os=self.os_access,
-                        mount=self.mount,
-                        skip_type_check=not type_check,
-                    )
-                    completed = await MontyExecutor(
-                        dispatch=dispatch_tool_call,
-                        valid_names=callable_defs,
-                        sequential_names=sequential_tools,
-                        global_sequential=global_sequential,
-                        os_access=self.os_access,
-                    ).run(monty_state)
-                    self._repl_state = session.dump()
-        except MontySyntaxError as e:
-            raise ModelRetry(f'Syntax error in code:\n{capture.prepend_to(e.display())}') from e
-        except MontyTypingError as e:
-            raise ModelRetry(f'Type error in code:\n{capture.prepend_to(e.display())}') from e
-        except MontyRuntimeError as e:
-            # Exceptions raised inside dispatch_tool_call (e.g. UserError from
-            # ApprovalRequired, or ModelRetry from a wrapped tool) are passed
-            # back into Monty via ExternalException. Monty re-raises them at the
-            # await site; if the sandbox code doesn't catch them, they bubble up
-            # as MontyRuntimeError. The original exception message is preserved
-            # in the display string, so the model sees a useful error. This means
-            # ModelRetry from a wrapped tool gets double-wrapped
-            # (ModelRetry → MontyRuntimeError → ModelRetry), but the retry
-            # semantics are the same -- the model gets another chance.
-            raise ModelRetry(f'Runtime error:\n{capture.prepend_to(e.display())}') from e
-        except BaseException as e:
-            # Convert a model-provokable sandbox panic to a retry (see `is_sandbox_panic`);
-            # anything else (CancelledError, ...) re-raises unchanged.
-            if not is_sandbox_panic(e):
-                raise
-            # The panic aborts the VM mid-execution, so the REPL's accumulated state cannot
-            # be trusted; drop it so the retry starts from a fresh, type-checked session.
-            self._repl_state = None
-            raise ModelRetry(
-                'The code aborted inside the sandbox and the session was reset. Revise the code and try again.'
-            ) from e
-
-        result = completed.output
-        printed = capture.joined
+        result, printed = await self._run_sandboxed(
+            code,
+            dispatch=dispatch_tool_call,
+            callable_defs=callable_defs,
+            sequential_names=sequential_tools,
+            global_sequential=global_sequential,
+            type_check=type_check,
+        )
 
         # Validate result to reconstruct multimodal types (e.g. BinaryContent from
         # serialized dicts) so they flow through to the model natively.
@@ -658,6 +636,89 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
             return_value=return_value,
             metadata={'code_mode': True, 'tool_calls': nested_calls, 'tool_returns': nested_returns},
         )
+
+    async def _run_sandboxed(
+        self,
+        code: str,
+        *,
+        dispatch: DispatchFn,
+        callable_defs: dict[str, ToolDefinition],
+        sequential_names: set[str],
+        global_sequential: bool,
+        type_check: bool,
+    ) -> tuple[Any, str]:
+        """Run `code` in the Monty sandbox and return `(result, printed output)`.
+
+        This is the execution seam under `call_tool`: `call_tool` owns dispatch
+        bookkeeping and result shaping, while this method owns where and how the
+        sandbox runs. Subclasses that relocate execution (e.g. into Temporal
+        activities) override it and must keep the same contract:
+
+        - update `_repl_state` when the snippet completes,
+        - leave `_repl_state` untouched on a code error (`ModelRetry`),
+        - reset `_repl_state` to `None` when the session is lost mid-execution,
+        - raise `ModelRetry` for failures the model should revise and retry.
+        """
+        # Monty type-checks each fed snippet before executing it when the session
+        # is checked out with `type_check=True`, so a type error surfaces as
+        # `MontyTypingError` from `feed_start` before any tool runs.
+        # `skip_type_check` is passed to `feed_start` too (not just `type_check`
+        # at checkout) so a loaded session never type-checks even if it lands on
+        # a pooled worker that a prior checkout left in type-check mode. Because
+        # `feed_start` raises before completing, `_repl_state` is left None on a
+        # type error, so the next retry is type-checked again.
+        type_check_stubs = self._build_type_check_stubs(callable_defs) if type_check else None
+
+        capture = PrintCapture()
+
+        try:
+            with self._acquire_pool() as monty_pool:
+                with monty_pool.checkout(type_check=type_check, type_check_stubs=type_check_stubs) as session:
+                    if self._repl_state is not None:
+                        session.load(self._repl_state)
+                    monty_state = session.feed_start(
+                        code,
+                        print_callback=capture,
+                        os=self.os_access,
+                        mount=self.mount,
+                        skip_type_check=not type_check,
+                    )
+                    completed = await MontyExecutor(
+                        dispatch=dispatch,
+                        valid_names=callable_defs,
+                        sequential_names=sequential_names,
+                        global_sequential=global_sequential,
+                        os_access=self.os_access,
+                    ).run(monty_state)
+                    self._repl_state = session.dump()
+        except MontySyntaxError as e:
+            raise ModelRetry(f'Syntax error in code:\n{capture.prepend_to(e.display())}') from e
+        except MontyTypingError as e:
+            raise ModelRetry(f'Type error in code:\n{capture.prepend_to(e.display())}') from e
+        except MontyRuntimeError as e:
+            # Exceptions raised inside the dispatch callback (e.g. UserError from
+            # ApprovalRequired, or ModelRetry from a wrapped tool) are passed
+            # back into Monty via ExternalException. Monty re-raises them at the
+            # await site; if the sandbox code doesn't catch them, they bubble up
+            # as MontyRuntimeError. The original exception message is preserved
+            # in the display string, so the model sees a useful error. This means
+            # ModelRetry from a wrapped tool gets double-wrapped
+            # (ModelRetry → MontyRuntimeError → ModelRetry), but the retry
+            # semantics are the same -- the model gets another chance.
+            raise ModelRetry(f'Runtime error:\n{capture.prepend_to(e.display())}') from e
+        except BaseException as e:
+            # Convert a model-provokable sandbox panic to a retry (see `is_sandbox_panic`);
+            # anything else (CancelledError, ...) re-raises unchanged.
+            if not is_sandbox_panic(e):
+                raise
+            # The panic aborts the VM mid-execution, so the REPL's accumulated state cannot
+            # be trusted; drop it so the retry starts from a fresh, type-checked session.
+            self._repl_state = None
+            raise ModelRetry(
+                'The code aborted inside the sandbox and the session was reset. Revise the code and try again.'
+            ) from e
+
+        return completed.output, capture.joined
 
     def _partition_callable_tools(
         self, wrapped_tools: dict[str, ToolsetTool[AgentDepsT]]
