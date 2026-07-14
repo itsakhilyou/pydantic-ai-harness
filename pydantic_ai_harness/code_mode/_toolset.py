@@ -85,7 +85,7 @@ Write and run Python code in a sandboxed environment.
 The sandbox uses Monty, a subset of Python. Key restrictions:
 - **No classes**: class definitions are not supported
 - **No third-party libraries**: only the standard library modules listed below can be used
-- **Importable standard library modules**: `sys`, `typing`, `asyncio`, `math`, `json`, `re`, `datetime`, `os`, `pathlib`. These must be imported before use, just like in regular Python. For example: `import asyncio` then `results = await asyncio.gather(tool_one(...), tool_two(...))`."""
+- **Importable standard library modules**: `sys`, `typing`, `asyncio`, `math`, `json`, `re`, `datetime`, `os`, `pathlib`. These must be imported before use, just like in regular Python. For example: `import asyncio` then `await asyncio.gather(tool_one(...), tool_two(...))`."""
 
 # Timing/OS restriction line, swapped depending on what host access the agent
 # configured. Three states, because `mount` and `os` enable different things:
@@ -117,7 +117,7 @@ State is preserved between calls (REPL-style). Set `restart: true` to reset stat
 
 The last expression's value is automatically captured as the return value -- you do **not** need to \
 `print()` it. End the snippet with the value to return as a bare expression. A final assignment stores \
-the value but does not return it. For example:
+the value but does not return it. When nothing is printed, `run_code` returns `{}`. For example:
 
 ```python
 result = some_expression

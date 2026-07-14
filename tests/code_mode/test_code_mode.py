@@ -247,8 +247,32 @@ class TestCodeMode:
         assert description is not None
         assert 'End the snippet with the value to return as a bare expression.' in description
         assert 'result = some_expression\nresult' in description
-        assert 'e.g. `await tool_name(arg=value)`.' in description
-        assert 'e.g. `result = await tool_name(arg=value)`.' not in description
+        assert '`run_code` returns `{}`' in description
+        assert 'results = await asyncio.gather' not in description
+
+    async def test_run_code_function_examples_are_expressions(self) -> None:
+        """Async, sync, and mixed function examples do not end on assignments."""
+        cases: list[tuple[FunctionToolset[object], tuple[str, ...]]] = [
+            (_build_function_toolset(add), ('e.g. `await tool_name(arg=value)`.',)),
+            (
+                FunctionToolset[object](tools=[Tool(add, sequential=True)]),
+                ('e.g. `tool_name(arg=value)`.',),
+            ),
+            (
+                FunctionToolset[object](tools=[Tool(add, sequential=True), Tool(greet)]),
+                ('e.g. `await tool_name(arg=value)`.', 'e.g. `tool_name(arg=value)`.'),
+            ),
+        ]
+
+        for toolset, expected_examples in cases:
+            wrapper = CodeMode[object]().get_wrapper_toolset(toolset)
+            assert isinstance(wrapper, CodeModeToolset)
+
+            description = (await wrapper.get_tools(build_run_context(None)))['run_code'].tool_def.description
+
+            assert description is not None
+            assert all(example in description for example in expected_examples)
+            assert 'e.g. `result =' not in description
 
     async def test_run_code_executes_call_through_monty(self) -> None:
         """End-to-end: `run_code` runs Python in Monty and dispatches to a sync wrapped tool."""

@@ -153,7 +153,7 @@ That fold-in grows `run_code`'s description, which invalidates the prompt-cache 
 
 ## Return values
 
-The last expression in the snippet is automatically captured as the return value -- the model does not need to `print()`. An assignment stores a value in the REPL but does not return it, so put the assigned name on the final line:
+The last expression in the snippet is automatically captured as the return value -- the model does not need to `print()`. An assignment stores a value in the REPL but does not return it. Without a trailing expression or print output, `run_code` returns `{}`. Put the assigned name on the final line:
 
 ```python
 result = await get_weather(city='Paris')
@@ -165,7 +165,7 @@ Reserve `print()` for supplementary logging: printed text is surfaced separately
 | Scenario | Return |
 |---|---|
 | No print output | Last expression value |
-| Final assignment with no trailing expression | No expression result |
+| Final assignment with no trailing expression | `{}` |
 | With print output | `{'output': '<printed text>', 'result': <last expression>}` |
 | Multimodal content (e.g. images) | Returned natively for model processing |
 
