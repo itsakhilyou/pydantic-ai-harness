@@ -7,6 +7,14 @@ resolution-markers = [
     "python_full_version < '3.13'",
 ]
 
+[options]
+
+[options.exclude-newer-package]
+pydantic-ai-slim = false
+pydantic-graph = false
+pydantic-ai = false
+pydantic-evals = false
+
 [[package]]
 name = "agent-client-protocol"
 version = "0.11.0"
