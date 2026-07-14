@@ -117,7 +117,8 @@ State is preserved between calls (REPL-style). Set `restart: true` to reset stat
 
 The last expression's value is automatically captured as the return value -- you do **not** need to \
 `print()` it. End the snippet with the value to return as a bare expression. A final assignment stores \
-the value but does not return it. When nothing is printed, `run_code` returns `{}`. For example:
+the value but does not return it. Without a final expression or print output, `run_code` returns `{}`. \
+For example:
 
 ```python
 result = some_expression
@@ -128,7 +129,8 @@ Avoid `print()` for return values as it produces Python string representations, 
 Use `print()` only for supplementary logging or debug output.
 
 Returns the last expression's value directly. If `print()` was called, returns \
-`{"output": "<printed text>"}` and adds `"result": <last expression>` when one exists.\
+`{"output": "<printed text>"}` with no final expression and adds `"result": <last expression>` for a \
+plain final expression. Multimodal final expressions remain top-level in a list alongside the printed text.\
 """
 
 

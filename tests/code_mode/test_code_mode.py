@@ -247,9 +247,10 @@ class TestCodeMode:
         assert description is not None
         assert 'End the snippet with the value to return as a bare expression.' in description
         assert 'result = some_expression\nresult' in description
-        assert '`run_code` returns `{}`' in description
+        assert 'Without a final expression or print output, `run_code` returns `{}`.' in description
         assert 'results = await asyncio.gather' not in description
-        assert 'adds `"result": <last expression>` when one exists' in description
+        assert 'adds `"result": <last expression>` for a plain final expression' in description
+        assert 'Multimodal final expressions remain top-level' in description
 
     async def test_run_code_function_examples_are_expressions(self) -> None:
         """Async, sync, and mixed function examples do not end on assignments."""
