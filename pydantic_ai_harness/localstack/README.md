@@ -1,22 +1,18 @@
 # LocalStack
 
-> [!WARNING]
-> **Experimental.** This capability lives under `pydantic_ai_harness.experimental`
-> and may change or be removed in any release, without a deprecation period.
-> Import it from the experimental path -- there is no top-level export:
+> [!NOTE]
+> Import this capability from its submodule -- there is no top-level `pydantic_ai_harness` re-export:
 >
 > ```python
-> from pydantic_ai_harness.experimental.localstack import LocalStack
+> from pydantic_ai_harness.localstack import LocalStack
 > ```
 >
-> Importing it emits a `HarnessExperimentalWarning`. Silence all harness
-> experimental warnings with `HarnessExperimentalWarning` from
-> `pydantic_ai_harness.experimental`.
+> The API may change between releases. Where practical, breaking changes ship with a deprecation warning.
 
 Give an agent access to an emulated AWS environment, so it can provision and
 exercise AWS services without touching a real account.
 
-[Source](https://github.com/pydantic/pydantic-ai-harness/tree/main/pydantic_ai_harness/experimental/localstack/)
+[Source](https://github.com/pydantic/pydantic-ai-harness/tree/main/pydantic_ai_harness/localstack/)
 
 ## The problem
 
@@ -36,7 +32,7 @@ region, and credentials, and adds a health check for the emulated services.
 
 ```python
 from pydantic_ai import Agent
-from pydantic_ai_harness.experimental.localstack import LocalStack
+from pydantic_ai_harness.localstack import LocalStack
 
 agent = Agent(
     'anthropic:claude-sonnet-4-6',
@@ -135,14 +131,15 @@ starts and stops the container when it ends (even if the run raises). Each run
 gets its own container, so concurrent runs of one agent need distinct host ports
 or an externally managed instance (`manage_container=False`).
 
-Managed containers bind to `127.0.0.1` by default. The default image is the
-community `localstack/localstack` image. To run LocalStack Pro, set
-`image='localstack/localstack-pro'`; if `LOCALSTACK_AUTH_TOKEN` is set in the
-current process it is forwarded to the container automatically. A legacy
-`LOCALSTACK_API_KEY` value is also forwarded when no auth token is set, but new
-setups should use `LOCALSTACK_AUTH_TOKEN`. Auth values are forwarded through
-the Docker CLI environment rather than embedded in the `docker run` command
-arguments.
+Managed containers bind to `127.0.0.1` by default. The default image is
+`localstack/localstack`, which since LocalStack 2026.03.0 is a single image that
+requires an auth token to start (a free Hobby/OSS token covers community usage).
+When `LOCALSTACK_AUTH_TOKEN` is set in the current process it is forwarded to the
+container automatically; a legacy `LOCALSTACK_API_KEY` value is forwarded when no
+auth token is set, but new setups should use `LOCALSTACK_AUTH_TOKEN`. Auth values
+are forwarded through the Docker CLI environment rather than embedded in the
+`docker run` command arguments. To run without any token, pin an image tag from
+before the account requirement, such as a `localstack/localstack:4.x` release.
 
 Some AWS services expose ports outside the gateway. LocalStack reserves
 `4510-4559` for those service endpoints, and Docker-backed services such as
@@ -164,7 +161,7 @@ it and the run environment is already trusted.
 The same lifecycle is available standalone as an async context manager:
 
 ```python
-from pydantic_ai_harness.experimental.localstack import LocalStackContainer
+from pydantic_ai_harness.localstack import LocalStackContainer
 
 async with LocalStackContainer(environment={'DEBUG': '1'}) as localstack:
     ...  # talk to localstack.endpoint_url
@@ -205,14 +202,16 @@ you supply your own.
 
 The live integration tests start LocalStack in Docker and then drive AWS CLI
 commands through this capability. Local runs are skipped unless Docker and an
-AWS CLI-compatible executable are available. The default target uses the
-community `localstack/localstack` image and does not require an Auth Token.
+AWS CLI-compatible executable are available, and unless an auth token is
+configured -- the default `localstack/localstack` image requires
+`LOCALSTACK_AUTH_TOKEN` to start (see [Managing the container](#managing-the-container)).
 
 ```bash
-make integration-localstack
+LOCALSTACK_AUTH_TOKEN=<token> make integration-localstack
 ```
 
-To make a missing Auth Token fail instead of skip for Pro verification, set:
+Set `LOCALSTACK_REQUIRE_AUTH_TOKEN=1` to make a missing token fail the run
+instead of skipping the container tests (this is what CI uses):
 
 ```bash
 LOCALSTACK_REQUIRE_AUTH_TOKEN=1 make integration-localstack
@@ -226,7 +225,7 @@ Optional environment variables:
 | `LOCALSTACK_API_KEY` | Legacy fallback when `LOCALSTACK_AUTH_TOKEN` is absent. |
 | `LOCALSTACK_AWS_CLI` | CLI executable for tests; defaults to `aws` when available, then `awslocal`. |
 | `LOCALSTACK_IMAGE` | Docker image for live tests; defaults to `localstack/localstack`. |
-| `LOCALSTACK_REQUIRE_AUTH_TOKEN` | Fail instead of skip when no Auth Token is configured. Use this for Pro/Auth Token verification. |
+| `LOCALSTACK_REQUIRE_AUTH_TOKEN` | Fail instead of skip when no Auth Token is configured. Use this in CI so a missing token is a hard error. |
 
 Store the token in your shell or CI secret store; do not commit it to the repo.
 
@@ -246,7 +245,7 @@ capabilities:
 
 ```python
 from pydantic_ai import Agent
-from pydantic_ai_harness.experimental.localstack import LocalStack
+from pydantic_ai_harness.localstack import LocalStack
 
 agent = Agent.from_file('agent.yaml', custom_capability_types=[LocalStack])
 ```

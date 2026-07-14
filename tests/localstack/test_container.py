@@ -14,14 +14,13 @@ from pathlib import Path
 
 import pytest
 
-from pydantic_ai_harness.experimental.localstack import LocalStackContainer, LocalStackError
+from pydantic_ai_harness.localstack import LocalStackContainer, LocalStackError
 
 from ._http_server import HttpResponse, http_server, unused_tcp_port
 
 _LOCALSTACK_ENV_NAMES = (
     'LOCALSTACK_AUTH_TOKEN',
     'LOCALSTACK_API_KEY',
-    'LOCALSTACK_ACKNOWLEDGE_ACCOUNT_REQUIREMENT',
 )
 
 
@@ -50,9 +49,9 @@ def _docker_stub(tmp_path: Path) -> tuple[str, Path]:
         '#!/bin/sh\n'
         f'echo "$@" >> {log}\n'
         'if [ "$1" = run ]; then\n'
-        f'  printf "env SERVICES=%s GATEWAY_LISTEN=%s LOCALSTACK_ACKNOWLEDGE_ACCOUNT_REQUIREMENT=%s '
+        f'  printf "env SERVICES=%s GATEWAY_LISTEN=%s '
         f'LOCALSTACK_AUTH_TOKEN=%s LOCALSTACK_API_KEY=%s\\n" '
-        f'"$SERVICES" "$GATEWAY_LISTEN" "$LOCALSTACK_ACKNOWLEDGE_ACCOUNT_REQUIREMENT" '
+        f'"$SERVICES" "$GATEWAY_LISTEN" '
         f'"$LOCALSTACK_AUTH_TOKEN" "$LOCALSTACK_API_KEY" >> {log}\n'
         '  echo container-abc123\n'
         'fi\n'
@@ -121,14 +120,8 @@ class TestLifecycle:
         assert health.paths == ['/_localstack/health', '/_localstack/health']
         assert container.container_id is None
         log_text = log.read_text()
-        assert (
-            f'run -d --rm -p 127.0.0.1:{health.port}:4566 '
-            '-e GATEWAY_LISTEN -e LOCALSTACK_ACKNOWLEDGE_ACCOUNT_REQUIREMENT localstack/localstack'
-        ) in log_text
-        assert (
-            'env SERVICES= GATEWAY_LISTEN=0.0.0.0:4566 LOCALSTACK_ACKNOWLEDGE_ACCOUNT_REQUIREMENT=1 '
-            'LOCALSTACK_AUTH_TOKEN= LOCALSTACK_API_KEY='
-        ) in log_text
+        assert (f'run -d --rm -p 127.0.0.1:{health.port}:4566 -e GATEWAY_LISTEN localstack/localstack') in log_text
+        assert 'env SERVICES= GATEWAY_LISTEN=0.0.0.0:4566 LOCALSTACK_AUTH_TOKEN= LOCALSTACK_API_KEY=' in log_text
         assert 'stop container-abc123' in log_text
 
     async def test_run_command_includes_env_and_name(self, tmp_path: Path) -> None:
@@ -144,14 +137,8 @@ class TestLifecycle:
             ):
                 pass
         log_text = log.read_text()
-        assert (
-            f'run -d --rm -p 127.0.0.1:{health.port}:4566 '
-            '-e SERVICES -e GATEWAY_LISTEN -e LOCALSTACK_ACKNOWLEDGE_ACCOUNT_REQUIREMENT --name ls img'
-        ) in log_text
-        assert (
-            'env SERVICES=s3 GATEWAY_LISTEN=0.0.0.0:4566 LOCALSTACK_ACKNOWLEDGE_ACCOUNT_REQUIREMENT=1 '
-            'LOCALSTACK_AUTH_TOKEN= LOCALSTACK_API_KEY='
-        ) in log_text
+        assert (f'run -d --rm -p 127.0.0.1:{health.port}:4566 -e SERVICES -e GATEWAY_LISTEN --name ls img') in log_text
+        assert 'env SERVICES=s3 GATEWAY_LISTEN=0.0.0.0:4566 LOCALSTACK_AUTH_TOKEN= LOCALSTACK_API_KEY=' in log_text
 
     async def test_explicit_gateway_listen_environment_takes_precedence(self, tmp_path: Path) -> None:
         docker, log = _docker_stub(tmp_path)
@@ -164,21 +151,8 @@ class TestLifecycle:
             ):
                 pass
         assert (
-            'env SERVICES= GATEWAY_LISTEN=127.0.0.1:4566 LOCALSTACK_ACKNOWLEDGE_ACCOUNT_REQUIREMENT=1 '
-            'LOCALSTACK_AUTH_TOKEN= LOCALSTACK_API_KEY=' in log.read_text()
+            'env SERVICES= GATEWAY_LISTEN=127.0.0.1:4566 LOCALSTACK_AUTH_TOKEN= LOCALSTACK_API_KEY=' in log.read_text()
         )
-
-    async def test_explicit_account_requirement_environment_takes_precedence(self, tmp_path: Path) -> None:
-        docker, log = _docker_stub(tmp_path)
-        with _localstack_env(), http_server([HttpResponse(200)]) as health:
-            async with LocalStackContainer(
-                docker_path=docker,
-                host_port=health.port,
-                environment={'LOCALSTACK_ACKNOWLEDGE_ACCOUNT_REQUIREMENT': '0'},
-                poll_interval=0.01,
-            ):
-                pass
-        assert 'LOCALSTACK_ACKNOWLEDGE_ACCOUNT_REQUIREMENT=0' in log.read_text()
 
     async def test_mounts_service_ports_and_docker_socket(self, tmp_path: Path) -> None:
         docker, log = _docker_stub(tmp_path)
@@ -220,11 +194,9 @@ class TestLifecycle:
         argv_line, env_line, *_ = log.read_text().splitlines()
         assert '-e LOCALSTACK_AUTH_TOKEN ' in f'{argv_line} '
         assert '-e GATEWAY_LISTEN ' in f'{argv_line} '
-        assert '-e LOCALSTACK_ACKNOWLEDGE_ACCOUNT_REQUIREMENT ' in f'{argv_line} '
         assert 'auth-token' not in argv_line
         assert (
-            env_line == 'env SERVICES= GATEWAY_LISTEN=0.0.0.0:4566 LOCALSTACK_ACKNOWLEDGE_ACCOUNT_REQUIREMENT=1 '
-            'LOCALSTACK_AUTH_TOKEN=auth-token LOCALSTACK_API_KEY='
+            env_line == 'env SERVICES= GATEWAY_LISTEN=0.0.0.0:4566 LOCALSTACK_AUTH_TOKEN=auth-token LOCALSTACK_API_KEY='
         )
 
     async def test_forwards_legacy_api_key_when_auth_token_is_absent(self, tmp_path: Path) -> None:
@@ -235,11 +207,9 @@ class TestLifecycle:
         argv_line, env_line, *_ = log.read_text().splitlines()
         assert '-e LOCALSTACK_API_KEY ' in f'{argv_line} '
         assert '-e GATEWAY_LISTEN ' in f'{argv_line} '
-        assert '-e LOCALSTACK_ACKNOWLEDGE_ACCOUNT_REQUIREMENT ' in f'{argv_line} '
         assert 'legacy-key' not in argv_line
         assert (
-            env_line == 'env SERVICES= GATEWAY_LISTEN=0.0.0.0:4566 LOCALSTACK_ACKNOWLEDGE_ACCOUNT_REQUIREMENT=1 '
-            'LOCALSTACK_AUTH_TOKEN= LOCALSTACK_API_KEY=legacy-key'
+            env_line == 'env SERVICES= GATEWAY_LISTEN=0.0.0.0:4566 LOCALSTACK_AUTH_TOKEN= LOCALSTACK_API_KEY=legacy-key'
         )
 
     async def test_explicit_auth_environment_takes_precedence(self, tmp_path: Path) -> None:
@@ -255,12 +225,11 @@ class TestLifecycle:
         argv_line, env_line, *_ = log.read_text().splitlines()
         assert '-e LOCALSTACK_AUTH_TOKEN ' in f'{argv_line} '
         assert '-e GATEWAY_LISTEN ' in f'{argv_line} '
-        assert '-e LOCALSTACK_ACKNOWLEDGE_ACCOUNT_REQUIREMENT ' in f'{argv_line} '
         assert 'process-token' not in argv_line
         assert 'explicit-token' not in argv_line
         assert (
-            env_line == 'env SERVICES= GATEWAY_LISTEN=0.0.0.0:4566 LOCALSTACK_ACKNOWLEDGE_ACCOUNT_REQUIREMENT=1 '
-            'LOCALSTACK_AUTH_TOKEN=explicit-token LOCALSTACK_API_KEY='
+            env_line
+            == 'env SERVICES= GATEWAY_LISTEN=0.0.0.0:4566 LOCALSTACK_AUTH_TOKEN=explicit-token LOCALSTACK_API_KEY='
         )
 
     async def test_readiness_timeout_stops_container(self, tmp_path: Path) -> None:

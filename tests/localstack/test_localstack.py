@@ -16,7 +16,7 @@ from pydantic_ai.exceptions import ModelRetry
 from pydantic_ai.models.test import TestModel
 from pydantic_ai.usage import RunUsage
 
-from pydantic_ai_harness.experimental.localstack import LocalStack, LocalStackError, LocalStackToolset
+from pydantic_ai_harness.localstack import LocalStack, LocalStackError, LocalStackToolset
 
 from ._http_server import HttpResponse, http_server, unused_tcp_port
 
@@ -289,12 +289,12 @@ class TestLocalStackCapability:
         result = await agent.run('create a bucket')
         assert result.output == 'done'
 
-    def test_exported_from_experimental_namespace(self) -> None:
+    def test_exported_from_submodule(self) -> None:
         import pydantic_ai_harness
-        from pydantic_ai_harness.experimental.localstack import LocalStack as Exported
+        from pydantic_ai_harness.localstack import LocalStack as Exported
 
         assert Exported is LocalStack
-        # Experimental capabilities are reached via the experimental namespace, not the package root.
+        # Capabilities are reached via their submodule, not the package root, so each keeps its own optional deps.
         assert 'LocalStack' not in pydantic_ai_harness.__all__
 
 
@@ -328,10 +328,7 @@ class TestContainerManagement:
             async with _toolset(endpoint_url=health.endpoint_url, manage_container=True, docker_path=docker):
                 pass
         log_text = log.read_text()
-        assert (
-            f'run -d --rm -p 127.0.0.1:{health.port}:4566 '
-            '-e GATEWAY_LISTEN -e LOCALSTACK_ACKNOWLEDGE_ACCOUNT_REQUIREMENT localstack/localstack'
-        ) in log_text
+        assert (f'run -d --rm -p 127.0.0.1:{health.port}:4566 -e GATEWAY_LISTEN localstack/localstack') in log_text
         assert 'stop managed-xyz' in log_text
 
     async def test_managed_defaults_to_edge_port_when_endpoint_has_no_port(self, tmp_path: Path) -> None:

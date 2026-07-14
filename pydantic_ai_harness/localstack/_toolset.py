@@ -17,7 +17,7 @@ from pydantic_ai.tools import AgentDepsT
 from pydantic_ai.toolsets import AbstractToolset, FunctionToolset
 from typing_extensions import Self
 
-from pydantic_ai_harness.experimental.localstack._container import LocalStackContainer
+from pydantic_ai_harness.localstack._container import LocalStackContainer
 
 _HEALTH_PATH = '/_localstack/health'
 _DEFAULT_EDGE_PORT = 4566

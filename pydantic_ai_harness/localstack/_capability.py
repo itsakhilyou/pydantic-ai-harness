@@ -9,7 +9,7 @@ from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.tools import AgentDepsT
 from pydantic_ai.toolsets import AgentToolset
 
-from pydantic_ai_harness.experimental.localstack._toolset import LocalStackToolset
+from pydantic_ai_harness.localstack._toolset import LocalStackToolset
 
 _INSTRUCTIONS = (
     'You have access to an emulated AWS environment powered by LocalStack at {endpoint_url}. '
@@ -32,7 +32,7 @@ class LocalStack(AbstractCapability[AgentDepsT]):
 
     ```python
     from pydantic_ai import Agent
-    from pydantic_ai_harness.experimental.localstack import LocalStack
+    from pydantic_ai_harness.localstack import LocalStack
 
     agent = Agent('anthropic:claude-sonnet-4-6', capabilities=[LocalStack()])
     result = agent.run_sync('Create an S3 bucket called reports and list all buckets.')

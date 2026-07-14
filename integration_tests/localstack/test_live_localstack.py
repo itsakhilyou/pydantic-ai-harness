@@ -15,7 +15,7 @@ import httpx
 import pytest
 from pydantic import TypeAdapter
 
-from pydantic_ai_harness.experimental.localstack import LocalStack, LocalStackContainer, LocalStackToolset
+from pydantic_ai_harness.localstack import LocalStack, LocalStackContainer, LocalStackToolset
 
 _LOCALSTACK_INFO = TypeAdapter(dict[str, object])
 _STARTUP_TIMEOUT = 240.0

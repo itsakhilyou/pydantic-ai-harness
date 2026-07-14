@@ -156,11 +156,17 @@ jobs:
   localstack-integration:
     runs-on: ubuntu-latest
     name: LocalStack integration tests
+    # The auth token secret lives in this environment; binding the job to it also
+    # satisfies zizmor's secrets-outside-env audit (same pattern as the release job).
+    environment: localstack-integration
     env:
-      LOCALSTACK_ACKNOWLEDGE_ACCOUNT_REQUIREMENT: '1'
+      # Since LocalStack 2026.03.0 the single image requires an auth token to
+      # start, so the live tests need it. LOCALSTACK_REQUIRE_AUTH_TOKEN makes a
+      # missing token fail the job instead of silently skipping the container tests.
+      LOCALSTACK_AUTH_TOKEN: ${{ secrets.LOCALSTACK_AUTH_TOKEN }}
+      LOCALSTACK_REQUIRE_AUTH_TOKEN: '1'
       LOCALSTACK_AWS_CLI: aws
       LOCALSTACK_IMAGE: localstack/localstack
-      LOCALSTACK_SKIP_MANAGED_CONTAINERS: '1'
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
