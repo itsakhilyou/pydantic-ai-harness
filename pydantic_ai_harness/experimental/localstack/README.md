@@ -16,6 +16,8 @@
 Give an agent access to an emulated AWS environment, so it can provision and
 exercise AWS services without touching a real account.
 
+[Source](https://github.com/pydantic/pydantic-ai-harness/tree/main/pydantic_ai_harness/experimental/localstack/)
+
 ## The problem
 
 Agents that build or test cloud infrastructure need somewhere to create buckets,
