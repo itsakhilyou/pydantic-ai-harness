@@ -127,8 +127,8 @@ result
 Avoid `print()` for return values as it produces Python string representations, not structured data. \
 Use `print()` only for supplementary logging or debug output.
 
-Returns the last expression's value directly. If `print()` was also called, returns \
-`{"output": "<printed text>", "result": <last expression>}`.\
+Returns the last expression's value directly. If `print()` was called, returns \
+`{"output": "<printed text>"}` and adds `"result": <last expression>` when one exists.\
 """
 
 

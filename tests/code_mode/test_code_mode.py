@@ -249,6 +249,7 @@ class TestCodeMode:
         assert 'result = some_expression\nresult' in description
         assert '`run_code` returns `{}`' in description
         assert 'results = await asyncio.gather' not in description
+        assert 'adds `"result": <last expression>` when one exists' in description
 
     async def test_run_code_function_examples_are_expressions(self) -> None:
         """Async, sync, and mixed function examples do not end on assignments."""

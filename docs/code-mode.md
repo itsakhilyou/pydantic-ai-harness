@@ -166,7 +166,8 @@ Reserve `print()` for supplementary logging: printed text is surfaced separately
 |---|---|
 | No print output | Last expression value |
 | Final assignment with no trailing expression | `{}` |
-| With print output | `{'output': '<printed text>', 'result': <last expression>}` |
+| Print output with no final expression | `{'output': '<printed text>'}` |
+| Print output with a final expression | `{'output': '<printed text>', 'result': <last expression>}` |
 | Multimodal content (e.g. images) | Returned natively for model processing |
 
 ## REPL state
