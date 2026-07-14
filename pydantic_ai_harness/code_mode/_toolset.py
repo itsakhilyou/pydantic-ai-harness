@@ -128,10 +128,11 @@ result
 Avoid `print()` for return values as it produces Python string representations, not structured data. \
 Use `print()` only for supplementary logging or debug output.
 
-Returns a non-`None` last expression's value directly. If `print()` was called, returns \
-`{"output": "<printed text>"}` without a non-`None` final expression and adds \
-`"result": <last expression>` for a plain, non-`None` final expression. Multimodal final expressions \
-remain top-level in a list alongside the printed text.\
+Returns a non-`None` last expression's value directly when nothing is printed. With `print()` output \
+and no non-`None` final expression, returns `{"output": "<printed text>"}`. With `print()` output and a \
+plain, non-`None` final expression, returns \
+`{"output": "<printed text>", "result": <last expression>}`. With `print()` output and a multimodal \
+final expression, returns a list with the printed text followed by the native content.\
 """
 
 

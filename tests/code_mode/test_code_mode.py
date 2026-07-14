@@ -250,8 +250,9 @@ class TestCodeMode:
         assert 'Without a non-`None` final expression or print output, `run_code` returns `{}`.' in description
         assert 'A final expression that evaluates to `None` is treated as no result.' in description
         assert 'results = await asyncio.gather' not in description
-        assert 'for a plain, non-`None` final expression' in description
-        assert 'Multimodal final expressions remain top-level' in description
+        assert 'With `print()` output and no non-`None` final expression' in description
+        assert 'With `print()` output and a plain, non-`None` final expression' in description
+        assert 'With `print()` output and a multimodal final expression' in description
 
     async def test_run_code_function_examples_are_expressions(self) -> None:
         """Async, sync, and mixed function examples do not end on assignments."""
