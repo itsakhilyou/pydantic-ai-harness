@@ -247,9 +247,10 @@ class TestCodeMode:
         assert description is not None
         assert 'End the snippet with the value to return as a bare expression.' in description
         assert 'result = some_expression\nresult' in description
-        assert 'Without a final expression or print output, `run_code` returns `{}`.' in description
+        assert 'Without a non-`None` final expression or print output, `run_code` returns `{}`.' in description
+        assert 'A final expression that evaluates to `None` is treated as no result.' in description
         assert 'results = await asyncio.gather' not in description
-        assert 'adds `"result": <last expression>` for a plain final expression' in description
+        assert 'for a plain, non-`None` final expression' in description
         assert 'Multimodal final expressions remain top-level' in description
 
     async def test_run_code_function_examples_are_expressions(self) -> None:
@@ -429,6 +430,19 @@ class TestCodeMode:
         result = await wrapper.call_tool('run_code', {'code': '1 + 2'}, ctx, tools['run_code'])
         # No print output → result returned directly (not wrapped in a dict).
         assert result.return_value == 3
+
+    async def test_run_code_treats_none_as_no_expression_result(self) -> None:
+        """A final `None` uses the same return shapes as no final expression."""
+        wrapper = CodeMode[object]().get_wrapper_toolset(_build_function_toolset(add))
+        assert isinstance(wrapper, CodeModeToolset)
+        ctx = await build_ctx(None, wrapper)
+        tools = await wrapper.get_tools(ctx)
+
+        result = await wrapper.call_tool('run_code', {'code': 'None'}, ctx, tools['run_code'])
+        assert result.return_value == {}
+
+        printed = await wrapper.call_tool('run_code', {'code': 'print("done")\nNone'}, ctx, tools['run_code'])
+        assert printed.return_value == {'output': 'done\n'}
 
     async def test_run_code_syntax_error_becomes_model_retry(self) -> None:
         """A Python syntax error is surfaced as `ModelRetry` so the model can fix it."""
