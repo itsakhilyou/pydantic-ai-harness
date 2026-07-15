@@ -108,7 +108,7 @@ class PermissionPolicy(AbstractCapability[AgentDepsT]):
 
     ```python
     from pydantic_ai import Agent
-    from pydantic_ai_harness.experimental.permission_policy import PermissionPolicy, Rule
+    from pydantic_ai_harness.permission_policy import PermissionPolicy, Rule
 
     policy = PermissionPolicy[None](
         rules=[
@@ -149,7 +149,7 @@ class PermissionPolicy(AbstractCapability[AgentDepsT]):
 
     on_ask: OnAsk[AgentDepsT] | None = None
     """Optional handler that resolves `ask` verdicts inline. Receives the `RunContext` and a
-    [`PermissionRequest`][pydantic_ai_harness.experimental.permission_policy.PermissionRequest];
+    [`PermissionRequest`][pydantic_ai_harness.permission_policy.PermissionRequest];
     return `True` to approve, `False` to deny with the default message, or a string to deny
     with that message. When `None`, `ask` calls surface as `DeferredToolRequests` instead."""
 

@@ -6,8 +6,8 @@ import warnings
 
 with warnings.catch_warnings():
     warnings.simplefilter('ignore')
-    from pydantic_ai_harness.experimental.permission_policy._command import prepare_command
-    from pydantic_ai_harness.experimental.permission_policy._rules import (
+    from pydantic_ai_harness.permission_policy._command import prepare_command
+    from pydantic_ai_harness.permission_policy._rules import (
         Rule,
         bare_name_verdict,
         last_matching_rule,

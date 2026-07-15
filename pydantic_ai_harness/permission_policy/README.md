@@ -1,23 +1,13 @@
-# Permission policy
+# Permission Policy
 
-> [!WARNING]
-> **Experimental.** This capability lives under `pydantic_ai_harness.experimental` and may
-> change or be removed in any release, without a deprecation period. Import it from the
-> experimental path -- there is no top-level export:
+> [!NOTE]
+> Import this capability from its submodule. It is not re-exported from `pydantic_ai_harness`:
 >
 > ```python
-> from pydantic_ai_harness.experimental.permission_policy import PermissionPolicy, Rule
+> from pydantic_ai_harness.permission_policy import PermissionPolicy
 > ```
->
-> Importing any experimental capability emits a `HarnessExperimentalWarning`. Silence **all**
-> harness experimental warnings with a single filter (no per-capability lines needed):
->
-> ```python
-> import warnings
-> from pydantic_ai_harness.experimental import HarnessExperimentalWarning
->
-> warnings.filterwarnings('ignore', category=HarnessExperimentalWarning)
-> ```
+
+Permission Policy is a released, non-experimental capability. Pydantic AI Harness is still on 0.x releases, so the API may change between minor releases. See the repository [version policy](https://github.com/pydantic/pydantic-ai-harness#version-policy).
 
 An allow / ask / deny rule engine over tool calls, evaluated as each tool runs -- with the
 hard-won shell-command mechanics (compound-command splitting, a conservative-parse gate,
@@ -57,7 +47,7 @@ verdict)`:
 
 ```python
 from pydantic_ai import Agent
-from pydantic_ai_harness.experimental.permission_policy import PermissionPolicy, Rule
+from pydantic_ai_harness.permission_policy import PermissionPolicy, Rule
 
 policy = PermissionPolicy(
     rules=[
@@ -173,5 +163,9 @@ is Codex CLI's prompt-taught escalation, minus the persistence channel.
   wrong-allow into a right-allow.
 - **An optional LLM guardian** (auto-approver for `ask` verdicts) is a natural extension of
   `on_ask` and is left for a follow-up.
+
+## Further reading
+
+- [`pydantic_ai_harness.permission_policy` source](https://github.com/pydantic/pydantic-ai-harness/tree/main/pydantic_ai_harness/permission_policy/)
 
 [mining]: https://github.com/pydantic/pydantic-ai-notes/blob/main/features/harness-comparison/2026-07-08%20oss%20implementation%20mining%20-%20oh-my-pi%2C%20codex%2C%20opencode.md

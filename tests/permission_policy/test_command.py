@@ -13,7 +13,7 @@ import pytest
 
 with warnings.catch_warnings():
     warnings.simplefilter('ignore')
-    from pydantic_ai_harness.experimental.permission_policy._command import (
+    from pydantic_ai_harness.permission_policy._command import (
         analyze_command,
         command_matches_prefix,
         prepare_command,

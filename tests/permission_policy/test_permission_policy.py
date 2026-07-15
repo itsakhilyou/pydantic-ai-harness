@@ -21,7 +21,7 @@ from pydantic_ai.tools import DeferredToolRequests, RunContext
 
 with warnings.catch_warnings():
     warnings.simplefilter('ignore')
-    from pydantic_ai_harness.experimental.permission_policy import (
+    from pydantic_ai_harness.permission_policy import (
         PermissionPolicy,
         PermissionRequest,
         Rule,

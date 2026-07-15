@@ -4,14 +4,10 @@ See `README.md` in this package for the full model, the command-analysis mechani
 red-team edge cases the test suite locks down.
 """
 
-from pydantic_ai_harness.experimental._warn import warn_experimental
-
 from ._capability import DEFAULT_SHELL_TOOLS, PermissionPolicy, PermissionRequest
 from ._command import PreparedCommand, analyze_command, prepare_command
 from ._rules import Decision, Rule, resolve
 from ._safelist import BANNED_PREFIX_SUGGESTIONS
-
-warn_experimental('permission_policy')
 
 __all__ = [
     'BANNED_PREFIX_SUGGESTIONS',
