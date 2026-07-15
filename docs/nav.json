@@ -18,6 +18,7 @@
       { "label": "Memory", "slug": "memory" },
       { "label": "Runtime Authoring", "slug": "runtime-authoring" },
       { "label": "Guardrails", "slug": "guardrails" },
+      { "label": "Budget Disclosure", "slug": "budget-disclosure" },
       { "label": "Managed Prompt", "slug": "managed-prompt" },
       { "label": "ACP", "slug": "acp" }
     ]

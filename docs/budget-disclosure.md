@@ -1,6 +1,20 @@
-# BudgetDisclosure
+---
+title: Budget Disclosure
+description: Tell the model how much of its usage budget is left, so it can pace itself.
+---
+
+# Budget Disclosure
 
 Tell the model how much of its usage budget is left, so it can pace itself.
+
+> [!NOTE]
+> Import this capability from its submodule. It is not re-exported from `pydantic_ai_harness`:
+>
+> ```python
+> from pydantic_ai_harness.budget_disclosure import BudgetDisclosure
+> ```
+
+Budget Disclosure is a released, non-experimental capability. Pydantic AI Harness is still on 0.x releases, so the API may change between minor releases. See the repository [version policy](https://github.com/pydantic/pydantic-ai-harness#version-policy).
 
 `UsageLimits` enforces a run's budget, but the model never sees it. It gets stopped mid-step
 by a `UsageLimitExceeded` instead of adjusting as the budget runs down. `BudgetDisclosure`
@@ -12,10 +26,6 @@ results rather than start new work.
 Budget remaining: ~38k tokens, 7 requests. Pace your work; if nearly exhausted, prioritize
 delivering current results over starting new work.
 ```
-
-> This capability is experimental and private. It is not re-exported from
-> `pydantic_ai_harness`; import it from its own module. Its API may change or be removed in any
-> release.
 
 ## Cache safety
 
@@ -34,7 +44,7 @@ detail.
 ```python
 from pydantic_ai import Agent
 from pydantic_ai.usage import UsageLimits
-from pydantic_ai_harness.experimental.budget_disclosure import BudgetDisclosure
+from pydantic_ai_harness.budget_disclosure import BudgetDisclosure
 
 limits = UsageLimits(request_limit=20, total_tokens_limit=200_000)
 agent = Agent('anthropic:claude-sonnet-4-5', capabilities=[BudgetDisclosure(limits=limits)])
@@ -76,3 +86,8 @@ run when a ceiling is hit, this one lets the model see the ceiling coming and pa
 - **Stateless.** It reads `ctx.usage` and the static `limits` each request; there is no per-run
   state, so one instance can be reused across many runs.
 - **Disclosure only.** It never changes tool availability, model settings, or message history.
+
+## Further reading
+
+- [`pydantic_ai_harness.budget_disclosure` source](https://github.com/pydantic/pydantic-ai-harness/tree/main/pydantic_ai_harness/budget_disclosure/)
+- [Pydantic AI capabilities](/ai/core-concepts/capabilities/)

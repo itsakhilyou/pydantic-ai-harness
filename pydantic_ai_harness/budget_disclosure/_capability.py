@@ -96,7 +96,7 @@ class BudgetDisclosure(AbstractCapability[AgentDepsT]):
     ```python
     from pydantic_ai import Agent
     from pydantic_ai.usage import UsageLimits
-    from pydantic_ai_harness.experimental.budget_disclosure import BudgetDisclosure
+    from pydantic_ai_harness.budget_disclosure import BudgetDisclosure
 
     limits = UsageLimits(request_limit=20, total_tokens_limit=200_000)
     agent = Agent('anthropic:claude-sonnet-4-5', capabilities=[BudgetDisclosure(limits=limits)])

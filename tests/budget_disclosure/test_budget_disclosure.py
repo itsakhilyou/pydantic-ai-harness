@@ -18,7 +18,7 @@ from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart, ToolCall
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 from pydantic_ai.usage import RequestUsage, RunUsage, UsageLimits
 
-from pydantic_ai_harness.experimental.budget_disclosure import BudgetDimension, BudgetDisclosure
+from pydantic_ai_harness.budget_disclosure import BudgetDimension, BudgetDisclosure
 
 pytestmark = pytest.mark.anyio
 
