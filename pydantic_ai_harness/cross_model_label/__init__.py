@@ -1,7 +1,6 @@
 """Tell the model when earlier turns came from a different model (private, not re-exported at top level)."""
 
-from pydantic_ai_harness.experimental._warn import warn_experimental
-from pydantic_ai_harness.experimental.cross_model_label._capability import (
+from pydantic_ai_harness.cross_model_label._capability import (
     CrossModelFormatter,
     CrossModelHistory,
     CrossModelHistoryLabel,
@@ -10,8 +9,6 @@ from pydantic_ai_harness.experimental.cross_model_label._capability import (
     model_family,
     normalize_model_name,
 )
-
-warn_experimental('cross_model_label')
 
 __all__ = [
     'CrossModelFormatter',

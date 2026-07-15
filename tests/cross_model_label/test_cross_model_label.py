@@ -28,13 +28,13 @@ from pydantic_ai.messages import (
 from pydantic_ai.models.fallback import FallbackModel
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 
-from pydantic_ai_harness.experimental.cross_model_label import (
+from pydantic_ai_harness.cross_model_label import (
     CrossModelHistory,
     CrossModelHistoryLabel,
     model_family,
     normalize_model_name,
 )
-from pydantic_ai_harness.experimental.cross_model_label._capability import _DEFAULT_FORMAT
+from pydantic_ai_harness.cross_model_label._capability import _DEFAULT_FORMAT
 
 pytestmark = pytest.mark.anyio
 

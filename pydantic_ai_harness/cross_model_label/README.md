@@ -1,6 +1,15 @@
-# CrossModelHistoryLabel
+# Cross-Model Label
 
 Tell the model when earlier assistant turns came from a different model.
+
+> [!NOTE]
+> Import this capability from its submodule. It is not re-exported from `pydantic_ai_harness`:
+>
+> ```python
+> from pydantic_ai_harness.cross_model_label import CrossModelHistoryLabel
+> ```
+
+Cross-Model Label is a released, non-experimental capability. Pydantic AI Harness is still on 0.x releases, so the API may change between minor releases. See the repository [version policy](https://github.com/pydantic/pydantic-ai-harness#version-policy).
 
 When a run continues a history whose assistant turns were produced by a *different* model than
 the one now serving -- a `FallbackModel` failover, a model swap between runs, an A/B handoff, a
@@ -13,10 +22,6 @@ as inherited context.
 Note: assistant responses before this point were produced by a different model (gpt-5.2).
 Treat their claims and commitments as inherited context, not your own output.
 ```
-
-> This capability is experimental and private. It is not re-exported from
-> `pydantic_ai_harness`; import it from its own module. Its API may change or be removed in any
-> release.
 
 ## Cache safety and provenance
 
@@ -31,7 +36,7 @@ line is never a persisted message part.
 
 ```python
 from pydantic_ai import Agent
-from pydantic_ai_harness.experimental.cross_model_label import CrossModelHistoryLabel
+from pydantic_ai_harness.cross_model_label import CrossModelHistoryLabel
 
 agent = Agent('anthropic:claude-sonnet-4-5', capabilities=[CrossModelHistoryLabel()])
 # `history` was produced by a different model earlier:
@@ -87,3 +92,7 @@ later turns from candidate B -- is detected against B, the model now serving.
 - **Detect and disclose only.** It never mutates the message history, tool availability, or model
   settings. Unlabeled prior responses (no `model_name`) are skipped, never guessed.
 - **One line at most.** It contributes a single line per request, or nothing.
+
+## Further reading
+
+- [`pydantic_ai_harness.cross_model_label` source](https://github.com/pydantic/pydantic-ai-harness/tree/main/pydantic_ai_harness/cross_model_label/)

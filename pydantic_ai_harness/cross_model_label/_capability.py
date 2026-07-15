@@ -134,7 +134,7 @@ class CrossModelHistoryLabel(AbstractCapability[AgentDepsT]):
 
     ```python
     from pydantic_ai import Agent
-    from pydantic_ai_harness.experimental.cross_model_label import CrossModelHistoryLabel
+    from pydantic_ai_harness.cross_model_label import CrossModelHistoryLabel
 
     agent = Agent('anthropic:claude-sonnet-4-5', capabilities=[CrossModelHistoryLabel()])
     # `message_history` was produced by a different model earlier:
