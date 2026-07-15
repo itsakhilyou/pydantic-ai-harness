@@ -183,7 +183,6 @@ We studied leading coding agents, agent frameworks, and Claw-style assistants to
 | | **Tool orphan repair** | Fix orphaned tool calls in conversation history | :construction: [PR&nbsp;#184](https://github.com/pydantic/pydantic-ai-harness/pull/184) | |
 | **Reasoning** | **Adaptive reasoning** | Adjust thinking effort based on task complexity | :construction: [PR&nbsp;#174](https://github.com/pydantic/pydantic-ai-harness/pull/174) | |
 | | **Current time** | Inject current date/time into system prompt | :construction: [PR&nbsp;#170](https://github.com/pydantic/pydantic-ai-harness/pull/170) | |
-| **Prompt management** | **Managed prompt** | Serve Logfire-managed prompts as instructions, so you can edit and roll them out without a code deploy | :white_check_mark: [Docs](pydantic_ai_harness/logfire/) | |
 
 > Packages by [vstorm-co](https://github.com/vstorm-co) are endorsed by the Pydantic AI team. We're working with them to upstream some of their implementations into this repo.
 
