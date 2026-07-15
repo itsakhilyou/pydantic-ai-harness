@@ -113,8 +113,8 @@ import logging
 logging.captureWarnings(True)  # warnings.warn(...) -> the 'py.warnings' logger -> Logfire
 ```
 
-This experimental version emits a warning only; a dedicated Logfire event may be
-added when the capability graduates.
+For now the monitor emits a warning only; a dedicated Logfire event may be added
+as the capability matures.
 
 ## Composition
 
