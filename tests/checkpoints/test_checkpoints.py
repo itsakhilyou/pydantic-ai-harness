@@ -19,7 +19,7 @@ from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart, ToolCall
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 from pydantic_ai.toolsets import FunctionToolset
 
-from pydantic_ai_harness.experimental.checkpoints import (
+from pydantic_ai_harness.checkpoints import (
     Checkpoint,
     CheckpointError,
     Checkpoints,
@@ -27,7 +27,7 @@ from pydantic_ai_harness.experimental.checkpoints import (
     CheckpointWarning,
     RestoreCheckpointToolset,
 )
-from pydantic_ai_harness.experimental.checkpoints._shadow import shadow_dir_for
+from pydantic_ai_harness.checkpoints._shadow import shadow_dir_for
 
 pytestmark = pytest.mark.anyio
 

@@ -119,6 +119,7 @@ Each capability is a self-contained battery you drop into an agent's `capabiliti
 | [Compaction](compaction.md) | Keeps a run within token limits: sliding-window trimming, LLM-powered summarization of older messages, and warnings before the context or iteration ceiling is hit. | -- |
 | [Overflowing Tool Output](overflowing-tool-output.md) | Reduces an oversized tool return when it is produced -- truncate, spill to a queryable file, or summarize -- so a large payload does not persist in history and get re-sent every request. | -- |
 | [Step Persistence](step-persistence.md) | Saves and restores full conversation state; snapshot, resume (`continue_run`), and fork (`fork_run`) a run. | -- |
+| [Checkpoints](checkpoints.md) | Snapshots the project's files into a shadow git repo before a mutating tool runs, so file damage is restorable mid-run. | -- |
 | [Media](media.md) | Offloads large `BinaryContent` to content-addressed stores (local or S3) so big media does not bloat message history. | -- |
 | [Subagents](subagents.md) | Delegates subtasks to specialized child agents through a delegate tool. | -- |
 | [Dynamic Workflow](dynamic-workflow.md) | Orchestrates sub-agents from a model-written Python script -- fan-out, chaining, and voting in a single tool call. | `dynamic-workflow` |

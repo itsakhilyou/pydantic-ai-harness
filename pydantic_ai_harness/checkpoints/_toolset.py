@@ -10,7 +10,7 @@ import anyio.to_thread
 from pydantic_ai.tools import AgentDepsT
 from pydantic_ai.toolsets import FunctionToolset
 
-from pydantic_ai_harness.experimental.checkpoints._shadow import CheckpointStore
+from pydantic_ai_harness.checkpoints._shadow import CheckpointStore
 
 
 class RestoreCheckpointToolset(FunctionToolset[AgentDepsT]):

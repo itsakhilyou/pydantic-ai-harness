@@ -1,26 +1,21 @@
-# Checkpoints
+---
+title: Checkpoints
+description: Snapshot the project before a mutating tool runs, so any damage a later tool call does is restorable.
+---
 
-> [!WARNING]
-> **Experimental.** This capability lives under `pydantic_ai_harness.experimental` and may
-> change or be removed in any release, without a deprecation period. Import it from the
-> experimental path -- there is no top-level export:
->
-> ```python
-> from pydantic_ai_harness.experimental.checkpoints import Checkpoints
-> ```
->
-> Importing any experimental capability emits a `HarnessExperimentalWarning`. Silence **all**
-> harness experimental warnings with a single filter (no per-capability lines needed):
->
-> ```python
-> import warnings
-> from pydantic_ai_harness.experimental import HarnessExperimentalWarning
->
-> warnings.filterwarnings('ignore', category=HarnessExperimentalWarning)
-> ```
+# Checkpoints
 
 File-level undo for coding agents: snapshot the project before a mutating tool runs, so any
 damage a later tool call does is restorable.
+
+> [!NOTE]
+> Import this capability from its submodule. It is not re-exported from `pydantic_ai_harness`:
+>
+> ```python
+> from pydantic_ai_harness.checkpoints import Checkpoints
+> ```
+
+Checkpoints is a released, non-experimental capability. Pydantic AI Harness is still on 0.x releases, so the API may change between minor releases. See the repository [version policy](https://github.com/pydantic/pydantic-ai-harness#version-policy).
 
 ## The problem
 
@@ -38,7 +33,7 @@ with `restore`, or list them with `checkpoints`.
 
 ```python
 from pydantic_ai import Agent
-from pydantic_ai_harness.experimental.checkpoints import Checkpoints
+from pydantic_ai_harness.checkpoints import Checkpoints
 from pydantic_ai_harness.filesystem import FileSystem
 
 checkpoints = Checkpoints(project_root='.')
@@ -120,8 +115,8 @@ Checkpoints(expose_tool=True)
 - **Last-writer-wins across concurrent runs.** Runs against the same project share one shadow
   repo; each snapshot commits the whole work tree as it looks at that instant.
 
-## See also
+## Further reading
 
-- [Pydantic AI capabilities](https://ai.pydantic.dev/capabilities/)
-- [Hooks](https://ai.pydantic.dev/hooks/) -- `before_tool_execute` is the snapshot trigger
-- Survey that motivated this capability: [broad survey -- cli coding harnesses, recommendation 5](https://github.com/pydantic/pydantic-ai-notes/blob/main/features/harness-comparison/2026-07-06%20broad%20survey%20-%20cli%20coding%20harnesses.md)
+- [`pydantic_ai_harness.checkpoints` source](https://github.com/pydantic/pydantic-ai-harness/tree/main/pydantic_ai_harness/checkpoints/)
+- [Pydantic AI capabilities](/ai/core-concepts/capabilities/)
+- [Pydantic AI hooks](/ai/core-concepts/hooks/) -- the snapshot is taken before each mutating tool call

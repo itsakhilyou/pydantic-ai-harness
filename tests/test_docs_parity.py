@@ -121,6 +121,7 @@ _CAPABILITY_PAGE_META = {
     'compaction.md': ('compaction', 'Compaction'),
     'overflowing-tool-output.md': ('overflowing_tool_output', 'Overflowing Tool Output'),
     'step-persistence.md': ('step_persistence', 'Step Persistence'),
+    'checkpoints.md': ('checkpoints', 'Checkpoints'),
     'media.md': ('media', 'Media Externalization'),
     'subagents.md': ('subagents', 'Subagents'),
     'dynamic-workflow.md': ('dynamic_workflow', 'Dynamic Workflow'),

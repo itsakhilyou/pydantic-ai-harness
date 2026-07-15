@@ -21,13 +21,13 @@ from pydantic_ai.messages import ToolCallPart
 from pydantic_ai.tools import AgentDepsT, RunContext, ToolDefinition
 from pydantic_ai.toolsets import AbstractToolset
 
-from pydantic_ai_harness.experimental.checkpoints._shadow import (
+from pydantic_ai_harness.checkpoints._shadow import (
     Checkpoint,
     CheckpointError,
     CheckpointStore,
     shadow_dir_for,
 )
-from pydantic_ai_harness.experimental.checkpoints._toolset import RestoreCheckpointToolset
+from pydantic_ai_harness.checkpoints._toolset import RestoreCheckpointToolset
 
 DEFAULT_MUTATING_TOOLS: frozenset[str] = frozenset(
     {
@@ -74,7 +74,7 @@ class CheckpointWarning(UserWarning):
     the stdlib `warnings` machinery::
 
         import warnings
-        from pydantic_ai_harness.experimental.checkpoints import CheckpointWarning
+        from pydantic_ai_harness.checkpoints import CheckpointWarning
 
         warnings.filterwarnings('error', category=CheckpointWarning)
     """
@@ -91,7 +91,7 @@ class Checkpoints(AbstractCapability[AgentDepsT]):
 
     ```python
     from pydantic_ai import Agent
-    from pydantic_ai_harness.experimental.checkpoints import Checkpoints
+    from pydantic_ai_harness.checkpoints import Checkpoints
     from pydantic_ai_harness.filesystem import FileSystem
 
     checkpoints = Checkpoints(project_root='.')
