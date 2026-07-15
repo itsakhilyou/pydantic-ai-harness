@@ -1,6 +1,8 @@
-# CacheStabilityMonitor
+# Cache Stability Monitor
 
 Warn when a run's prompt cache hit collapses between model requests.
+
+[Source](https://github.com/pydantic/pydantic-ai-harness/tree/main/pydantic_ai_harness/cache_stability/)
 
 Prompt caching pays off only while the cacheable prefix (tools, then system
 instructions, then message history) stays byte-stable across a run's consecutive
@@ -34,15 +36,22 @@ isn't mistaken for a moved prefix.
 The verdict is cross-provider for free -- pyai normalizes every provider into the
 `cache_read_tokens` / `cache_write_tokens` fields on `RequestUsage`.
 
-> This capability is experimental and private. It is not re-exported from
-> `pydantic_ai_harness`; import it from its own module. Its API may change or be
-> removed in any release.
+> [!NOTE]
+> Import this capability from its submodule. It is not re-exported from `pydantic_ai_harness`:
+>
+> ```python
+> from pydantic_ai_harness.cache_stability import CacheStabilityMonitor
+> ```
+
+This is a preview capability: its surface is not a committed public API and may
+change or be removed in any release. It is the opt-in observe arm of the broader
+prompt-cache-prefix-stability work.
 
 ## Minimal usage
 
 ```python
 from pydantic_ai import Agent
-from pydantic_ai_harness.experimental.cache_stability import CacheStabilityMonitor
+from pydantic_ai_harness.cache_stability import CacheStabilityMonitor
 
 agent = Agent('anthropic:claude-sonnet-4-5', capabilities=[CacheStabilityMonitor()])
 await agent.run('...')  # a CacheBustWarning fires if a cached prefix collapses mid-run
@@ -74,7 +83,7 @@ as you would manage any other `UserWarning`:
 
 ```python
 import warnings
-from pydantic_ai_harness.experimental.cache_stability import CacheBustWarning
+from pydantic_ai_harness.cache_stability import CacheBustWarning
 
 # Silence the whole category:
 warnings.filterwarnings('ignore', category=CacheBustWarning)
@@ -90,7 +99,7 @@ warnings.filterwarnings('error', category=CacheBustWarning)
 
 In tests, assert an intentional bust with `pytest.warns(CacheBustWarning)`, or
 silence a legitimately-busting test with
-`@pytest.mark.filterwarnings('ignore::pydantic_ai_harness.experimental.cache_stability.CacheBustWarning')`.
+`@pytest.mark.filterwarnings('ignore::pydantic_ai_harness.cache_stability.CacheBustWarning')`.
 
 ## Logfire
 

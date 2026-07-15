@@ -21,7 +21,7 @@ from pydantic_ai.models.fallback import FallbackModel
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 from pydantic_ai.usage import RequestUsage
 
-from pydantic_ai_harness.experimental.cache_stability import (
+from pydantic_ai_harness.cache_stability import (
     CacheBustWarning,
     CacheStabilityMonitor,
 )

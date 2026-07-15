@@ -29,7 +29,7 @@ _CacheKey = tuple[str | None, str | None]
 
 _SILENCE_HINT = (
     '    import warnings\n'
-    '    from pydantic_ai_harness.experimental.cache_stability import CacheBustWarning\n'
+    '    from pydantic_ai_harness.cache_stability import CacheBustWarning\n'
     "    warnings.filterwarnings('ignore', category=CacheBustWarning)  # silence\n"
     "    warnings.filterwarnings('error', category=CacheBustWarning)   # escalate in dev/CI"
 )
@@ -48,7 +48,7 @@ class CacheBustWarning(UserWarning):
     (no bespoke API):
 
         import warnings
-        from pydantic_ai_harness.experimental.cache_stability import CacheBustWarning
+        from pydantic_ai_harness.cache_stability import CacheBustWarning
 
         # Silence the whole category:
         warnings.filterwarnings('ignore', category=CacheBustWarning)
@@ -63,7 +63,7 @@ class CacheBustWarning(UserWarning):
 
     In tests, assert an intentional bust with `pytest.warns(CacheBustWarning)`, or silence
     a legitimately-busting test with
-    `@pytest.mark.filterwarnings('ignore::pydantic_ai_harness.experimental.cache_stability.CacheBustWarning')`.
+    `@pytest.mark.filterwarnings('ignore::pydantic_ai_harness.cache_stability.CacheBustWarning')`.
     """
 
 
@@ -91,7 +91,7 @@ class CacheStabilityMonitor(AbstractCapability[AgentDepsT]):
 
     ```python
     from pydantic_ai import Agent
-    from pydantic_ai_harness.experimental.cache_stability import CacheStabilityMonitor
+    from pydantic_ai_harness.cache_stability import CacheStabilityMonitor
 
     agent = Agent('anthropic:claude-sonnet-4-5', capabilities=[CacheStabilityMonitor()])
     await agent.run('...')  # a CacheBustWarning fires if a cached prefix collapses mid-run
