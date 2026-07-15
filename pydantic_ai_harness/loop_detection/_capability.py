@@ -186,7 +186,7 @@ class LoopDetection(AbstractCapability[AgentDepsT]):
 
     ```python
     from pydantic_ai import Agent
-    from pydantic_ai_harness.experimental.loop_detection import LoopDetection
+    from pydantic_ai_harness.loop_detection import LoopDetection
 
     agent = Agent('anthropic:claude-sonnet-4-5', capabilities=[LoopDetection()])
     await agent.run('...')  # a stuck loop nudges the model to change approach

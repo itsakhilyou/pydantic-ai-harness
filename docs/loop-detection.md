@@ -1,25 +1,20 @@
-# LoopDetection
+---
+title: Loop Detection
+description: Detect when an agent is stuck in a repeated-action loop and intervene.
+---
 
-> [!WARNING]
-> **Experimental.** This capability lives under `pydantic_ai_harness.experimental` and may
-> change or be removed in any release, without a deprecation period. Import it from the
-> experimental path -- there is no top-level export:
->
-> ```python
-> from pydantic_ai_harness.experimental.loop_detection import LoopDetection
-> ```
->
-> Importing any experimental capability emits a `HarnessExperimentalWarning`. Silence **all**
-> harness experimental warnings with a single filter (no per-capability lines needed):
->
-> ```python
-> import warnings
-> from pydantic_ai_harness.experimental import HarnessExperimentalWarning
->
-> warnings.filterwarnings('ignore', category=HarnessExperimentalWarning)
-> ```
+# Loop Detection
 
 Detect when an agent is stuck in a repeated-action loop and intervene.
+
+> [!NOTE]
+> Import this capability from its submodule. It is not re-exported from `pydantic_ai_harness`:
+>
+> ```python
+> from pydantic_ai_harness.loop_detection import LoopDetection
+> ```
+
+Loop Detection is a released, non-experimental capability. Pydantic AI Harness is still on 0.x releases, so the API may change between minor releases. See the repository [version policy](https://github.com/pydantic/pydantic-ai-harness#version-policy).
 
 ## The problem
 
@@ -33,7 +28,7 @@ detection to break out of this. `LoopDetection` is that guardrail as a composabl
 
 ```python
 from pydantic_ai import Agent
-from pydantic_ai_harness.experimental.loop_detection import LoopDetection
+from pydantic_ai_harness.loop_detection import LoopDetection
 
 agent = Agent('anthropic:claude-sonnet-4-5', capabilities=[LoopDetection()])
 await agent.run('...')  # a stuck loop nudges the model to change approach
@@ -67,7 +62,7 @@ same loop has to rebuild before it fires again rather than triggering on every l
   steering.
 
 ```python
-from pydantic_ai_harness.experimental.loop_detection import LoopDetected, LoopDetection
+from pydantic_ai_harness.loop_detection import LoopDetected, LoopDetection
 
 def on_loop(detected: LoopDetected) -> None:
     print(detected.tier, detected.tool_name, detected.count)
@@ -113,3 +108,9 @@ span is recording the event is a no-op.
   of scope until harness settles a small-model-roles convention.
 - **No pause/approval integration.** The actions are nudge, error, or callback; wiring a loop
   into an approval/pause flow is left to the caller's callback.
+
+## Further reading
+
+- [`pydantic_ai_harness.loop_detection` source](https://github.com/pydantic/pydantic-ai-harness/tree/main/pydantic_ai_harness/loop_detection/)
+- [Pydantic AI capabilities](/ai/core-concepts/capabilities/)
+- [Pydantic AI hooks](/ai/core-concepts/hooks/) -- `after_tool_execute` and `after_model_request` (observe) and `for_run` (per-run state) are the surfaces used here

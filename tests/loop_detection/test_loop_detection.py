@@ -1,4 +1,4 @@
-"""Tests for the experimental `LoopDetection` capability.
+"""Tests for the `LoopDetection` capability.
 
 Behavior is driven through `Agent(..., capabilities=[LoopDetection()])` with a `FunctionModel`
 that emits a scripted sequence of tool calls or text, exercising each detection tier the way a
@@ -18,7 +18,7 @@ from pydantic_ai import Agent
 from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart, ToolCallPart, UserPromptPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 
-from pydantic_ai_harness.experimental.loop_detection import (
+from pydantic_ai_harness.loop_detection import (
     LoopDetected,
     LoopDetectedError,
     LoopDetection,
