@@ -26,7 +26,7 @@ from pydantic_ai import Agent
 from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.models import Model
 from pydantic_ai.settings import ModelSettings
-from pydantic_ai_harness.experimental.compaction import (
+from pydantic_ai_harness.compaction import (
     ClearToolResults,
     SummarizingCompaction,
     TieredCompaction,

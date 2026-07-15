@@ -57,7 +57,3 @@ include = ['src']
 [tool.pytest.ini_options]
 testpaths = ['tests']
 anyio_mode = 'auto'
-filterwarnings = [
-    # Harness compaction capabilities are experimental and warn on import.
-    'ignore::pydantic_ai_harness.experimental.HarnessExperimentalWarning',
-]

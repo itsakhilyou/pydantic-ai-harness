@@ -7,7 +7,7 @@ from pydantic_ai import Agent
 from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart, ToolCallPart, ToolReturnPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 from pydantic_ai.models.test import TestModel
-from pydantic_ai_harness.experimental.compaction import TieredCompaction
+from pydantic_ai_harness.compaction import TieredCompaction
 
 from pydantic_ai_harness_terminal_bench.agent import build_agent, build_compaction
 from pydantic_ai_harness_terminal_bench.tools import CommandResult, TerminalBenchDeps
