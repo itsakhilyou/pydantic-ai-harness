@@ -21,10 +21,10 @@ what the previous one cached; a large drop is the observable signature of a
 collapse.
 
 Keying per provider and model means a mid-run model switch does not warn: a
-`FallbackModel` failover or a per-step model change hits a different provider's
-cache, which is empty, so it starts its own high-water mark. Marks are kept per key
-rather than reset, so switching back to an earlier model within its cache TTL still
-compares against that model's prefix.
+`FallbackModel` failover or a per-step model change uses a different cache key, so
+the monitor starts a fresh high-water mark for it instead of comparing against the
+previous model's. Marks are kept per key rather than reset, so switching back to an
+earlier model within its cache TTL still compares against that model's prefix.
 
 A collapse has two shapes the monitor cannot tell apart, so the warning names both:
 the cacheable prefix moved, or the provider's cache expired under an unchanged prefix

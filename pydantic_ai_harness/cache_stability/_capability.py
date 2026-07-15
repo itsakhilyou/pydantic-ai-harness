@@ -78,8 +78,8 @@ class CacheStabilityMonitor(AbstractCapability[AgentDepsT]):
     back fewer than `collapse_ratio` of that established prefix, it emits a `CacheBustWarning`.
 
     Keying per provider and model means a mid-run model switch does not warn: a `FallbackModel`
-    failover or a per-step model change hits a different provider's cache, which is empty, so it
-    starts a fresh high-water mark instead of collapsing an existing one. Marks are kept per key
+    failover or a per-step model change uses a different cache key, so it starts a fresh high-water
+    mark for that key instead of comparing against the previous model's. Marks are kept per key
     rather than reset, so switching back to an earlier model within its cache TTL still compares
     against that model's established prefix.
 
@@ -128,6 +128,14 @@ class CacheStabilityMonitor(AbstractCapability[AgentDepsT]):
     _marks: dict[_CacheKey, int] = field(default_factory=dict[_CacheKey, int], compare=False)
     _step: int = field(default=0, compare=False)
     _last_time: datetime | None = field(default=None, compare=False)
+
+    def __post_init__(self) -> None:
+        if not 0.0 <= self.collapse_ratio <= 1.0:
+            raise ValueError('collapse_ratio must be between 0.0 and 1.0')
+        if self.min_prefix_tokens < 0:
+            raise ValueError('min_prefix_tokens must be non-negative')
+        if self.cache_ttl_seconds < 0:
+            raise ValueError('cache_ttl_seconds must be non-negative')
 
     async def for_run(self, ctx: RunContext[AgentDepsT]) -> AbstractCapability[AgentDepsT]:
         """Reset per-run state (per-key high-water marks, step, timing) so each run is judged alone."""

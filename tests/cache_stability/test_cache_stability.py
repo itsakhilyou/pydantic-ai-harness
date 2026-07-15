@@ -216,3 +216,15 @@ async def test_small_gap_keeps_generic_expiry_hedge() -> None:
     message = str(record[0].message)
     assert 'e.g. a gap longer than the cache TTL' in message
     assert 'past the assumed' not in message
+
+
+def test_invalid_config_rejected() -> None:
+    """Out-of-range thresholds fail fast at construction rather than distorting detection."""
+    with pytest.raises(ValueError, match='collapse_ratio'):
+        CacheStabilityMonitor[None](collapse_ratio=1.5)
+    with pytest.raises(ValueError, match='collapse_ratio'):
+        CacheStabilityMonitor[None](collapse_ratio=-0.1)
+    with pytest.raises(ValueError, match='min_prefix_tokens'):
+        CacheStabilityMonitor[None](min_prefix_tokens=-1)
+    with pytest.raises(ValueError, match='cache_ttl_seconds'):
+        CacheStabilityMonitor[None](cache_ttl_seconds=-1.0)
