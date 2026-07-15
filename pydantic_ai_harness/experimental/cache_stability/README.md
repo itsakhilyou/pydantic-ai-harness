@@ -12,10 +12,24 @@ that collapse visible.
 This is the **observe** signal: it reads the provider's own verdict rather than
 guessing from the structured request. On each response it reads
 `usage.cache_read_tokens` and tracks the largest cacheable prefix the run has
-established (`cache_read_tokens + cache_write_tokens`, a high-water mark). Because
-message history is append-only, a stable prefix means each request reads back at
-least what the previous one cached; a large drop is the observable signature of a
-bust, whatever the cause.
+established (`cache_read_tokens + cache_write_tokens`, a high-water mark), keyed by
+the response's `(provider_name, model_name)`. Because message history is
+append-only, a stable prefix means each request for that model reads back at least
+what the previous one cached; a large drop is the observable signature of a
+collapse.
+
+Keying per provider and model means a mid-run model switch does not warn: a
+`FallbackModel` failover or a per-step model change hits a different provider's
+cache, which is empty, so it starts its own high-water mark. Marks are kept per key
+rather than reset, so switching back to an earlier model within its cache TTL still
+compares against that model's prefix.
+
+A collapse has two shapes the monitor cannot tell apart, so the warning names both:
+the cacheable prefix moved, or the provider's cache expired under an unchanged prefix
+(a gap between requests longer than the cache TTL -- Anthropic's default is 5 minutes,
+refreshed on each hit). When the gap since the previous request exceeds
+`cache_ttl_seconds`, the message reports the gap so a long tool or approval pause
+isn't mistaken for a moved prefix.
 
 The verdict is cross-provider for free -- pyai normalizes every provider into the
 `cache_read_tokens` / `cache_write_tokens` fields on `RequestUsage`.
@@ -48,6 +62,10 @@ belongs at the wire level in tests, not here.
 - `min_prefix_tokens` (default `1024`): only judge collapse once the established
   prefix reaches this many tokens. Below a provider's minimum cacheable size
   (Anthropic's is 1024) `cache_read_tokens` is noisy or zero.
+- `cache_ttl_seconds` (default `300`): the assumed provider cache TTL. Message-only
+  -- when the gap since the previous request exceeds it, the warning notes the
+  collapse may be a cache expiry rather than a moved prefix. It does not change
+  whether a warning fires. Lower it for providers with a shorter cache lifetime.
 
 ## Silencing and escalation
 
@@ -74,6 +92,21 @@ In tests, assert an intentional bust with `pytest.warns(CacheBustWarning)`, or
 silence a legitimately-busting test with
 `@pytest.mark.filterwarnings('ignore::pydantic_ai_harness.experimental.cache_stability.CacheBustWarning')`.
 
+## Logfire
+
+Logfire bridges the stdlib `logging` module, not the `warnings` module, so a
+`CacheBustWarning` does not reach your traces on its own. To route busts into
+Logfire, redirect Python warnings to the `logging` system once at startup:
+
+```python
+import logging
+
+logging.captureWarnings(True)  # warnings.warn(...) -> the 'py.warnings' logger -> Logfire
+```
+
+This experimental version emits a warning only; a dedicated Logfire event may be
+added when the capability graduates.
+
 ## Composition
 
 - The monitor only implements `for_run` and `after_model_request`; it adds no
@@ -85,7 +118,12 @@ silence a legitimately-busting test with
 
 ## Scope
 
-- **Observational only.** It reports that a cached prefix collapsed, not why. The
-  structural explanation ("what moved the prefix this turn") is a separate job.
+- **Observational only.** It reports that a cached prefix collapsed, not why -- a
+  moved prefix and a provider-side cache expiry look the same from the token counts,
+  so the warning names both. The structural explanation ("what moved the prefix this
+  turn") is a separate job.
 - **Fires only when caching is enabled and reported.** A run that never establishes
   a cache never warns.
+- **A mid-run model switch does not warn.** Marks are per `(provider_name,
+  model_name)`, so a `FallbackModel` failover starts a fresh mark rather than
+  collapsing the previous model's.
