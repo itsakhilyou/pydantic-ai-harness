@@ -17,6 +17,7 @@
       { "label": "Planning", "slug": "planning" },
       { "label": "Memory", "slug": "memory" },
       { "label": "Runtime Authoring", "slug": "runtime-authoring" },
+      { "label": "Staleness Tracker", "slug": "staleness" },
       { "label": "Guardrails", "slug": "guardrails" },
       { "label": "Managed Prompt", "slug": "managed-prompt" },
       { "label": "ACP", "slug": "acp" }

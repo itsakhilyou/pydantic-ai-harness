@@ -1,25 +1,20 @@
-# StalenessTracker
+---
+title: Staleness Tracker
+description: Tell the model when files it read have changed on disk since it read them.
+---
 
-> [!WARNING]
-> **Experimental.** This capability lives under `pydantic_ai_harness.experimental` and may
-> change or be removed in any release, without a deprecation period. Import it from the
-> experimental path -- there is no top-level export:
->
-> ```python
-> from pydantic_ai_harness.experimental.staleness import StalenessTracker
-> ```
->
-> Importing any experimental capability emits a `HarnessExperimentalWarning`. Silence **all**
-> harness experimental warnings with a single filter (no per-capability lines needed):
->
-> ```python
-> import warnings
-> from pydantic_ai_harness.experimental import HarnessExperimentalWarning
->
-> warnings.filterwarnings('ignore', category=HarnessExperimentalWarning)
-> ```
+# Staleness Tracker
 
 Tell the model when files it read have changed on disk since it read them.
+
+> [!NOTE]
+> Import this capability from its submodule. It is not re-exported from `pydantic_ai_harness`:
+>
+> ```python
+> from pydantic_ai_harness.staleness import StalenessTracker
+> ```
+
+Staleness Tracker is a released, non-experimental capability. Pydantic AI Harness is still on 0.x releases, so the API may change between minor releases. See the repository [version policy](https://github.com/pydantic/pydantic-ai-harness#version-policy).
 
 ## The problem
 
@@ -52,7 +47,7 @@ The agent's own writes are never flagged as staleness: observation happens in
 
 ```python
 from pydantic_ai import Agent
-from pydantic_ai_harness.experimental.staleness import StalenessTracker
+from pydantic_ai_harness.staleness import StalenessTracker
 
 agent = Agent('anthropic:claude-sonnet-4-6', capabilities=[StalenessTracker()])
 result = agent.run_sync('Refactor the auth module.')
@@ -117,18 +112,18 @@ This is the small, focused freshness signal, not a filesystem watcher. Out of sc
 ## Design notes
 
 - **Notice keeps firing until the model re-reads.** A changed file stays in the notice on
-  every subsequent request until the model reads it again (which refreshes the record). This
-  mirrors Hermes's edit-staleness ledger: the honest signal is "still stale", not "told you
-  once". Because the notice is ephemeral, repeating it costs nothing in durable history.
+  every subsequent request until the model reads it again (which refreshes the record). The
+  honest signal is "still stale", not "told you once". Because the notice is ephemeral,
+  repeating it costs nothing in durable history.
 - **Delivery channel.** The notice rides the ephemeral message tail behind a `CachePoint`
   (the `Planning` pattern), so it never mutates stored history and never busts the cache --
   matching the cache-stability contract. The `<system-reminder>` wording aligns with the
-  `SystemReminders` convention (PR #181); the delivery mechanism deliberately diverges from
-  #181's persisted `before_model_request` injection to honor the no-history-mutation rule.
+  system-reminders convention; the delivery mechanism deliberately avoids persisted
+  `before_model_request` injection to honor the no-history-mutation rule.
 
 ## Further reading
 
-- [Pydantic AI capabilities](https://ai.pydantic.dev/capabilities/)
-- [Hooks](https://ai.pydantic.dev/hooks/) -- `after_tool_execute` (observe) and
+- [`pydantic_ai_harness.staleness` source](https://github.com/pydantic/pydantic-ai-harness/tree/main/pydantic_ai_harness/staleness/)
+- [Pydantic AI capabilities](/ai/core-concepts/capabilities/)
+- [Pydantic AI hooks](/ai/core-concepts/hooks/) -- `after_tool_execute` (observe) and
   `wrap_model_request` (ephemeral inject) are the two surfaces used here
-- [What Fable wants from a harness](https://github.com/pydantic/pydantic-ai-notes/blob/main/features/harness-comparison/2026-07-06%20what%20fable%20wants%20from%20a%20harness.md) §3

@@ -121,7 +121,7 @@ class StalenessTracker(AbstractCapability[AgentDepsT]):
 
     ```python
     from pydantic_ai import Agent
-    from pydantic_ai_harness.experimental.staleness import StalenessTracker
+    from pydantic_ai_harness.staleness import StalenessTracker
 
     agent = Agent('anthropic:claude-sonnet-4-6', capabilities=[StalenessTracker()])
     ```

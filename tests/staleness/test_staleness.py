@@ -6,9 +6,6 @@ steps, mutate the files on disk to simulate concurrent change. Each step capture
 the messages the model was actually handed, so we can assert the ephemeral
 `<system-reminder>` notice reached the model without ever entering the durable
 message history. Focused unit tests cover the extractor, LRU, and notice edges.
-
-The repo runs pytest with `filterwarnings=['error']`, so the experimental-import
-warning is silenced globally in `pyproject.toml`; nothing else should warn here.
 """
 
 from __future__ import annotations
@@ -33,7 +30,7 @@ from pydantic_ai.models import ModelRequestContext, ModelRequestParameters
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 from pydantic_ai.models.test import TestModel
 
-from pydantic_ai_harness.experimental.staleness import StalenessTracker
+from pydantic_ai_harness.staleness import StalenessTracker
 
 pytestmark = pytest.mark.anyio
 
