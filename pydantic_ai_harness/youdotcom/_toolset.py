@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Literal
+from typing import Annotated, Literal
 
 import httpx
-from pydantic import BaseModel, TypeAdapter
+from pydantic import BaseModel, Field, TypeAdapter
 from pydantic_ai.tools import AgentDepsT
 from pydantic_ai.toolsets import FunctionToolset
 from typing_extensions import NotRequired, TypedDict
@@ -150,6 +150,18 @@ ResearchEffort = Literal['lite', 'standard', 'deep', 'exhaustive']
 
 FinanceResearchEffort = Literal['deep', 'exhaustive']
 """Research depth level for the Finance Research API."""
+
+SearchCount = Annotated[int, Field(ge=1, le=100)]
+"""Maximum number of search results per section (1-100)."""
+
+CrawlTimeoutSeconds = Annotated[int, Field(ge=1, le=60)]
+"""Per-URL crawl timeout in seconds (1-60)."""
+
+ContentsUrls = Annotated[list[str], Field(max_length=10)]
+"""URLs to fetch content from (maximum 10 per request)."""
+
+ResearchInput = Annotated[str, Field(max_length=40000)]
+"""The research question (maximum 40,000 characters)."""
 
 
 class YouLivecrawlContents(TypedDict, total=False):
@@ -334,7 +346,7 @@ class _RawSearchResults(BaseModel):
 class _RawSearchResponse(BaseModel):
     """Top-level You.com search API response."""
 
-    results: _RawSearchResults = _RawSearchResults()
+    results: _RawSearchResults
 
 
 # ---------------------------------------------------------------------------
@@ -419,7 +431,7 @@ class _RawResearchOutput(BaseModel):
 class _RawResearchResponse(BaseModel):
     """Top-level research or finance research API response."""
 
-    output: _RawResearchOutput = _RawResearchOutput(content='', content_type='text')
+    output: _RawResearchOutput
 
 
 class YoudotcomToolset(FunctionToolset[AgentDepsT]):
@@ -495,10 +507,10 @@ class YoudotcomToolset(FunctionToolset[AgentDepsT]):
         self,
         query: str,
         *,
-        count: int | None = None,
+        count: SearchCount | None = None,
         freshness: Freshness | None = None,
-        country: str | None = None,
-        language: str | None = None,
+        country: Country | None = None,
+        language: Language | None = None,
         safesearch: SafeSearch | None = None,
         livecrawl: LiveCrawl | None = None,
         livecrawl_formats: LiveCrawlFormats | None = None,
@@ -537,10 +549,10 @@ class YoudotcomToolset(FunctionToolset[AgentDepsT]):
 
     async def extract_contents(
         self,
-        urls: list[str],
+        urls: ContentsUrls,
         *,
         formats: list[ContentsFormat] | None = None,
-        crawl_timeout: int | None = None,
+        crawl_timeout: CrawlTimeoutSeconds | None = None,
     ) -> list[YouContentsResult]:
         """Extract clean HTML or Markdown content from web pages.
 
@@ -562,7 +574,7 @@ class YoudotcomToolset(FunctionToolset[AgentDepsT]):
 
     async def research(
         self,
-        input: str,
+        input: ResearchInput,
         *,
         research_effort: ResearchEffort | None = None,
     ) -> YouResearchResult:
@@ -583,7 +595,7 @@ class YoudotcomToolset(FunctionToolset[AgentDepsT]):
 
     async def finance_research(
         self,
-        input: str,
+        input: ResearchInput,
         *,
         research_effort: FinanceResearchEffort | None = None,
     ) -> YouResearchResult:
@@ -612,8 +624,8 @@ class YoudotcomToolset(FunctionToolset[AgentDepsT]):
         query: str,
         count: int | None,
         freshness: Freshness | None,
-        country: str | None,
-        language: str | None,
+        country: Country | None,
+        language: Language | None,
         safesearch: SafeSearch | None,
         livecrawl: LiveCrawl | None,
         livecrawl_formats: LiveCrawlFormats | None,

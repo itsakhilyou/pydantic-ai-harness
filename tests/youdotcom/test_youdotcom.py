@@ -6,21 +6,11 @@ from datetime import datetime, timezone
 
 import httpx
 import pytest
+from pydantic import ValidationError
 from pydantic_ai import Agent
 from pydantic_ai.models.test import TestModel
 
 from pydantic_ai_harness.youdotcom import Youdotcom, YoudotcomToolset
-from pydantic_ai_harness.youdotcom._toolset import (
-    _ContentsResponseAdapter,
-    _RawContentsItem,
-    _RawContentsMetadata,
-    _RawLivecrawlContents,
-    _RawResearchResponse,
-    _RawResearchSource,
-    _RawSearchResponse,
-    _RawSearchResult,
-    _RawWebResult,
-)
 
 # ---------------------------------------------------------------------------
 # Payload helpers
@@ -177,164 +167,378 @@ def _make_finance_research_payload() -> dict[str, object]:
     }
 
 
+def _make_malformed_research_payload() -> dict[str, object]:
+    """Build a research payload missing the output key entirely."""
+    return {'error': 'something went wrong'}
+
+
 # ---------------------------------------------------------------------------
-# Search: internal model tests
+# Search: result field integration tests
 # ---------------------------------------------------------------------------
 
 
-class TestRawLivecrawlContents:
-    def test_both_html_and_markdown(self) -> None:
-        contents = _RawLivecrawlContents(html='<p>Hi</p>', markdown='Hi')
-        result = contents.to_contents()
-        assert result is not None
-        assert result.get('html') == '<p>Hi</p>'
-        assert result.get('markdown') == 'Hi'
+class TestSearchResultFields:
+    """Exercise search result field mapping through the public search() tool."""
 
-    def test_only_html(self) -> None:
-        contents = _RawLivecrawlContents(html='<p>Hi</p>')
-        result = contents.to_contents()
-        assert result is not None
-        assert result.get('html') == '<p>Hi</p>'
-        assert 'markdown' not in result
+    @staticmethod
+    def _toolset_with_payload(payload: dict[str, object]) -> YoudotcomToolset:
+        """Create a toolset backed by a mock transport returning *payload*."""
+        transport = httpx.MockTransport(lambda req: httpx.Response(200, json=payload))
+        client = httpx.AsyncClient(transport=transport)
+        return YoudotcomToolset(api_key='test', http_client=client)
 
-    def test_only_markdown(self) -> None:
-        contents = _RawLivecrawlContents(markdown='Hi')
-        result = contents.to_contents()
-        assert result is not None
-        assert result.get('markdown') == 'Hi'
-        assert 'html' not in result
+    async def test_web_result_all_fields(self) -> None:
+        toolset = self._toolset_with_payload(_make_web_payload())
+        try:
+            results = await toolset.search('q')
+            assert len(results) == 1
+            r = results[0]
+            assert r['title'] == 'Example Page'
+            assert r['url'] == 'https://example.com'
+            assert r.get('description') == 'An example page.'
+            assert r.get('snippets') == ['snippet one', 'snippet two']
+            assert r.get('thumbnail_url') == 'https://example.com/thumb.png'
+            assert r.get('favicon_url') == 'https://example.com/favicon.ico'
+            assert r.get('authors') == ['Jane Doe']
+            assert r.get('page_age') == datetime(2025, 1, 15, 10, 30, tzinfo=timezone.utc)
+        finally:
+            await toolset._http_client.aclose()  # type: ignore[union-attr]
 
-    def test_neither(self) -> None:
-        contents = _RawLivecrawlContents()
-        assert contents.to_contents() is None
+    async def test_web_result_minimal_fields(self) -> None:
+        payload: dict[str, object] = {'results': {'web': [{'title': 'T', 'url': 'https://x.com'}], 'news': []}}
+        toolset = self._toolset_with_payload(payload)
+        try:
+            results = await toolset.search('q')
+            assert len(results) == 1
+            assert results[0]['title'] == 'T'
+            assert results[0]['url'] == 'https://x.com'
+            assert 'description' not in results[0]
+            assert 'snippets' not in results[0]
+            assert 'thumbnail_url' not in results[0]
+            assert 'favicon_url' not in results[0]
+            assert 'authors' not in results[0]
+            assert 'page_age' not in results[0]
+            assert 'contents' not in results[0]
+        finally:
+            await toolset._http_client.aclose()  # type: ignore[union-attr]
 
-    def test_empty_strings(self) -> None:
-        contents = _RawLivecrawlContents(html='', markdown='')
-        assert contents.to_contents() is None
+    async def test_web_result_empty_description_not_included(self) -> None:
+        payload: dict[str, object] = {
+            'results': {'web': [{'title': 'T', 'url': 'https://x.com', 'description': ''}], 'news': []}
+        }
+        toolset = self._toolset_with_payload(payload)
+        try:
+            results = await toolset.search('q')
+            assert 'description' not in results[0]
+        finally:
+            await toolset._http_client.aclose()  # type: ignore[union-attr]
 
+    async def test_web_result_empty_snippets_not_included(self) -> None:
+        payload: dict[str, object] = {
+            'results': {'web': [{'title': 'T', 'url': 'https://x.com', 'snippets': []}], 'news': []}
+        }
+        toolset = self._toolset_with_payload(payload)
+        try:
+            results = await toolset.search('q')
+            assert 'snippets' not in results[0]
+        finally:
+            await toolset._http_client.aclose()  # type: ignore[union-attr]
 
-class TestRawSearchResultToResult:
-    def test_minimal_fields(self) -> None:
-        raw = _RawSearchResult(title='T', url='https://x.com')
-        result = raw.to_result()
-        assert result['title'] == 'T'
-        assert result['url'] == 'https://x.com'
-        assert 'description' not in result
-        assert 'thumbnail_url' not in result
-        assert 'page_age' not in result
-        assert 'contents' not in result
+    async def test_news_result_no_web_fields(self) -> None:
+        toolset = self._toolset_with_payload(_make_news_payload())
+        try:
+            results = await toolset.search('q')
+            assert len(results) == 1
+            assert results[0]['title'] == 'Breaking News'
+            assert 'snippets' not in results[0]
+            assert 'favicon_url' not in results[0]
+            assert 'authors' not in results[0]
+        finally:
+            await toolset._http_client.aclose()  # type: ignore[union-attr]
 
-    def test_all_fields(self) -> None:
-        raw = _RawSearchResult(
-            title='T',
-            url='https://x.com',
-            description='D',
-            thumbnail_url='https://x.com/t.png',
-            page_age=datetime(2025, 1, 1, tzinfo=timezone.utc),
-            contents=_RawLivecrawlContents(markdown='MD'),
-        )
-        result = raw.to_result()
-        assert result.get('description') == 'D'
-        assert result.get('thumbnail_url') == 'https://x.com/t.png'
-        assert result.get('page_age') == datetime(2025, 1, 1, tzinfo=timezone.utc)
-        assert result.get('contents') == {'markdown': 'MD'}
+    async def test_livecrawl_both_formats(self) -> None:
+        toolset = self._toolset_with_payload(_make_livecrawl_payload())
+        try:
+            results = await toolset.search('q')
+            assert len(results) == 1
+            assert results[0].get('contents') == {'html': '<p>Hello</p>', 'markdown': 'Hello'}
+        finally:
+            await toolset._http_client.aclose()  # type: ignore[union-attr]
 
-    def test_empty_description_not_included(self) -> None:
-        raw = _RawSearchResult(title='T', url='https://x.com', description='')
-        result = raw.to_result()
-        assert 'description' not in result
+    async def test_livecrawl_html_only(self) -> None:
+        payload: dict[str, object] = {
+            'results': {
+                'web': [{'title': 'T', 'url': 'https://x.com', 'contents': {'html': '<p>Hi</p>'}}],
+                'news': [],
+            }
+        }
+        toolset = self._toolset_with_payload(payload)
+        try:
+            results = await toolset.search('q')
+            assert results[0].get('contents') == {'html': '<p>Hi</p>'}
+            assert 'markdown' not in results[0].get('contents', {})
+        finally:
+            await toolset._http_client.aclose()  # type: ignore[union-attr]
 
-    def test_empty_contents_not_included(self) -> None:
-        raw = _RawSearchResult(title='T', url='https://x.com', contents=_RawLivecrawlContents(html='', markdown=''))
-        result = raw.to_result()
-        assert 'contents' not in result
+    async def test_livecrawl_markdown_only(self) -> None:
+        payload: dict[str, object] = {
+            'results': {
+                'web': [{'title': 'T', 'url': 'https://x.com', 'contents': {'markdown': 'Hi'}}],
+                'news': [],
+            }
+        }
+        toolset = self._toolset_with_payload(payload)
+        try:
+            results = await toolset.search('q')
+            assert results[0].get('contents') == {'markdown': 'Hi'}
+            assert 'html' not in results[0].get('contents', {})
+        finally:
+            await toolset._http_client.aclose()  # type: ignore[union-attr]
 
+    async def test_livecrawl_empty_strings_not_included(self) -> None:
+        payload: dict[str, object] = {
+            'results': {
+                'web': [{'title': 'T', 'url': 'https://x.com', 'contents': {'html': '', 'markdown': ''}}],
+                'news': [],
+            }
+        }
+        toolset = self._toolset_with_payload(payload)
+        try:
+            results = await toolset.search('q')
+            assert 'contents' not in results[0]
+        finally:
+            await toolset._http_client.aclose()  # type: ignore[union-attr]
 
-class TestRawWebResultToResult:
-    def test_web_specific_fields(self) -> None:
-        raw = _RawWebResult(
-            title='T',
-            url='https://x.com',
-            snippets=['s1', 's2'],
-            favicon_url='https://x.com/fav.ico',
-            authors=['A', 'B'],
-        )
-        result = raw.to_result()
-        assert result.get('snippets') == ['s1', 's2']
-        assert result.get('favicon_url') == 'https://x.com/fav.ico'
-        assert result.get('authors') == ['A', 'B']
-
-    def test_empty_snippets_not_included(self) -> None:
-        raw = _RawWebResult(title='T', url='https://x.com', snippets=[])
-        result = raw.to_result()
-        assert 'snippets' not in result
-
-    def test_inherits_base_fields(self) -> None:
-        raw = _RawWebResult(
-            title='T',
-            url='https://x.com',
-            description='D',
-            snippets=['s1'],
-        )
-        result = raw.to_result()
-        assert result.get('description') == 'D'
-        assert result.get('snippets') == ['s1']
-
-
-class TestParseSearchResults:
-    def test_web_results(self) -> None:
-        response = _RawSearchResponse.model_validate(_make_web_payload())
-        toolset = YoudotcomToolset(api_key='test')
-        results = toolset._parse_search_results(response)
-        assert len(results) == 1
-        assert results[0]['title'] == 'Example Page'
-        assert results[0]['url'] == 'https://example.com'
-        assert results[0].get('description') == 'An example page.'
-        assert results[0].get('snippets') == ['snippet one', 'snippet two']
-        assert results[0].get('favicon_url') == 'https://example.com/favicon.ico'
-        assert results[0].get('authors') == ['Jane Doe']
-
-    def test_news_results(self) -> None:
-        response = _RawSearchResponse.model_validate(_make_news_payload())
-        toolset = YoudotcomToolset(api_key='test')
-        results = toolset._parse_search_results(response)
-        assert len(results) == 1
-        assert results[0]['title'] == 'Breaking News'
-        assert 'snippets' not in results[0]
-        assert 'favicon_url' not in results[0]
-
-    def test_livecrawl_results(self) -> None:
-        response = _RawSearchResponse.model_validate(_make_livecrawl_payload())
-        toolset = YoudotcomToolset(api_key='test')
-        results = toolset._parse_search_results(response)
-        assert len(results) == 1
-        assert results[0].get('contents') == {'html': '<p>Hello</p>', 'markdown': 'Hello'}
-
-    def test_empty_results(self) -> None:
-        response = _RawSearchResponse.model_validate(_make_empty_search_payload())
-        toolset = YoudotcomToolset(api_key='test')
-        results = toolset._parse_search_results(response)
-        assert results == []
-
-    def test_malformed_payload(self) -> None:
-        response = _RawSearchResponse.model_validate(_make_malformed_search_payload())
-        toolset = YoudotcomToolset(api_key='test')
-        results = toolset._parse_search_results(response)
-        assert results == []
-
-    def test_both_web_and_news(self) -> None:
+    async def test_both_web_and_news(self) -> None:
         payload: dict[str, object] = {
             'results': {
                 'web': [{'title': 'W', 'url': 'https://w.com'}],
                 'news': [{'title': 'N', 'url': 'https://n.com'}],
             }
         }
-        response = _RawSearchResponse.model_validate(payload)
-        toolset = YoudotcomToolset(api_key='test')
-        results = toolset._parse_search_results(response)
-        assert len(results) == 2
-        assert results[0]['title'] == 'W'
-        assert results[1]['title'] == 'N'
+        toolset = self._toolset_with_payload(payload)
+        try:
+            results = await toolset.search('q')
+            assert len(results) == 2
+            assert results[0]['title'] == 'W'
+            assert results[1]['title'] == 'N'
+        finally:
+            await toolset._http_client.aclose()  # type: ignore[union-attr]
+
+    async def test_empty_results(self) -> None:
+        toolset = self._toolset_with_payload(_make_empty_search_payload())
+        try:
+            results = await toolset.search('q')
+            assert results == []
+        finally:
+            await toolset._http_client.aclose()  # type: ignore[union-attr]
+
+    async def test_malformed_payload_raises(self) -> None:
+        """Missing results key raises ValidationError instead of returning empty list."""
+        toolset = self._toolset_with_payload(_make_malformed_search_payload())
+        try:
+            with pytest.raises(ValidationError):
+                await toolset.search('q')
+        finally:
+            await toolset._http_client.aclose()  # type: ignore[union-attr]
+
+
+# ---------------------------------------------------------------------------
+# Contents: result field integration tests
+# ---------------------------------------------------------------------------
+
+
+class TestContentsResultFields:
+    """Exercise contents result field mapping through the public extract_contents() tool."""
+
+    @staticmethod
+    def _toolset_with_payload(payload: list[dict[str, object]]) -> YoudotcomToolset:
+        """Create a toolset backed by a mock transport returning *payload*."""
+        transport = httpx.MockTransport(lambda req: httpx.Response(200, json=payload))
+        client = httpx.AsyncClient(transport=transport)
+        return YoudotcomToolset(api_key='test', http_client=client)
+
+    async def test_all_fields(self) -> None:
+        toolset = self._toolset_with_payload(_make_contents_payload())
+        try:
+            results = await toolset.extract_contents(['https://example.com/page'])
+            assert len(results) == 1
+            r = results[0]
+            assert r['url'] == 'https://example.com/page'
+            assert r['title'] == 'Example Page'
+            assert r.get('html') == '<h1>Example</h1><p>Hello world.</p>'
+            assert r.get('markdown') == '# Example\n\nHello world.'
+            assert r.get('metadata') == {
+                'site_name': 'Example',
+                'favicon_url': 'https://example.com/favicon.ico',
+            }
+        finally:
+            await toolset._http_client.aclose()  # type: ignore[union-attr]
+
+    async def test_minimal_fields(self) -> None:
+        toolset = self._toolset_with_payload(_make_contents_minimal_payload())
+        try:
+            results = await toolset.extract_contents(['https://example.com'])
+            assert len(results) == 1
+            assert results[0]['url'] == 'https://example.com'
+            assert results[0]['title'] == 'Minimal'
+            assert 'html' not in results[0]
+            assert 'markdown' not in results[0]
+            assert 'metadata' not in results[0]
+        finally:
+            await toolset._http_client.aclose()  # type: ignore[union-attr]
+
+    async def test_empty_html_not_included(self) -> None:
+        payload: list[dict[str, object]] = [{'url': 'https://x.com', 'title': 'X', 'html': ''}]
+        toolset = self._toolset_with_payload(payload)
+        try:
+            results = await toolset.extract_contents(['https://x.com'])
+            assert 'html' not in results[0]
+        finally:
+            await toolset._http_client.aclose()  # type: ignore[union-attr]
+
+    async def test_empty_markdown_not_included(self) -> None:
+        payload: list[dict[str, object]] = [{'url': 'https://x.com', 'title': 'X', 'markdown': ''}]
+        toolset = self._toolset_with_payload(payload)
+        try:
+            results = await toolset.extract_contents(['https://x.com'])
+            assert 'markdown' not in results[0]
+        finally:
+            await toolset._http_client.aclose()  # type: ignore[union-attr]
+
+    async def test_metadata_only_site_name(self) -> None:
+        payload: list[dict[str, object]] = [
+            {'url': 'https://x.com', 'title': 'X', 'metadata': {'site_name': 'Example'}}
+        ]
+        toolset = self._toolset_with_payload(payload)
+        try:
+            results = await toolset.extract_contents(['https://x.com'])
+            assert results[0].get('metadata') == {'site_name': 'Example'}
+            assert 'favicon_url' not in results[0].get('metadata', {})
+        finally:
+            await toolset._http_client.aclose()  # type: ignore[union-attr]
+
+    async def test_metadata_only_favicon(self) -> None:
+        payload: list[dict[str, object]] = [
+            {'url': 'https://x.com', 'title': 'X', 'metadata': {'favicon_url': 'https://x.com/fav.ico'}}
+        ]
+        toolset = self._toolset_with_payload(payload)
+        try:
+            results = await toolset.extract_contents(['https://x.com'])
+            assert results[0].get('metadata') == {'favicon_url': 'https://x.com/fav.ico'}
+            assert 'site_name' not in results[0].get('metadata', {})
+        finally:
+            await toolset._http_client.aclose()  # type: ignore[union-attr]
+
+    async def test_empty_metadata_not_included(self) -> None:
+        payload: list[dict[str, object]] = [
+            {'url': 'https://x.com', 'title': 'X', 'metadata': {'site_name': '', 'favicon_url': ''}}
+        ]
+        toolset = self._toolset_with_payload(payload)
+        try:
+            results = await toolset.extract_contents(['https://x.com'])
+            assert 'metadata' not in results[0]
+        finally:
+            await toolset._http_client.aclose()  # type: ignore[union-attr]
+
+    async def test_empty_results(self) -> None:
+        toolset = self._toolset_with_payload([])
+        try:
+            results = await toolset.extract_contents(['https://x.com'])
+            assert results == []
+        finally:
+            await toolset._http_client.aclose()  # type: ignore[union-attr]
+
+
+# ---------------------------------------------------------------------------
+# Research: result field integration tests
+# ---------------------------------------------------------------------------
+
+
+class TestResearchResultFields:
+    """Exercise research result field mapping through the public research() tool."""
+
+    @staticmethod
+    def _toolset_with_payload(payload: dict[str, object]) -> YoudotcomToolset:
+        """Create a toolset backed by a mock transport returning *payload*."""
+        transport = httpx.MockTransport(lambda req: httpx.Response(200, json=payload))
+        client = httpx.AsyncClient(transport=transport)
+        return YoudotcomToolset(api_key='test', http_client=client)
+
+    async def test_full_response(self) -> None:
+        toolset = self._toolset_with_payload(_make_research_payload())
+        try:
+            result = await toolset.research('What happened?')
+            assert result['content'] == '## Answer\n\nSomething happened [[1, 2]].'
+            assert result['content_type'] == 'text'
+            assert len(result['sources']) == 2
+            assert result['sources'][0]['url'] == 'https://source1.com'
+            assert result['sources'][0].get('title') == 'Source 1'
+            assert result['sources'][0].get('snippets') == ['relevant excerpt']
+            assert result['sources'][1]['url'] == 'https://source2.com'
+            assert result['sources'][1].get('title') == 'Source 2'
+            assert 'snippets' not in result['sources'][1]
+        finally:
+            await toolset._http_client.aclose()  # type: ignore[union-attr]
+
+    async def test_source_empty_title_not_included(self) -> None:
+        payload: dict[str, object] = {
+            'output': {
+                'content': 'A',
+                'content_type': 'text',
+                'sources': [{'url': 'https://x.com', 'title': ''}],
+            }
+        }
+        toolset = self._toolset_with_payload(payload)
+        try:
+            result = await toolset.research('q')
+            assert 'title' not in result['sources'][0]
+        finally:
+            await toolset._http_client.aclose()  # type: ignore[union-attr]
+
+    async def test_source_empty_snippets_not_included(self) -> None:
+        payload: dict[str, object] = {
+            'output': {
+                'content': 'A',
+                'content_type': 'text',
+                'sources': [{'url': 'https://x.com', 'snippets': []}],
+            }
+        }
+        toolset = self._toolset_with_payload(payload)
+        try:
+            result = await toolset.research('q')
+            assert 'snippets' not in result['sources'][0]
+        finally:
+            await toolset._http_client.aclose()  # type: ignore[union-attr]
+
+    async def test_minimal_response(self) -> None:
+        toolset = self._toolset_with_payload(_make_research_minimal_payload())
+        try:
+            result = await toolset.research('q')
+            assert result['content'] == 'Short answer.'
+            assert len(result['sources']) == 1
+            assert result['sources'][0]['url'] == 'https://src.com'
+            assert 'title' not in result['sources'][0]
+            assert 'snippets' not in result['sources'][0]
+        finally:
+            await toolset._http_client.aclose()  # type: ignore[union-attr]
+
+    async def test_empty_sources(self) -> None:
+        toolset = self._toolset_with_payload(_make_research_empty_payload())
+        try:
+            result = await toolset.research('q')
+            assert result['sources'] == []
+        finally:
+            await toolset._http_client.aclose()  # type: ignore[union-attr]
+
+    async def test_malformed_payload_raises(self) -> None:
+        """Missing output key raises ValidationError."""
+        toolset = self._toolset_with_payload(_make_malformed_research_payload())
+        try:
+            with pytest.raises(ValidationError):
+                await toolset.research('q')
+        finally:
+            await toolset._http_client.aclose()  # type: ignore[union-attr]
 
 
 # ---------------------------------------------------------------------------
@@ -576,87 +780,6 @@ class TestBuildSearchParams:
 
 
 # ---------------------------------------------------------------------------
-# Contents: internal model tests
-# ---------------------------------------------------------------------------
-
-
-class TestRawContentsMetadata:
-    def test_both_fields(self) -> None:
-        meta = _RawContentsMetadata(site_name='Example', favicon_url='https://x.com/fav.ico')
-        result = meta.to_metadata()
-        assert result is not None
-        assert result.get('site_name') == 'Example'
-        assert result.get('favicon_url') == 'https://x.com/fav.ico'
-
-    def test_only_site_name(self) -> None:
-        meta = _RawContentsMetadata(site_name='Example')
-        result = meta.to_metadata()
-        assert result is not None
-        assert result.get('site_name') == 'Example'
-        assert 'favicon_url' not in result
-
-    def test_only_favicon(self) -> None:
-        meta = _RawContentsMetadata(favicon_url='https://x.com/fav.ico')
-        result = meta.to_metadata()
-        assert result is not None
-        assert result.get('favicon_url') == 'https://x.com/fav.ico'
-        assert 'site_name' not in result
-
-    def test_neither(self) -> None:
-        meta = _RawContentsMetadata()
-        assert meta.to_metadata() is None
-
-    def test_empty_strings(self) -> None:
-        meta = _RawContentsMetadata(site_name='', favicon_url='')
-        assert meta.to_metadata() is None
-
-
-class TestRawContentsItem:
-    def test_all_fields(self) -> None:
-        item = _RawContentsItem(
-            url='https://x.com',
-            title='X',
-            html='<p>Hi</p>',
-            markdown='Hi',
-            metadata=_RawContentsMetadata(site_name='X'),
-        )
-        result = item.to_result()
-        assert result['url'] == 'https://x.com'
-        assert result['title'] == 'X'
-        assert result.get('html') == '<p>Hi</p>'
-        assert result.get('markdown') == 'Hi'
-        assert result.get('metadata') == {'site_name': 'X'}
-
-    def test_minimal_fields(self) -> None:
-        item = _RawContentsItem(url='https://x.com', title='X')
-        result = item.to_result()
-        assert result['url'] == 'https://x.com'
-        assert result['title'] == 'X'
-        assert 'html' not in result
-        assert 'markdown' not in result
-        assert 'metadata' not in result
-
-    def test_empty_html_not_included(self) -> None:
-        item = _RawContentsItem(url='https://x.com', title='X', html='')
-        result = item.to_result()
-        assert 'html' not in result
-
-    def test_empty_markdown_not_included(self) -> None:
-        item = _RawContentsItem(url='https://x.com', title='X', markdown='')
-        result = item.to_result()
-        assert 'markdown' not in result
-
-    def test_empty_metadata_not_included(self) -> None:
-        item = _RawContentsItem(
-            url='https://x.com',
-            title='X',
-            metadata=_RawContentsMetadata(site_name='', favicon_url=''),
-        )
-        result = item.to_result()
-        assert 'metadata' not in result
-
-
-# ---------------------------------------------------------------------------
 # Contents: parameter building tests
 # ---------------------------------------------------------------------------
 
@@ -772,67 +895,6 @@ class TestContentsIntegration:
             assert 'html' not in results[1]
         finally:
             await client.aclose()
-
-
-# ---------------------------------------------------------------------------
-# Research: internal model tests
-# ---------------------------------------------------------------------------
-
-
-class TestRawResearchSource:
-    def test_all_fields(self) -> None:
-        source = _RawResearchSource(url='https://x.com', title='X', snippets=['s1', 's2'])
-        result = source.to_source()
-        assert result['url'] == 'https://x.com'
-        assert result.get('title') == 'X'
-        assert result.get('snippets') == ['s1', 's2']
-
-    def test_minimal_fields(self) -> None:
-        source = _RawResearchSource(url='https://x.com')
-        result = source.to_source()
-        assert result['url'] == 'https://x.com'
-        assert 'title' not in result
-        assert 'snippets' not in result
-
-    def test_empty_title_not_included(self) -> None:
-        source = _RawResearchSource(url='https://x.com', title='')
-        result = source.to_source()
-        assert 'title' not in result
-
-    def test_empty_snippets_not_included(self) -> None:
-        source = _RawResearchSource(url='https://x.com', snippets=[])
-        result = source.to_source()
-        assert 'snippets' not in result
-
-
-class TestParseResearchResult:
-    def test_full_response(self) -> None:
-        response = _RawResearchResponse.model_validate(_make_research_payload())
-        toolset = YoudotcomToolset(api_key='test')
-        result = toolset._parse_research_result(response)
-        assert result['content'] == '## Answer\n\nSomething happened [[1, 2]].'
-        assert result['content_type'] == 'text'
-        assert len(result['sources']) == 2
-        assert result['sources'][0]['url'] == 'https://source1.com'
-        assert result['sources'][0].get('title') == 'Source 1'
-        assert result['sources'][0].get('snippets') == ['relevant excerpt']
-        assert result['sources'][1]['url'] == 'https://source2.com'
-        assert result['sources'][1].get('title') == 'Source 2'
-        assert 'snippets' not in result['sources'][1]
-
-    def test_minimal_response(self) -> None:
-        response = _RawResearchResponse.model_validate(_make_research_minimal_payload())
-        toolset = YoudotcomToolset(api_key='test')
-        result = toolset._parse_research_result(response)
-        assert result['content'] == 'Short answer.'
-        assert len(result['sources']) == 1
-        assert result['sources'][0]['url'] == 'https://src.com'
-
-    def test_empty_sources(self) -> None:
-        response = _RawResearchResponse.model_validate(_make_research_empty_payload())
-        toolset = YoudotcomToolset(api_key='test')
-        result = toolset._parse_research_result(response)
-        assert result['sources'] == []
 
 
 # ---------------------------------------------------------------------------
@@ -1114,22 +1176,6 @@ class TestSearchIntegration:
             assert captured_params['country'] == 'US'
         finally:
             await client.aclose()
-
-
-# ---------------------------------------------------------------------------
-# Contents response adapter test
-# ---------------------------------------------------------------------------
-
-
-class TestContentsResponseAdapter:
-    def test_validates_list(self) -> None:
-        items = _ContentsResponseAdapter.validate_python(_make_contents_payload())
-        assert len(items) == 1
-        assert items[0].url == 'https://example.com/page'
-
-    def test_validates_empty_list(self) -> None:
-        items = _ContentsResponseAdapter.validate_python([])
-        assert items == []
 
 
 # ---------------------------------------------------------------------------
