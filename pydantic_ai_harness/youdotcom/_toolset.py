@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from datetime import datetime
 from typing import Annotated, Literal
 
@@ -14,6 +15,8 @@ from typing_extensions import NotRequired, TypedDict
 __all__ = (
     'ContentsFormat',
     'Country',
+    'CrawlTimeoutSeconds',
+    'Domains',
     'FinanceResearchEffort',
     'Freshness',
     'Language',
@@ -26,11 +29,12 @@ __all__ = (
     'YouLivecrawlContents',
     'YouResearchResult',
     'YouResearchSource',
+    'YouResearchSourceControl',
     'YouSearchResult',
     'YoudotcomToolset',
 )
 
-_YOU_SEARCH_URL = 'https://api.you.com/v1/search'
+_YOU_SEARCH_URL = 'https://ydc-index.io/v1/search'
 _YOU_CONTENTS_URL = 'https://ydc-index.io/v1/contents'
 _YOU_RESEARCH_URL = 'https://api.you.com/v1/research'
 _YOU_FINANCE_RESEARCH_URL = 'https://api.you.com/v1/finance_research'
@@ -101,7 +105,7 @@ Language = Literal[
     'HU',
     'IS',
     'IT',
-    'JP',
+    'JA',
     'KN',
     'KO',
     'LV',
@@ -139,8 +143,8 @@ SafeSearch = Literal['off', 'moderate', 'strict']
 LiveCrawl = Literal['web', 'news', 'all']
 """Which sections to livecrawl for full page content."""
 
-LiveCrawlFormats = Literal['html', 'markdown']
-"""Format for livecrawled content."""
+LiveCrawlFormats = Annotated[list[Literal['html', 'markdown']], Field(max_length=2)]
+"""Format(s) for livecrawled content. Pass one or both of 'html', 'markdown'."""
 
 ContentsFormat = Literal['html', 'markdown', 'metadata']
 """Format for content extraction via the Contents API."""
@@ -162,6 +166,9 @@ ContentsUrls = Annotated[list[str], Field(max_length=10)]
 
 ResearchInput = Annotated[str, Field(max_length=40000)]
 """The research question (maximum 40,000 characters)."""
+
+Domains = Annotated[list[str], Field(max_length=500)]
+"""Domain list for search or source control filtering (maximum 500 domains)."""
 
 
 class YouLivecrawlContents(TypedDict, total=False):
@@ -255,14 +262,37 @@ class YouResearchSource(TypedDict):
     """Relevant excerpts from the source page used in generating the answer."""
 
 
+class YouResearchSourceControl(TypedDict, total=False):
+    """Controls which web sources the research agent searches and visits.
+
+    Beta feature. `include_domains` and `exclude_domains` cannot be combined.
+    Each list supports up to 500 domains.
+    """
+
+    include_domains: list[str]
+    """Restrict results to only these domains."""
+
+    exclude_domains: list[str]
+    """Block results from these domains."""
+
+    boost_domains: list[str]
+    """Give these domains a ranking boost without filtering others."""
+
+    freshness: Freshness
+    """Filter by recency."""
+
+    country: Country
+    """Geographically focus results."""
+
+
 class YouResearchResult(TypedDict):
     """A result from the Research or Finance Research API."""
 
-    content: str
-    """The comprehensive response with inline citations (Markdown)."""
+    content: str | dict[str, object]
+    """The comprehensive response with inline citations (Markdown), or a JSON object when `output_schema` is configured."""
 
     content_type: str
-    """The format of the content field ('text')."""
+    """The format of the content field: 'text' for Markdown, 'object' for structured JSON output."""
 
     sources: list[YouResearchSource]
     """Web sources used to generate the answer."""
@@ -423,7 +453,7 @@ class _RawResearchSource(BaseModel):
 class _RawResearchOutput(BaseModel):
     """The `output` object from a research API response."""
 
-    content: str
+    content: str | dict[str, object]
     content_type: str
     sources: list[_RawResearchSource] = []
 
@@ -446,8 +476,8 @@ class YoudotcomToolset(FunctionToolset[AgentDepsT]):
 
     Configured parameters (set at construction time) are locked: the LLM cannot
     override them. Unconfigured parameters are exposed to the LLM with sensible
-    defaults. `offset` and `max_age` are never exposed to the LLM -- they are
-    always human-controlled.
+    defaults. `offset`, `max_age`, and `output_schema` are never exposed to the
+    LLM -- they are always human-controlled.
     """
 
     def __init__(
@@ -464,12 +494,22 @@ class YoudotcomToolset(FunctionToolset[AgentDepsT]):
         safesearch: SafeSearch | None = None,
         livecrawl: LiveCrawl | None = None,
         livecrawl_formats: LiveCrawlFormats | None = None,
+        include_domains: Domains | None = None,
+        exclude_domains: Domains | None = None,
+        boost_domains: Domains | None = None,
+        search_crawl_timeout: CrawlTimeoutSeconds | None = None,
         # Contents params
         contents_formats: list[ContentsFormat] | None = None,
         crawl_timeout: int | None = None,
         max_age: int | None = None,
         # Research params
         research_effort: ResearchEffort | None = None,
+        research_include_domains: Domains | None = None,
+        research_exclude_domains: Domains | None = None,
+        research_boost_domains: Domains | None = None,
+        research_freshness: Freshness | None = None,
+        research_country: Country | None = None,
+        output_schema: dict[str, object] | None = None,
         # Finance research params
         finance_research_effort: FinanceResearchEffort | None = None,
     ) -> None:
@@ -485,12 +525,22 @@ class YoudotcomToolset(FunctionToolset[AgentDepsT]):
         self._safesearch = safesearch
         self._livecrawl = livecrawl
         self._livecrawl_formats = livecrawl_formats
+        self._include_domains = include_domains
+        self._exclude_domains = exclude_domains
+        self._boost_domains = boost_domains
+        self._search_crawl_timeout = search_crawl_timeout
         # Contents
         self._contents_formats = contents_formats
         self._crawl_timeout = crawl_timeout
         self._max_age = max_age
         # Research
         self._research_effort = research_effort
+        self._research_include_domains = research_include_domains
+        self._research_exclude_domains = research_exclude_domains
+        self._research_boost_domains = research_boost_domains
+        self._research_freshness = research_freshness
+        self._research_country = research_country
+        self._output_schema = output_schema
         # Finance research
         self._finance_research_effort = finance_research_effort
 
@@ -514,6 +564,10 @@ class YoudotcomToolset(FunctionToolset[AgentDepsT]):
         safesearch: SafeSearch | None = None,
         livecrawl: LiveCrawl | None = None,
         livecrawl_formats: LiveCrawlFormats | None = None,
+        include_domains: Domains | None = None,
+        exclude_domains: Domains | None = None,
+        boost_domains: Domains | None = None,
+        crawl_timeout: CrawlTimeoutSeconds | None = None,
     ) -> list[YouSearchResult]:
         """Search the web and news using the You.com Search API.
 
@@ -531,8 +585,16 @@ class YoudotcomToolset(FunctionToolset[AgentDepsT]):
                 if not configured at tool creation.
             livecrawl: Sections to livecrawl: 'web', 'news', or 'all'. Only used if
                 not configured at tool creation.
-            livecrawl_formats: Format for livecrawled content: 'html' or 'markdown'.
-                Only used if not configured at tool creation.
+            livecrawl_formats: Format(s) for livecrawled content: one or both of
+                'html' and 'markdown'. Only used if not configured at tool creation.
+            include_domains: Restrict results to these domains (max 500). Only used if
+                not configured at tool creation.
+            exclude_domains: Block results from these domains (max 500). Only used if
+                not configured at tool creation.
+            boost_domains: Boost these domains in ranking without filtering others
+                (max 500). Only used if not configured at tool creation.
+            crawl_timeout: Per-URL livecrawl timeout in seconds (1-60). Only used if
+                not configured at tool creation.
         """
         params = self._build_search_params(
             query=query,
@@ -543,6 +605,10 @@ class YoudotcomToolset(FunctionToolset[AgentDepsT]):
             safesearch=safesearch,
             livecrawl=livecrawl,
             livecrawl_formats=livecrawl_formats,
+            include_domains=include_domains,
+            exclude_domains=exclude_domains,
+            boost_domains=boost_domains,
+            crawl_timeout=crawl_timeout,
         )
         response = await self._get(_YOU_SEARCH_URL, params)
         return self._parse_search_results(_RawSearchResponse.model_validate(response.json()))
@@ -577,6 +643,11 @@ class YoudotcomToolset(FunctionToolset[AgentDepsT]):
         input: ResearchInput,
         *,
         research_effort: ResearchEffort | None = None,
+        include_domains: Domains | None = None,
+        exclude_domains: Domains | None = None,
+        boost_domains: Domains | None = None,
+        freshness: Freshness | None = None,
+        country: Country | None = None,
     ) -> YouResearchResult:
         """Research a complex question and return a cited, synthesized answer.
 
@@ -588,8 +659,26 @@ class YoudotcomToolset(FunctionToolset[AgentDepsT]):
             input: The research question (max 40,000 characters).
             research_effort: Depth of research: 'lite', 'standard', 'deep', or
                 'exhaustive'. Only used if not configured at tool creation.
+            include_domains: Restrict sources to these domains (max 500). Only used
+                if not configured at tool creation.
+            exclude_domains: Block sources from these domains (max 500). Only used if
+                not configured at tool creation.
+            boost_domains: Boost these domains in source ranking without filtering
+                others (max 500). Only used if not configured at tool creation.
+            freshness: Filter sources by recency: 'day', 'week', 'month', 'year', or
+                'YYYY-MM-DDtoYYYY-MM-DD'. Only used if not configured at tool creation.
+            country: ISO 3166-1 alpha-2 country code to geographically focus sources.
+                Only used if not configured at tool creation.
         """
-        body = self._build_research_body(input=input, research_effort=research_effort)
+        body = self._build_research_body(
+            input=input,
+            research_effort=research_effort,
+            include_domains=include_domains,
+            exclude_domains=exclude_domains,
+            boost_domains=boost_domains,
+            freshness=freshness,
+            country=country,
+        )
         response = await self._post(_YOU_RESEARCH_URL, body)
         return self._parse_research_result(_RawResearchResponse.model_validate(response.json()))
 
@@ -629,13 +718,19 @@ class YoudotcomToolset(FunctionToolset[AgentDepsT]):
         safesearch: SafeSearch | None,
         livecrawl: LiveCrawl | None,
         livecrawl_formats: LiveCrawlFormats | None,
-    ) -> dict[str, str | int]:
+        include_domains: Domains | None,
+        exclude_domains: Domains | None,
+        boost_domains: Domains | None,
+        crawl_timeout: CrawlTimeoutSeconds | None,
+    ) -> dict[str, str | int | Sequence[str]]:
         """Merge configured search defaults with LLM-provided values.
 
         Configured values (set at construction) always win. `offset` is always
-        included if set, regardless of LLM input.
+        included if set, regardless of LLM input. Domain lists are joined into
+        comma-separated strings as the GET API expects. `livecrawl_formats` is
+        passed as a list so httpx repeats the query parameter for each entry.
         """
-        params: dict[str, str | int] = {'query': query}
+        params: dict[str, str | int | Sequence[str]] = {'query': query}
 
         effective_count = self._count if self._count is not None else count
         if effective_count is not None:
@@ -649,15 +744,31 @@ class YoudotcomToolset(FunctionToolset[AgentDepsT]):
             ('language', self._language if self._language is not None else language),
             ('safesearch', self._safesearch if self._safesearch is not None else safesearch),
             ('livecrawl', self._livecrawl if self._livecrawl is not None else livecrawl),
-            (
-                'livecrawl_formats',
-                self._livecrawl_formats if self._livecrawl_formats is not None else livecrawl_formats,
-            ),
         )
         for key, value in effective_values:
             normalized = self._normalize_param(value)
             if normalized is not None:
                 params[key] = normalized
+
+        # livecrawl_formats is a list -- pass directly so httpx repeats the param.
+        effective_formats = self._livecrawl_formats if self._livecrawl_formats is not None else livecrawl_formats
+        if effective_formats is not None:
+            params['livecrawl_formats'] = effective_formats
+
+        # Domain filters -- GET API expects comma-separated strings.
+        domain_filters: tuple[tuple[str, list[str] | None], ...] = (
+            ('include_domains', self._include_domains if self._include_domains is not None else include_domains),
+            ('exclude_domains', self._exclude_domains if self._exclude_domains is not None else exclude_domains),
+            ('boost_domains', self._boost_domains if self._boost_domains is not None else boost_domains),
+        )
+        for key, domains in domain_filters:
+            if domains is not None:
+                params[key] = ','.join(domains)
+
+        effective_timeout = self._search_crawl_timeout if self._search_crawl_timeout is not None else crawl_timeout
+        if effective_timeout is not None:
+            params['crawl_timeout'] = effective_timeout
+
         return params
 
     def _build_contents_body(
@@ -692,12 +803,50 @@ class YoudotcomToolset(FunctionToolset[AgentDepsT]):
         *,
         input: str,
         research_effort: ResearchEffort | None,
+        include_domains: Domains | None,
+        exclude_domains: Domains | None,
+        boost_domains: Domains | None,
+        freshness: Freshness | None,
+        country: Country | None,
     ) -> dict[str, object]:
-        """Build the JSON body for a Research API request."""
+        """Build the JSON body for a Research API request.
+
+        Configured values always win over LLM-provided values. A `source_control`
+        object is included only when at least one source-control field has a
+        non-None effective value. `output_schema` is human-only and never comes
+        from the LLM.
+        """
         body: dict[str, object] = {'input': input}
         effective_effort = self._research_effort if self._research_effort is not None else research_effort
         if effective_effort is not None:
             body['research_effort'] = effective_effort
+
+        source_control: dict[str, object] = {}
+        effective_include = (
+            self._research_include_domains if self._research_include_domains is not None else include_domains
+        )
+        if effective_include is not None:
+            source_control['include_domains'] = effective_include
+        effective_exclude = (
+            self._research_exclude_domains if self._research_exclude_domains is not None else exclude_domains
+        )
+        if effective_exclude is not None:
+            source_control['exclude_domains'] = effective_exclude
+        effective_boost = self._research_boost_domains if self._research_boost_domains is not None else boost_domains
+        if effective_boost is not None:
+            source_control['boost_domains'] = effective_boost
+        effective_freshness = self._research_freshness if self._research_freshness is not None else freshness
+        if effective_freshness is not None:
+            source_control['freshness'] = effective_freshness
+        effective_country = self._research_country if self._research_country is not None else country
+        if effective_country is not None:
+            source_control['country'] = effective_country
+        if source_control:
+            body['source_control'] = source_control
+
+        if self._output_schema is not None:
+            body['output_schema'] = self._output_schema
+
         return body
 
     def _build_finance_research_body(
@@ -719,7 +868,7 @@ class YoudotcomToolset(FunctionToolset[AgentDepsT]):
     # HTTP helpers
     # ------------------------------------------------------------------
 
-    async def _get(self, url: str, params: dict[str, str | int]) -> httpx.Response:
+    async def _get(self, url: str, params: dict[str, str | int | Sequence[str]]) -> httpx.Response:
         """Execute a GET request with the API key header."""
         headers = {'X-API-Key': self._api_key}
         if self._http_client is not None:

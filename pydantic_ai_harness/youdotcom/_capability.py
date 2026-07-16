@@ -11,6 +11,8 @@ from pydantic_ai.tools import AgentDepsT
 from pydantic_ai_harness.youdotcom._toolset import (
     ContentsFormat,
     Country,
+    CrawlTimeoutSeconds,
+    Domains,
     FinanceResearchEffort,
     Freshness,
     Language,
@@ -37,8 +39,8 @@ class Youdotcom(AbstractCapability[AgentDepsT]):
 
     Parameters set at construction are locked -- the LLM cannot override them.
     Parameters left as `None` are exposed to the LLM, giving it dynamic control.
-    `offset` and `max_age` are never exposed to the LLM; they are always
-    human-controlled.
+    `offset`, `max_age`, and `output_schema` are never exposed to the LLM; they
+    are always human-controlled.
 
     ```python
     import os
@@ -89,7 +91,19 @@ class Youdotcom(AbstractCapability[AgentDepsT]):
     """Sections to livecrawl for full page content: 'web', 'news', or 'all'."""
 
     livecrawl_formats: LiveCrawlFormats | None = None
-    """Format for livecrawled content: 'html' or 'markdown'."""
+    """Format(s) for livecrawled content: one or both of 'html' and 'markdown'."""
+
+    include_domains: Domains | None = None
+    """Domain allowlist for search results (max 500 domains)."""
+
+    exclude_domains: Domains | None = None
+    """Domain blocklist for search results (max 500 domains)."""
+
+    boost_domains: Domains | None = None
+    """Domains to boost in search ranking without filtering others (max 500 domains)."""
+
+    search_crawl_timeout: CrawlTimeoutSeconds | None = None
+    """Per-URL livecrawl timeout for `you_search` in seconds (1-60). Separate from Contents `crawl_timeout`."""
 
     # Contents
     contents_formats: list[ContentsFormat] | None = None
@@ -104,6 +118,24 @@ class Youdotcom(AbstractCapability[AgentDepsT]):
     # Research
     research_effort: ResearchEffort | None = None
     """Depth for `you_research`: 'lite', 'standard', 'deep', or 'exhaustive'. API default is 'standard'."""
+
+    research_include_domains: Domains | None = None
+    """Domain allowlist for research sources (max 500 domains)."""
+
+    research_exclude_domains: Domains | None = None
+    """Domain blocklist for research sources (max 500 domains)."""
+
+    research_boost_domains: Domains | None = None
+    """Domains to boost in research source ranking without filtering others (max 500 domains)."""
+
+    research_freshness: Freshness | None = None
+    """Recency filter for research sources: 'day', 'week', 'month', 'year', or 'YYYY-MM-DDtoYYYY-MM-DD'."""
+
+    research_country: Country | None = None
+    """ISO 3166-1 alpha-2 country code to geographically focus research sources."""
+
+    output_schema: dict[str, object] | None = None
+    """JSON Schema for structured research output. When set, `content` is a JSON object and `content_type` is 'object'. Never exposed to the LLM."""
 
     # Finance research
     finance_research_effort: FinanceResearchEffort | None = None
@@ -122,9 +154,19 @@ class Youdotcom(AbstractCapability[AgentDepsT]):
             safesearch=self.safesearch,
             livecrawl=self.livecrawl,
             livecrawl_formats=self.livecrawl_formats,
+            include_domains=self.include_domains,
+            exclude_domains=self.exclude_domains,
+            boost_domains=self.boost_domains,
+            search_crawl_timeout=self.search_crawl_timeout,
             contents_formats=self.contents_formats,
             crawl_timeout=self.crawl_timeout,
             max_age=self.max_age,
             research_effort=self.research_effort,
+            research_include_domains=self.research_include_domains,
+            research_exclude_domains=self.research_exclude_domains,
+            research_boost_domains=self.research_boost_domains,
+            research_freshness=self.research_freshness,
+            research_country=self.research_country,
+            output_schema=self.output_schema,
             finance_research_effort=self.finance_research_effort,
         )

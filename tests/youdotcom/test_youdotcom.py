@@ -172,6 +172,17 @@ def _make_malformed_research_payload() -> dict[str, object]:
     return {'error': 'something went wrong'}
 
 
+def _make_research_structured_payload() -> dict[str, object]:
+    """Build a Research API response with structured (object) output."""
+    return {
+        'output': {
+            'content': {'answer': 'The sky is blue.', 'confidence': 0.95},
+            'content_type': 'object',
+            'sources': [{'url': 'https://source.com', 'title': 'Source'}],
+        }
+    }
+
+
 # ---------------------------------------------------------------------------
 # Search: result field integration tests
 # ---------------------------------------------------------------------------
@@ -531,6 +542,18 @@ class TestResearchResultFields:
         finally:
             await client.aclose()
 
+    async def test_structured_output(self) -> None:
+        """Structured output returns content as a dict with content_type 'object'."""
+        toolset, client = self._toolset_with_payload(_make_research_structured_payload())
+        try:
+            result = await toolset.research('q')
+            assert result['content_type'] == 'object'
+            assert result['content'] == {'answer': 'The sky is blue.', 'confidence': 0.95}
+            assert len(result['sources']) == 1
+            assert result['sources'][0]['url'] == 'https://source.com'
+        finally:
+            await client.aclose()
+
     async def test_malformed_payload_raises(self) -> None:
         """Missing output key raises ValidationError."""
         toolset, client = self._toolset_with_payload(_make_malformed_research_payload())
@@ -558,6 +581,10 @@ class TestBuildSearchParams:
             safesearch=None,
             livecrawl=None,
             livecrawl_formats=None,
+            include_domains=None,
+            exclude_domains=None,
+            boost_domains=None,
+            crawl_timeout=None,
         )
         assert params['query'] == 'hello'
         assert len(params) == 1
@@ -573,6 +600,10 @@ class TestBuildSearchParams:
             safesearch=None,
             livecrawl=None,
             livecrawl_formats=None,
+            include_domains=None,
+            exclude_domains=None,
+            boost_domains=None,
+            crawl_timeout=None,
         )
         assert params['count'] == 5
 
@@ -587,6 +618,10 @@ class TestBuildSearchParams:
             safesearch=None,
             livecrawl=None,
             livecrawl_formats=None,
+            include_domains=None,
+            exclude_domains=None,
+            boost_domains=None,
+            crawl_timeout=None,
         )
         assert params['count'] == 10
 
@@ -601,6 +636,10 @@ class TestBuildSearchParams:
             safesearch=None,
             livecrawl=None,
             livecrawl_formats=None,
+            include_domains=None,
+            exclude_domains=None,
+            boost_domains=None,
+            crawl_timeout=None,
         )
         assert params['offset'] == 20
 
@@ -615,6 +654,10 @@ class TestBuildSearchParams:
             safesearch=None,
             livecrawl=None,
             livecrawl_formats=None,
+            include_domains=None,
+            exclude_domains=None,
+            boost_domains=None,
+            crawl_timeout=None,
         )
         assert 'offset' not in params
 
@@ -629,6 +672,10 @@ class TestBuildSearchParams:
             safesearch=None,
             livecrawl=None,
             livecrawl_formats=None,
+            include_domains=None,
+            exclude_domains=None,
+            boost_domains=None,
+            crawl_timeout=None,
         )
         assert params['freshness'] == 'day'
 
@@ -643,6 +690,10 @@ class TestBuildSearchParams:
             safesearch=None,
             livecrawl=None,
             livecrawl_formats=None,
+            include_domains=None,
+            exclude_domains=None,
+            boost_domains=None,
+            crawl_timeout=None,
         )
         assert params['freshness'] == 'week'
 
@@ -657,6 +708,10 @@ class TestBuildSearchParams:
             safesearch=None,
             livecrawl=None,
             livecrawl_formats=None,
+            include_domains=None,
+            exclude_domains=None,
+            boost_domains=None,
+            crawl_timeout=None,
         )
         assert params['country'] == 'US'
 
@@ -671,6 +726,10 @@ class TestBuildSearchParams:
             safesearch=None,
             livecrawl=None,
             livecrawl_formats=None,
+            include_domains=None,
+            exclude_domains=None,
+            boost_domains=None,
+            crawl_timeout=None,
         )
         assert params['country'] == 'GB'
 
@@ -685,6 +744,10 @@ class TestBuildSearchParams:
             safesearch=None,
             livecrawl=None,
             livecrawl_formats=None,
+            include_domains=None,
+            exclude_domains=None,
+            boost_domains=None,
+            crawl_timeout=None,
         )
         assert params['language'] == 'EN'
 
@@ -699,6 +762,10 @@ class TestBuildSearchParams:
             safesearch='off',
             livecrawl=None,
             livecrawl_formats=None,
+            include_domains=None,
+            exclude_domains=None,
+            boost_domains=None,
+            crawl_timeout=None,
         )
         assert params['safesearch'] == 'strict'
 
@@ -713,11 +780,15 @@ class TestBuildSearchParams:
             safesearch=None,
             livecrawl='web',
             livecrawl_formats=None,
+            include_domains=None,
+            exclude_domains=None,
+            boost_domains=None,
+            crawl_timeout=None,
         )
         assert params['livecrawl'] == 'all'
 
     def test_configured_livecrawl_formats_locks(self) -> None:
-        toolset = YoudotcomToolset(api_key='test', livecrawl_formats='html')
+        toolset = YoudotcomToolset(api_key='test', livecrawl_formats=['html'])
         params = toolset._build_search_params(
             query='q',
             count=None,
@@ -726,9 +797,13 @@ class TestBuildSearchParams:
             language=None,
             safesearch=None,
             livecrawl=None,
-            livecrawl_formats='markdown',
+            livecrawl_formats=['markdown'],
+            include_domains=None,
+            exclude_domains=None,
+            boost_domains=None,
+            crawl_timeout=None,
         )
-        assert params['livecrawl_formats'] == 'html'
+        assert params['livecrawl_formats'] == ['html']
 
     def test_all_params_configured(self) -> None:
         toolset = YoudotcomToolset(
@@ -740,7 +815,11 @@ class TestBuildSearchParams:
             language='EN',
             safesearch='strict',
             livecrawl='all',
-            livecrawl_formats='markdown',
+            livecrawl_formats=['markdown'],
+            include_domains=['nytimes.com'],
+            exclude_domains=['spam.com'],
+            boost_domains=['good.com'],
+            search_crawl_timeout=30,
         )
         params = toolset._build_search_params(
             query='q',
@@ -750,7 +829,11 @@ class TestBuildSearchParams:
             language='FR',
             safesearch='off',
             livecrawl='web',
-            livecrawl_formats='html',
+            livecrawl_formats=['html'],
+            include_domains=['bbc.com'],
+            exclude_domains=['other.com'],
+            boost_domains=['bad.com'],
+            crawl_timeout=10,
         )
         assert params == {
             'query': 'q',
@@ -761,7 +844,11 @@ class TestBuildSearchParams:
             'language': 'EN',
             'safesearch': 'strict',
             'livecrawl': 'all',
-            'livecrawl_formats': 'markdown',
+            'livecrawl_formats': ['markdown'],
+            'include_domains': 'nytimes.com',
+            'exclude_domains': 'spam.com',
+            'boost_domains': 'good.com',
+            'crawl_timeout': 30,
         }
 
     def test_freshness_date_range_string(self) -> None:
@@ -775,8 +862,212 @@ class TestBuildSearchParams:
             safesearch=None,
             livecrawl=None,
             livecrawl_formats=None,
+            include_domains=None,
+            exclude_domains=None,
+            boost_domains=None,
+            crawl_timeout=None,
         )
         assert params['freshness'] == '2025-01-01to2025-06-01'
+
+    def test_configured_include_domains_locks(self) -> None:
+        toolset = YoudotcomToolset(api_key='test', include_domains=['nytimes.com'])
+        params = toolset._build_search_params(
+            query='q',
+            count=None,
+            freshness=None,
+            country=None,
+            language=None,
+            safesearch=None,
+            livecrawl=None,
+            livecrawl_formats=None,
+            include_domains=['bbc.com'],
+            exclude_domains=None,
+            boost_domains=None,
+            crawl_timeout=None,
+        )
+        assert params['include_domains'] == 'nytimes.com'
+
+    def test_llm_include_domains_when_not_configured(self) -> None:
+        toolset = YoudotcomToolset(api_key='test')
+        params = toolset._build_search_params(
+            query='q',
+            count=None,
+            freshness=None,
+            country=None,
+            language=None,
+            safesearch=None,
+            livecrawl=None,
+            livecrawl_formats=None,
+            include_domains=['bbc.com', 'reuters.com'],
+            exclude_domains=None,
+            boost_domains=None,
+            crawl_timeout=None,
+        )
+        assert params['include_domains'] == 'bbc.com,reuters.com'
+
+    def test_configured_exclude_domains_locks(self) -> None:
+        toolset = YoudotcomToolset(api_key='test', exclude_domains=['spam.com'])
+        params = toolset._build_search_params(
+            query='q',
+            count=None,
+            freshness=None,
+            country=None,
+            language=None,
+            safesearch=None,
+            livecrawl=None,
+            livecrawl_formats=None,
+            include_domains=None,
+            exclude_domains=['other.com'],
+            boost_domains=None,
+            crawl_timeout=None,
+        )
+        assert params['exclude_domains'] == 'spam.com'
+
+    def test_llm_exclude_domains_when_not_configured(self) -> None:
+        toolset = YoudotcomToolset(api_key='test')
+        params = toolset._build_search_params(
+            query='q',
+            count=None,
+            freshness=None,
+            country=None,
+            language=None,
+            safesearch=None,
+            livecrawl=None,
+            livecrawl_formats=None,
+            include_domains=None,
+            exclude_domains=['spam.com', 'ads.com'],
+            boost_domains=None,
+            crawl_timeout=None,
+        )
+        assert params['exclude_domains'] == 'spam.com,ads.com'
+
+    def test_configured_boost_domains_locks(self) -> None:
+        toolset = YoudotcomToolset(api_key='test', boost_domains=['good.com'])
+        params = toolset._build_search_params(
+            query='q',
+            count=None,
+            freshness=None,
+            country=None,
+            language=None,
+            safesearch=None,
+            livecrawl=None,
+            livecrawl_formats=None,
+            include_domains=None,
+            exclude_domains=None,
+            boost_domains=['other.com'],
+            crawl_timeout=None,
+        )
+        assert params['boost_domains'] == 'good.com'
+
+    def test_llm_boost_domains_when_not_configured(self) -> None:
+        toolset = YoudotcomToolset(api_key='test')
+        params = toolset._build_search_params(
+            query='q',
+            count=None,
+            freshness=None,
+            country=None,
+            language=None,
+            safesearch=None,
+            livecrawl=None,
+            livecrawl_formats=None,
+            include_domains=None,
+            exclude_domains=None,
+            boost_domains=['good.com', 'great.com'],
+            crawl_timeout=None,
+        )
+        assert params['boost_domains'] == 'good.com,great.com'
+
+    def test_no_domain_filters_when_none(self) -> None:
+        toolset = YoudotcomToolset(api_key='test')
+        params = toolset._build_search_params(
+            query='q',
+            count=None,
+            freshness=None,
+            country=None,
+            language=None,
+            safesearch=None,
+            livecrawl=None,
+            livecrawl_formats=None,
+            include_domains=None,
+            exclude_domains=None,
+            boost_domains=None,
+            crawl_timeout=None,
+        )
+        assert 'include_domains' not in params
+        assert 'exclude_domains' not in params
+        assert 'boost_domains' not in params
+
+    def test_configured_search_crawl_timeout_locks(self) -> None:
+        toolset = YoudotcomToolset(api_key='test', search_crawl_timeout=30)
+        params = toolset._build_search_params(
+            query='q',
+            count=None,
+            freshness=None,
+            country=None,
+            language=None,
+            safesearch=None,
+            livecrawl=None,
+            livecrawl_formats=None,
+            include_domains=None,
+            exclude_domains=None,
+            boost_domains=None,
+            crawl_timeout=10,
+        )
+        assert params['crawl_timeout'] == 30
+
+    def test_llm_crawl_timeout_when_not_configured(self) -> None:
+        toolset = YoudotcomToolset(api_key='test')
+        params = toolset._build_search_params(
+            query='q',
+            count=None,
+            freshness=None,
+            country=None,
+            language=None,
+            safesearch=None,
+            livecrawl=None,
+            livecrawl_formats=None,
+            include_domains=None,
+            exclude_domains=None,
+            boost_domains=None,
+            crawl_timeout=15,
+        )
+        assert params['crawl_timeout'] == 15
+
+    def test_no_crawl_timeout_when_none(self) -> None:
+        toolset = YoudotcomToolset(api_key='test')
+        params = toolset._build_search_params(
+            query='q',
+            count=None,
+            freshness=None,
+            country=None,
+            language=None,
+            safesearch=None,
+            livecrawl=None,
+            livecrawl_formats=None,
+            include_domains=None,
+            exclude_domains=None,
+            boost_domains=None,
+            crawl_timeout=None,
+        )
+        assert 'crawl_timeout' not in params
+
+    def test_llm_livecrawl_formats_both(self) -> None:
+        toolset = YoudotcomToolset(api_key='test')
+        params = toolset._build_search_params(
+            query='q',
+            count=None,
+            freshness=None,
+            country=None,
+            language=None,
+            safesearch=None,
+            livecrawl=None,
+            livecrawl_formats=['html', 'markdown'],
+            include_domains=None,
+            exclude_domains=None,
+            boost_domains=None,
+            crawl_timeout=None,
+        )
+        assert params['livecrawl_formats'] == ['html', 'markdown']
 
 
 # ---------------------------------------------------------------------------
@@ -905,19 +1196,226 @@ class TestContentsIntegration:
 class TestBuildResearchBody:
     def test_input_always_present(self) -> None:
         toolset = YoudotcomToolset(api_key='test')
-        body = toolset._build_research_body(input='question', research_effort=None)
+        body = toolset._build_research_body(
+            input='question',
+            research_effort=None,
+            include_domains=None,
+            exclude_domains=None,
+            boost_domains=None,
+            freshness=None,
+            country=None,
+        )
         assert body['input'] == 'question'
         assert len(body) == 1
 
     def test_configured_effort_locks(self) -> None:
         toolset = YoudotcomToolset(api_key='test', research_effort='deep')
-        body = toolset._build_research_body(input='q', research_effort='lite')
+        body = toolset._build_research_body(
+            input='q',
+            research_effort='lite',
+            include_domains=None,
+            exclude_domains=None,
+            boost_domains=None,
+            freshness=None,
+            country=None,
+        )
         assert body['research_effort'] == 'deep'
 
     def test_llm_effort_when_not_configured(self) -> None:
         toolset = YoudotcomToolset(api_key='test')
-        body = toolset._build_research_body(input='q', research_effort='exhaustive')
+        body = toolset._build_research_body(
+            input='q',
+            research_effort='exhaustive',
+            include_domains=None,
+            exclude_domains=None,
+            boost_domains=None,
+            freshness=None,
+            country=None,
+        )
         assert body['research_effort'] == 'exhaustive'
+
+    def test_source_control_not_included_when_none(self) -> None:
+        toolset = YoudotcomToolset(api_key='test')
+        body = toolset._build_research_body(
+            input='q',
+            research_effort=None,
+            include_domains=None,
+            exclude_domains=None,
+            boost_domains=None,
+            freshness=None,
+            country=None,
+        )
+        assert 'source_control' not in body
+
+    def test_configured_research_include_domains_locks(self) -> None:
+        toolset = YoudotcomToolset(api_key='test', research_include_domains=['arxiv.org'])
+        body = toolset._build_research_body(
+            input='q',
+            research_effort=None,
+            include_domains=['bbc.com'],
+            exclude_domains=None,
+            boost_domains=None,
+            freshness=None,
+            country=None,
+        )
+        assert body['source_control'] == {'include_domains': ['arxiv.org']}
+
+    def test_llm_research_include_domains_when_not_configured(self) -> None:
+        toolset = YoudotcomToolset(api_key='test')
+        body = toolset._build_research_body(
+            input='q',
+            research_effort=None,
+            include_domains=['arxiv.org', 'nature.com'],
+            exclude_domains=None,
+            boost_domains=None,
+            freshness=None,
+            country=None,
+        )
+        assert body['source_control'] == {'include_domains': ['arxiv.org', 'nature.com']}
+
+    def test_configured_research_exclude_domains_locks(self) -> None:
+        toolset = YoudotcomToolset(api_key='test', research_exclude_domains=['spam.com'])
+        body = toolset._build_research_body(
+            input='q',
+            research_effort=None,
+            include_domains=None,
+            exclude_domains=['other.com'],
+            boost_domains=None,
+            freshness=None,
+            country=None,
+        )
+        assert body['source_control'] == {'exclude_domains': ['spam.com']}
+
+    def test_llm_research_exclude_domains_when_not_configured(self) -> None:
+        toolset = YoudotcomToolset(api_key='test')
+        body = toolset._build_research_body(
+            input='q',
+            research_effort=None,
+            include_domains=None,
+            exclude_domains=['spam.com'],
+            boost_domains=None,
+            freshness=None,
+            country=None,
+        )
+        assert body['source_control'] == {'exclude_domains': ['spam.com']}
+
+    def test_configured_research_boost_domains_locks(self) -> None:
+        toolset = YoudotcomToolset(api_key='test', research_boost_domains=['good.com'])
+        body = toolset._build_research_body(
+            input='q',
+            research_effort=None,
+            include_domains=None,
+            exclude_domains=None,
+            boost_domains=['other.com'],
+            freshness=None,
+            country=None,
+        )
+        assert body['source_control'] == {'boost_domains': ['good.com']}
+
+    def test_llm_research_boost_domains_when_not_configured(self) -> None:
+        toolset = YoudotcomToolset(api_key='test')
+        body = toolset._build_research_body(
+            input='q',
+            research_effort=None,
+            include_domains=None,
+            exclude_domains=None,
+            boost_domains=['good.com'],
+            freshness=None,
+            country=None,
+        )
+        assert body['source_control'] == {'boost_domains': ['good.com']}
+
+    def test_configured_research_freshness_locks(self) -> None:
+        toolset = YoudotcomToolset(api_key='test', research_freshness='day')
+        body = toolset._build_research_body(
+            input='q',
+            research_effort=None,
+            include_domains=None,
+            exclude_domains=None,
+            boost_domains=None,
+            freshness='week',
+            country=None,
+        )
+        assert body['source_control'] == {'freshness': 'day'}
+
+    def test_llm_research_freshness_when_not_configured(self) -> None:
+        toolset = YoudotcomToolset(api_key='test')
+        body = toolset._build_research_body(
+            input='q',
+            research_effort=None,
+            include_domains=None,
+            exclude_domains=None,
+            boost_domains=None,
+            freshness='month',
+            country=None,
+        )
+        assert body['source_control'] == {'freshness': 'month'}
+
+    def test_configured_research_country_locks(self) -> None:
+        toolset = YoudotcomToolset(api_key='test', research_country='US')
+        body = toolset._build_research_body(
+            input='q',
+            research_effort=None,
+            include_domains=None,
+            exclude_domains=None,
+            boost_domains=None,
+            freshness=None,
+            country='GB',
+        )
+        assert body['source_control'] == {'country': 'US'}
+
+    def test_llm_research_country_when_not_configured(self) -> None:
+        toolset = YoudotcomToolset(api_key='test')
+        body = toolset._build_research_body(
+            input='q',
+            research_effort=None,
+            include_domains=None,
+            exclude_domains=None,
+            boost_domains=None,
+            freshness=None,
+            country='GB',
+        )
+        assert body['source_control'] == {'country': 'GB'}
+
+    def test_source_control_only_includes_set_fields(self) -> None:
+        toolset = YoudotcomToolset(api_key='test')
+        body = toolset._build_research_body(
+            input='q',
+            research_effort=None,
+            include_domains=None,
+            exclude_domains=None,
+            boost_domains=None,
+            freshness='day',
+            country='US',
+        )
+        assert body['source_control'] == {'freshness': 'day', 'country': 'US'}
+
+    def test_output_schema_included_when_configured(self) -> None:
+        schema: dict[str, object] = {'type': 'object', 'properties': {'answer': {'type': 'string'}}}
+        toolset = YoudotcomToolset(api_key='test', output_schema=schema)
+        body = toolset._build_research_body(
+            input='q',
+            research_effort=None,
+            include_domains=None,
+            exclude_domains=None,
+            boost_domains=None,
+            freshness=None,
+            country=None,
+        )
+        assert body['output_schema'] == schema
+
+    def test_output_schema_not_included_when_not_configured(self) -> None:
+        toolset = YoudotcomToolset(api_key='test')
+        body = toolset._build_research_body(
+            input='q',
+            research_effort=None,
+            include_domains=None,
+            exclude_domains=None,
+            boost_domains=None,
+            freshness=None,
+            country=None,
+        )
+        assert 'output_schema' not in body
 
 
 # ---------------------------------------------------------------------------
@@ -961,6 +1459,103 @@ class TestResearchIntegration:
         try:
             await toolset.research('q', research_effort='lite')
             assert captured_body['research_effort'] == 'deep'
+        finally:
+            await client.aclose()
+
+    async def test_research_with_configured_source_control(self) -> None:
+        """Configured source_control fields are sent in the request body."""
+        captured_body: dict[str, object] = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            import json
+
+            captured_body.update(json.loads(request.content))
+            return httpx.Response(200, json=_make_research_empty_payload())
+
+        transport = httpx.MockTransport(handler)
+        client = httpx.AsyncClient(transport=transport)
+        toolset = YoudotcomToolset(
+            api_key='test',
+            http_client=client,
+            research_include_domains=['arxiv.org'],
+            research_freshness='day',
+            research_country='US',
+        )
+        try:
+            await toolset.research(
+                'q',
+                include_domains=['bbc.com'],
+                freshness='week',
+                country='GB',
+            )
+            assert captured_body['source_control'] == {
+                'include_domains': ['arxiv.org'],
+                'freshness': 'day',
+                'country': 'US',
+            }
+        finally:
+            await client.aclose()
+
+    async def test_research_source_control_from_llm(self) -> None:
+        """LLM-provided source_control fields are sent when not configured."""
+        captured_body: dict[str, object] = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            import json
+
+            captured_body.update(json.loads(request.content))
+            return httpx.Response(200, json=_make_research_empty_payload())
+
+        transport = httpx.MockTransport(handler)
+        client = httpx.AsyncClient(transport=transport)
+        toolset = YoudotcomToolset(api_key='test', http_client=client)
+        try:
+            await toolset.research(
+                'q',
+                include_domains=['arxiv.org'],
+                exclude_domains=['spam.com'],
+                freshness='day',
+                country='US',
+            )
+            assert captured_body['source_control'] == {
+                'include_domains': ['arxiv.org'],
+                'exclude_domains': ['spam.com'],
+                'freshness': 'day',
+                'country': 'US',
+            }
+        finally:
+            await client.aclose()
+
+    async def test_research_with_configured_output_schema(self) -> None:
+        """Configured output_schema is included in the request body."""
+        captured_body: dict[str, object] = {}
+        schema: dict[str, object] = {'type': 'object', 'properties': {'answer': {'type': 'string'}}}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            import json
+
+            captured_body.update(json.loads(request.content))
+            return httpx.Response(200, json=_make_research_structured_payload())
+
+        transport = httpx.MockTransport(handler)
+        client = httpx.AsyncClient(transport=transport)
+        toolset = YoudotcomToolset(api_key='test', http_client=client, output_schema=schema)
+        try:
+            await toolset.research('q')
+            assert captured_body['output_schema'] == schema
+        finally:
+            await client.aclose()
+
+    async def test_research_structured_output(self) -> None:
+        """Research with structured output returns content as a dict with content_type 'object'."""
+        transport = httpx.MockTransport(lambda req: httpx.Response(200, json=_make_research_structured_payload()))
+        client = httpx.AsyncClient(transport=transport)
+        toolset = YoudotcomToolset(api_key='test', http_client=client)
+        try:
+            result = await toolset.research('q')
+            assert result['content_type'] == 'object'
+            assert result['content'] == {'answer': 'The sky is blue.', 'confidence': 0.95}
+            assert len(result['sources']) == 1
         finally:
             await client.aclose()
 
@@ -1177,6 +1772,83 @@ class TestSearchIntegration:
         finally:
             await client.aclose()
 
+    async def test_search_with_configured_domains(self) -> None:
+        """Configured domain filters are sent as comma-separated strings."""
+        captured_params: dict[str, str] = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            for key, value in request.url.params.multi_items():
+                captured_params[key] = value
+            return httpx.Response(200, json=_make_empty_search_payload())
+
+        transport = httpx.MockTransport(handler)
+        client = httpx.AsyncClient(transport=transport)
+        toolset = YoudotcomToolset(
+            api_key='test',
+            http_client=client,
+            include_domains=['nytimes.com', 'bbc.com'],
+            exclude_domains=['spam.com'],
+        )
+        try:
+            await toolset.search('q', include_domains=['bbc.com'], exclude_domains=['other.com'])
+            assert captured_params['include_domains'] == 'nytimes.com,bbc.com'
+            assert captured_params['exclude_domains'] == 'spam.com'
+        finally:
+            await client.aclose()
+
+    async def test_search_with_llm_domains(self) -> None:
+        """LLM-provided domain filters are sent as comma-separated strings."""
+        captured_params: dict[str, str] = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            for key, value in request.url.params.multi_items():
+                captured_params[key] = value
+            return httpx.Response(200, json=_make_empty_search_payload())
+
+        transport = httpx.MockTransport(handler)
+        client = httpx.AsyncClient(transport=transport)
+        toolset = YoudotcomToolset(api_key='test', http_client=client)
+        try:
+            await toolset.search('q', include_domains=['nytimes.com', 'bbc.com'])
+            assert captured_params['include_domains'] == 'nytimes.com,bbc.com'
+        finally:
+            await client.aclose()
+
+    async def test_search_with_livecrawl_formats_list(self) -> None:
+        """livecrawl_formats list is sent as repeated query params."""
+        captured_formats: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            captured_formats.extend(v for k, v in request.url.params.multi_items() if k == 'livecrawl_formats')
+            return httpx.Response(200, json=_make_empty_search_payload())
+
+        transport = httpx.MockTransport(handler)
+        client = httpx.AsyncClient(transport=transport)
+        toolset = YoudotcomToolset(api_key='test', http_client=client)
+        try:
+            await toolset.search('q', livecrawl_formats=['html', 'markdown'])
+            assert captured_formats == ['html', 'markdown']
+        finally:
+            await client.aclose()
+
+    async def test_search_with_configured_crawl_timeout(self) -> None:
+        """Configured search crawl_timeout is sent, not LLM-provided."""
+        captured_params: dict[str, str] = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            for key, value in request.url.params.multi_items():
+                captured_params[key] = value
+            return httpx.Response(200, json=_make_empty_search_payload())
+
+        transport = httpx.MockTransport(handler)
+        client = httpx.AsyncClient(transport=transport)
+        toolset = YoudotcomToolset(api_key='test', http_client=client, search_crawl_timeout=30)
+        try:
+            await toolset.search('q', crawl_timeout=10)
+            assert captured_params['crawl_timeout'] == '30'
+        finally:
+            await client.aclose()
+
 
 # ---------------------------------------------------------------------------
 # Capability tests
@@ -1199,7 +1871,11 @@ class TestCapability:
             language='EN',
             safesearch='moderate',
             livecrawl='web',
-            livecrawl_formats='html',
+            livecrawl_formats=['html'],
+            include_domains=['nytimes.com'],
+            exclude_domains=['spam.com'],
+            boost_domains=['good.com'],
+            search_crawl_timeout=30,
         )
         toolset = cap.get_toolset()
         params = toolset._build_search_params(
@@ -1211,6 +1887,10 @@ class TestCapability:
             safesearch=None,
             livecrawl=None,
             livecrawl_formats=None,
+            include_domains=None,
+            exclude_domains=None,
+            boost_domains=None,
+            crawl_timeout=None,
         )
         assert params['count'] == 3
         assert params['offset'] == 6
@@ -1219,7 +1899,11 @@ class TestCapability:
         assert params['language'] == 'EN'
         assert params['safesearch'] == 'moderate'
         assert params['livecrawl'] == 'web'
-        assert params['livecrawl_formats'] == 'html'
+        assert params['livecrawl_formats'] == ['html']
+        assert params['include_domains'] == 'nytimes.com'
+        assert params['exclude_domains'] == 'spam.com'
+        assert params['boost_domains'] == 'good.com'
+        assert params['crawl_timeout'] == 30
 
     def test_capability_passes_contents_params(self) -> None:
         cap = Youdotcom(
@@ -1235,10 +1919,35 @@ class TestCapability:
         assert body['max_age'] == 3600
 
     def test_capability_passes_research_params(self) -> None:
-        cap = Youdotcom(api_key='k', research_effort='deep')
+        cap = Youdotcom(
+            api_key='k',
+            research_effort='deep',
+            research_include_domains=['arxiv.org'],
+            research_exclude_domains=['spam.com'],
+            research_boost_domains=['good.com'],
+            research_freshness='week',
+            research_country='US',
+            output_schema={'type': 'object', 'properties': {}},
+        )
         toolset = cap.get_toolset()
-        body = toolset._build_research_body(input='q', research_effort=None)
+        body = toolset._build_research_body(
+            input='q',
+            research_effort=None,
+            include_domains=None,
+            exclude_domains=None,
+            boost_domains=None,
+            freshness=None,
+            country=None,
+        )
         assert body['research_effort'] == 'deep'
+        assert body['source_control'] == {
+            'include_domains': ['arxiv.org'],
+            'exclude_domains': ['spam.com'],
+            'boost_domains': ['good.com'],
+            'freshness': 'week',
+            'country': 'US',
+        }
+        assert body['output_schema'] == {'type': 'object', 'properties': {}}
 
     def test_capability_passes_finance_research_params(self) -> None:
         cap = Youdotcom(api_key='k', finance_research_effort='exhaustive')

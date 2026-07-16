@@ -14,7 +14,8 @@ description: Give a Pydantic AI agent web search, content extraction, and resear
 
 Parameters set at construction are locked -- the LLM cannot override them.
 Parameters left unset are exposed to the LLM, giving it dynamic control over
-search behavior. `offset` and `max_age` are never exposed to the LLM.
+search behavior. `offset`, `max_age`, and `output_schema` are never exposed to
+the LLM.
 
 [Source](https://github.com/pydantic/pydantic-ai-harness/tree/main/pydantic_ai_harness/youdotcom/)
 
@@ -99,7 +100,11 @@ analysis, or earnings summaries.
 | `language` | Language of results: BCP 47 code. | Only if not configured |
 | `safesearch` | Content moderation: `'off'`, `'moderate'`, `'strict'`. | Only if not configured |
 | `livecrawl` | Full page content retrieval: `'web'`, `'news'`, `'all'`. | Only if not configured |
-| `livecrawl_formats` | Livecrawl format: `'html'` or `'markdown'`. | Only if not configured |
+| `livecrawl_formats` | Livecrawl format(s): `'html'`, `'markdown'`, or both. | Only if not configured |
+| `include_domains` | Domain allowlist (max 500). Comma-separated in the API request. | Only if not configured |
+| `exclude_domains` | Domain blocklist (max 500). Comma-separated in the API request. | Only if not configured |
+| `boost_domains` | Domains to boost in ranking without filtering others (max 500). | Only if not configured |
+| `search_crawl_timeout` | Per-URL livecrawl timeout in seconds (1-60). Separate from Contents `crawl_timeout`. | Only if not configured |
 
 ### Contents parameters
 
@@ -114,6 +119,12 @@ analysis, or earnings summaries.
 | Parameter | Description | LLM Control |
 |---|---|---|
 | `research_effort` | Depth: `'lite'`, `'standard'`, `'deep'`, `'exhaustive'`. Default: `'standard'`. | Only if not configured |
+| `research_include_domains` | Domain allowlist for sources (max 500). `include_domains` and `exclude_domains` cannot be combined. | Only if not configured |
+| `research_exclude_domains` | Domain blocklist for sources (max 500). | Only if not configured |
+| `research_boost_domains` | Domains to boost in source ranking without filtering others (max 500). | Only if not configured |
+| `research_freshness` | Source recency filter: `'day'`, `'week'`, `'month'`, `'year'`, or `'YYYY-MM-DDtoYYYY-MM-DD'`. | Only if not configured |
+| `research_country` | ISO 3166-1 alpha-2 country code to geographically focus sources. | Only if not configured |
+| `output_schema` | JSON Schema for structured output. When set, `content` is a JSON object and `content_type` is `'object'`. | Never (human-only) |
 
 ### Finance research parameters
 
@@ -127,7 +138,7 @@ analysis, or earnings summaries.
   value is locked and the LLM cannot override it.
 - **Unconfigured parameters**: When you don't set a parameter, the LLM can
   dynamically choose appropriate values based on the user's query.
-- **Human-only parameters**: `offset` and `max_age` are never exposed to the LLM.
+- **Human-only parameters**: `offset`, `max_age`, and `output_schema` are never exposed to the LLM.
 
 `count` specifies results **per section** (web and news), so `count=5` may
 return up to 10 total results (5 web + 5 news).
@@ -148,13 +159,23 @@ Youdotcom(
     language='EN',              # BCP 47
     safesearch='moderate',      # 'off', 'moderate', 'strict'
     livecrawl=None,             # 'web', 'news', 'all'
-    livecrawl_formats=None,     # 'html', 'markdown'
+    livecrawl_formats=None,     # ['html'], ['markdown'], or ['html', 'markdown']
+    include_domains=None,       # ['nytimes.com', 'bbc.com'] -- allowlist
+    exclude_domains=None,       # ['spam.com'] -- blocklist
+    boost_domains=None,         # ['good.com'] -- ranking boost
+    search_crawl_timeout=None,  # per-URL livecrawl timeout (1-60 seconds)
     # Contents
     contents_formats=None,      # ['html', 'markdown', 'metadata']
     crawl_timeout=None,         # per-URL timeout (1-60 seconds)
     max_age=None,               # max cache age in seconds (never exposed to LLM)
     # Research
     research_effort=None,       # 'lite', 'standard', 'deep', 'exhaustive'
+    research_include_domains=None,  # ['arxiv.org'] -- source allowlist
+    research_exclude_domains=None,  # ['spam.com'] -- source blocklist
+    research_boost_domains=None,    # ['good.com'] -- source ranking boost
+    research_freshness=None,    # 'day', 'week', 'month', 'year', or date range
+    research_country=None,      # ISO 3166-1 alpha-2 for source geographic focus
+    output_schema=None,         # JSON Schema for structured output (never exposed to LLM)
     # Finance research
     finance_research_effort=None,  # 'deep', 'exhaustive'
 )
