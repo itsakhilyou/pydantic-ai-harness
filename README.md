@@ -153,6 +153,7 @@ We studied leading coding agents, agent frameworks, and Claw-style assistants to
 | | **Docs lookup** | On-demand `read_pyai_docs` tool for Pydantic AI docs | :white_check_mark: [Docs](pydantic_ai_harness/docs/) | |
 | | **Web research** | Web search returning relevant page excerpts, full single-page retrieval, and opt-in deep search with cited answers, backed by [Exa](https://exa.ai) | :white_check_mark: [Docs](pydantic_ai_harness/exa/) | |
 | | **Hosted research agent** | Delegate open-ended research to the [Exa](https://exa.ai) Agent API as deferred tool calls -- resolved inline or by the host application | :white_check_mark: [Docs](pydantic_ai_harness/exa/) | |
+| | **You.com** | Web search, content extraction, and research via You.com APIs | :white_check_mark: [Docs](pydantic_ai_harness/youdotcom/) | |
 | | **Verification loop** | Run tests after edits, auto-fix failures | :construction: [PR&nbsp;#169](https://github.com/pydantic/pydantic-ai-harness/pull/169) | |
 | **Editor integration** | **ACP** | Serve an agent to editors (Zed, etc.) over the [Agent Client Protocol](https://agentclientprotocol.com) -- streamed text, diff-rendered edits, tool approval | :white_check_mark: [Docs](pydantic_ai_harness/experimental/acp/) (experimental) | |
 | **Prompt management** | **Managed prompt** | Back an agent's instructions with a [Logfire](https://pydantic.dev/logfire)-managed prompt, editable without shipping code | :white_check_mark: [Docs](pydantic_ai_harness/logfire/) | |

@@ -130,6 +130,7 @@ _CAPABILITY_PAGE_META = {
     'runtime-authoring.md': ('runtime_authoring', 'Runtime Authoring'),
     'guardrails.md': ('guardrails', 'Input & Output Guardrails'),
     'acp.md': ('experimental/acp', 'ACP (Agent Client Protocol)'),
+    'youdotcom.md': ('youdotcom', 'You.com'),
 }
 
 

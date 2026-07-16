@@ -21,6 +21,7 @@
       { "label": "Runtime Authoring", "slug": "runtime-authoring" },
       { "label": "Guardrails", "slug": "guardrails" },
       { "label": "Managed Prompt", "slug": "managed-prompt" },
+      { "label": "You.com", "slug": "youdotcom" },
       { "label": "ACP", "slug": "acp" }
     ]
   }
