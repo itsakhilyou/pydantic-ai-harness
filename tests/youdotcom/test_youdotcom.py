@@ -181,14 +181,14 @@ class TestSearchResultFields:
     """Exercise search result field mapping through the public search() tool."""
 
     @staticmethod
-    def _toolset_with_payload(payload: dict[str, object]) -> YoudotcomToolset:
-        """Create a toolset backed by a mock transport returning *payload*."""
+    def _toolset_with_payload(payload: dict[str, object]) -> tuple[YoudotcomToolset[None], httpx.AsyncClient]:
+        """Create a toolset and its mock client backed by *payload*."""
         transport = httpx.MockTransport(lambda req: httpx.Response(200, json=payload))
         client = httpx.AsyncClient(transport=transport)
-        return YoudotcomToolset(api_key='test', http_client=client)
+        return YoudotcomToolset(api_key='test', http_client=client), client
 
     async def test_web_result_all_fields(self) -> None:
-        toolset = self._toolset_with_payload(_make_web_payload())
+        toolset, client = self._toolset_with_payload(_make_web_payload())
         try:
             results = await toolset.search('q')
             assert len(results) == 1
@@ -202,11 +202,11 @@ class TestSearchResultFields:
             assert r.get('authors') == ['Jane Doe']
             assert r.get('page_age') == datetime(2025, 1, 15, 10, 30, tzinfo=timezone.utc)
         finally:
-            await toolset._http_client.aclose()  # type: ignore[union-attr]
+            await client.aclose()
 
     async def test_web_result_minimal_fields(self) -> None:
         payload: dict[str, object] = {'results': {'web': [{'title': 'T', 'url': 'https://x.com'}], 'news': []}}
-        toolset = self._toolset_with_payload(payload)
+        toolset, client = self._toolset_with_payload(payload)
         try:
             results = await toolset.search('q')
             assert len(results) == 1
@@ -220,32 +220,32 @@ class TestSearchResultFields:
             assert 'page_age' not in results[0]
             assert 'contents' not in results[0]
         finally:
-            await toolset._http_client.aclose()  # type: ignore[union-attr]
+            await client.aclose()
 
     async def test_web_result_empty_description_not_included(self) -> None:
         payload: dict[str, object] = {
             'results': {'web': [{'title': 'T', 'url': 'https://x.com', 'description': ''}], 'news': []}
         }
-        toolset = self._toolset_with_payload(payload)
+        toolset, client = self._toolset_with_payload(payload)
         try:
             results = await toolset.search('q')
             assert 'description' not in results[0]
         finally:
-            await toolset._http_client.aclose()  # type: ignore[union-attr]
+            await client.aclose()
 
     async def test_web_result_empty_snippets_not_included(self) -> None:
         payload: dict[str, object] = {
             'results': {'web': [{'title': 'T', 'url': 'https://x.com', 'snippets': []}], 'news': []}
         }
-        toolset = self._toolset_with_payload(payload)
+        toolset, client = self._toolset_with_payload(payload)
         try:
             results = await toolset.search('q')
             assert 'snippets' not in results[0]
         finally:
-            await toolset._http_client.aclose()  # type: ignore[union-attr]
+            await client.aclose()
 
     async def test_news_result_no_web_fields(self) -> None:
-        toolset = self._toolset_with_payload(_make_news_payload())
+        toolset, client = self._toolset_with_payload(_make_news_payload())
         try:
             results = await toolset.search('q')
             assert len(results) == 1
@@ -254,16 +254,16 @@ class TestSearchResultFields:
             assert 'favicon_url' not in results[0]
             assert 'authors' not in results[0]
         finally:
-            await toolset._http_client.aclose()  # type: ignore[union-attr]
+            await client.aclose()
 
     async def test_livecrawl_both_formats(self) -> None:
-        toolset = self._toolset_with_payload(_make_livecrawl_payload())
+        toolset, client = self._toolset_with_payload(_make_livecrawl_payload())
         try:
             results = await toolset.search('q')
             assert len(results) == 1
             assert results[0].get('contents') == {'html': '<p>Hello</p>', 'markdown': 'Hello'}
         finally:
-            await toolset._http_client.aclose()  # type: ignore[union-attr]
+            await client.aclose()
 
     async def test_livecrawl_html_only(self) -> None:
         payload: dict[str, object] = {
@@ -272,13 +272,13 @@ class TestSearchResultFields:
                 'news': [],
             }
         }
-        toolset = self._toolset_with_payload(payload)
+        toolset, client = self._toolset_with_payload(payload)
         try:
             results = await toolset.search('q')
             assert results[0].get('contents') == {'html': '<p>Hi</p>'}
             assert 'markdown' not in results[0].get('contents', {})
         finally:
-            await toolset._http_client.aclose()  # type: ignore[union-attr]
+            await client.aclose()
 
     async def test_livecrawl_markdown_only(self) -> None:
         payload: dict[str, object] = {
@@ -287,13 +287,13 @@ class TestSearchResultFields:
                 'news': [],
             }
         }
-        toolset = self._toolset_with_payload(payload)
+        toolset, client = self._toolset_with_payload(payload)
         try:
             results = await toolset.search('q')
             assert results[0].get('contents') == {'markdown': 'Hi'}
             assert 'html' not in results[0].get('contents', {})
         finally:
-            await toolset._http_client.aclose()  # type: ignore[union-attr]
+            await client.aclose()
 
     async def test_livecrawl_empty_strings_not_included(self) -> None:
         payload: dict[str, object] = {
@@ -302,12 +302,12 @@ class TestSearchResultFields:
                 'news': [],
             }
         }
-        toolset = self._toolset_with_payload(payload)
+        toolset, client = self._toolset_with_payload(payload)
         try:
             results = await toolset.search('q')
             assert 'contents' not in results[0]
         finally:
-            await toolset._http_client.aclose()  # type: ignore[union-attr]
+            await client.aclose()
 
     async def test_both_web_and_news(self) -> None:
         payload: dict[str, object] = {
@@ -316,31 +316,31 @@ class TestSearchResultFields:
                 'news': [{'title': 'N', 'url': 'https://n.com'}],
             }
         }
-        toolset = self._toolset_with_payload(payload)
+        toolset, client = self._toolset_with_payload(payload)
         try:
             results = await toolset.search('q')
             assert len(results) == 2
             assert results[0]['title'] == 'W'
             assert results[1]['title'] == 'N'
         finally:
-            await toolset._http_client.aclose()  # type: ignore[union-attr]
+            await client.aclose()
 
     async def test_empty_results(self) -> None:
-        toolset = self._toolset_with_payload(_make_empty_search_payload())
+        toolset, client = self._toolset_with_payload(_make_empty_search_payload())
         try:
             results = await toolset.search('q')
             assert results == []
         finally:
-            await toolset._http_client.aclose()  # type: ignore[union-attr]
+            await client.aclose()
 
     async def test_malformed_payload_raises(self) -> None:
         """Missing results key raises ValidationError instead of returning empty list."""
-        toolset = self._toolset_with_payload(_make_malformed_search_payload())
+        toolset, client = self._toolset_with_payload(_make_malformed_search_payload())
         try:
             with pytest.raises(ValidationError):
                 await toolset.search('q')
         finally:
-            await toolset._http_client.aclose()  # type: ignore[union-attr]
+            await client.aclose()
 
 
 # ---------------------------------------------------------------------------
@@ -352,14 +352,14 @@ class TestContentsResultFields:
     """Exercise contents result field mapping through the public extract_contents() tool."""
 
     @staticmethod
-    def _toolset_with_payload(payload: list[dict[str, object]]) -> YoudotcomToolset:
-        """Create a toolset backed by a mock transport returning *payload*."""
+    def _toolset_with_payload(payload: list[dict[str, object]]) -> tuple[YoudotcomToolset[None], httpx.AsyncClient]:
+        """Create a toolset and its mock client backed by *payload*."""
         transport = httpx.MockTransport(lambda req: httpx.Response(200, json=payload))
         client = httpx.AsyncClient(transport=transport)
-        return YoudotcomToolset(api_key='test', http_client=client)
+        return YoudotcomToolset(api_key='test', http_client=client), client
 
     async def test_all_fields(self) -> None:
-        toolset = self._toolset_with_payload(_make_contents_payload())
+        toolset, client = self._toolset_with_payload(_make_contents_payload())
         try:
             results = await toolset.extract_contents(['https://example.com/page'])
             assert len(results) == 1
@@ -373,10 +373,10 @@ class TestContentsResultFields:
                 'favicon_url': 'https://example.com/favicon.ico',
             }
         finally:
-            await toolset._http_client.aclose()  # type: ignore[union-attr]
+            await client.aclose()
 
     async def test_minimal_fields(self) -> None:
-        toolset = self._toolset_with_payload(_make_contents_minimal_payload())
+        toolset, client = self._toolset_with_payload(_make_contents_minimal_payload())
         try:
             results = await toolset.extract_contents(['https://example.com'])
             assert len(results) == 1
@@ -386,68 +386,68 @@ class TestContentsResultFields:
             assert 'markdown' not in results[0]
             assert 'metadata' not in results[0]
         finally:
-            await toolset._http_client.aclose()  # type: ignore[union-attr]
+            await client.aclose()
 
     async def test_empty_html_not_included(self) -> None:
         payload: list[dict[str, object]] = [{'url': 'https://x.com', 'title': 'X', 'html': ''}]
-        toolset = self._toolset_with_payload(payload)
+        toolset, client = self._toolset_with_payload(payload)
         try:
             results = await toolset.extract_contents(['https://x.com'])
             assert 'html' not in results[0]
         finally:
-            await toolset._http_client.aclose()  # type: ignore[union-attr]
+            await client.aclose()
 
     async def test_empty_markdown_not_included(self) -> None:
         payload: list[dict[str, object]] = [{'url': 'https://x.com', 'title': 'X', 'markdown': ''}]
-        toolset = self._toolset_with_payload(payload)
+        toolset, client = self._toolset_with_payload(payload)
         try:
             results = await toolset.extract_contents(['https://x.com'])
             assert 'markdown' not in results[0]
         finally:
-            await toolset._http_client.aclose()  # type: ignore[union-attr]
+            await client.aclose()
 
     async def test_metadata_only_site_name(self) -> None:
         payload: list[dict[str, object]] = [
             {'url': 'https://x.com', 'title': 'X', 'metadata': {'site_name': 'Example'}}
         ]
-        toolset = self._toolset_with_payload(payload)
+        toolset, client = self._toolset_with_payload(payload)
         try:
             results = await toolset.extract_contents(['https://x.com'])
             assert results[0].get('metadata') == {'site_name': 'Example'}
             assert 'favicon_url' not in results[0].get('metadata', {})
         finally:
-            await toolset._http_client.aclose()  # type: ignore[union-attr]
+            await client.aclose()
 
     async def test_metadata_only_favicon(self) -> None:
         payload: list[dict[str, object]] = [
             {'url': 'https://x.com', 'title': 'X', 'metadata': {'favicon_url': 'https://x.com/fav.ico'}}
         ]
-        toolset = self._toolset_with_payload(payload)
+        toolset, client = self._toolset_with_payload(payload)
         try:
             results = await toolset.extract_contents(['https://x.com'])
             assert results[0].get('metadata') == {'favicon_url': 'https://x.com/fav.ico'}
             assert 'site_name' not in results[0].get('metadata', {})
         finally:
-            await toolset._http_client.aclose()  # type: ignore[union-attr]
+            await client.aclose()
 
     async def test_empty_metadata_not_included(self) -> None:
         payload: list[dict[str, object]] = [
             {'url': 'https://x.com', 'title': 'X', 'metadata': {'site_name': '', 'favicon_url': ''}}
         ]
-        toolset = self._toolset_with_payload(payload)
+        toolset, client = self._toolset_with_payload(payload)
         try:
             results = await toolset.extract_contents(['https://x.com'])
             assert 'metadata' not in results[0]
         finally:
-            await toolset._http_client.aclose()  # type: ignore[union-attr]
+            await client.aclose()
 
     async def test_empty_results(self) -> None:
-        toolset = self._toolset_with_payload([])
+        toolset, client = self._toolset_with_payload([])
         try:
             results = await toolset.extract_contents(['https://x.com'])
             assert results == []
         finally:
-            await toolset._http_client.aclose()  # type: ignore[union-attr]
+            await client.aclose()
 
 
 # ---------------------------------------------------------------------------
@@ -459,14 +459,14 @@ class TestResearchResultFields:
     """Exercise research result field mapping through the public research() tool."""
 
     @staticmethod
-    def _toolset_with_payload(payload: dict[str, object]) -> YoudotcomToolset:
-        """Create a toolset backed by a mock transport returning *payload*."""
+    def _toolset_with_payload(payload: dict[str, object]) -> tuple[YoudotcomToolset[None], httpx.AsyncClient]:
+        """Create a toolset and its mock client backed by *payload*."""
         transport = httpx.MockTransport(lambda req: httpx.Response(200, json=payload))
         client = httpx.AsyncClient(transport=transport)
-        return YoudotcomToolset(api_key='test', http_client=client)
+        return YoudotcomToolset(api_key='test', http_client=client), client
 
     async def test_full_response(self) -> None:
-        toolset = self._toolset_with_payload(_make_research_payload())
+        toolset, client = self._toolset_with_payload(_make_research_payload())
         try:
             result = await toolset.research('What happened?')
             assert result['content'] == '## Answer\n\nSomething happened [[1, 2]].'
@@ -479,7 +479,7 @@ class TestResearchResultFields:
             assert result['sources'][1].get('title') == 'Source 2'
             assert 'snippets' not in result['sources'][1]
         finally:
-            await toolset._http_client.aclose()  # type: ignore[union-attr]
+            await client.aclose()
 
     async def test_source_empty_title_not_included(self) -> None:
         payload: dict[str, object] = {
@@ -489,12 +489,12 @@ class TestResearchResultFields:
                 'sources': [{'url': 'https://x.com', 'title': ''}],
             }
         }
-        toolset = self._toolset_with_payload(payload)
+        toolset, client = self._toolset_with_payload(payload)
         try:
             result = await toolset.research('q')
             assert 'title' not in result['sources'][0]
         finally:
-            await toolset._http_client.aclose()  # type: ignore[union-attr]
+            await client.aclose()
 
     async def test_source_empty_snippets_not_included(self) -> None:
         payload: dict[str, object] = {
@@ -504,15 +504,15 @@ class TestResearchResultFields:
                 'sources': [{'url': 'https://x.com', 'snippets': []}],
             }
         }
-        toolset = self._toolset_with_payload(payload)
+        toolset, client = self._toolset_with_payload(payload)
         try:
             result = await toolset.research('q')
             assert 'snippets' not in result['sources'][0]
         finally:
-            await toolset._http_client.aclose()  # type: ignore[union-attr]
+            await client.aclose()
 
     async def test_minimal_response(self) -> None:
-        toolset = self._toolset_with_payload(_make_research_minimal_payload())
+        toolset, client = self._toolset_with_payload(_make_research_minimal_payload())
         try:
             result = await toolset.research('q')
             assert result['content'] == 'Short answer.'
@@ -521,24 +521,24 @@ class TestResearchResultFields:
             assert 'title' not in result['sources'][0]
             assert 'snippets' not in result['sources'][0]
         finally:
-            await toolset._http_client.aclose()  # type: ignore[union-attr]
+            await client.aclose()
 
     async def test_empty_sources(self) -> None:
-        toolset = self._toolset_with_payload(_make_research_empty_payload())
+        toolset, client = self._toolset_with_payload(_make_research_empty_payload())
         try:
             result = await toolset.research('q')
             assert result['sources'] == []
         finally:
-            await toolset._http_client.aclose()  # type: ignore[union-attr]
+            await client.aclose()
 
     async def test_malformed_payload_raises(self) -> None:
         """Missing output key raises ValidationError."""
-        toolset = self._toolset_with_payload(_make_malformed_research_payload())
+        toolset, client = self._toolset_with_payload(_make_malformed_research_payload())
         try:
             with pytest.raises(ValidationError):
                 await toolset.research('q')
         finally:
-            await toolset._http_client.aclose()  # type: ignore[union-attr]
+            await client.aclose()
 
 
 # ---------------------------------------------------------------------------
