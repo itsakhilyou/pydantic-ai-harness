@@ -2,15 +2,61 @@
 
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
+from typing import TypeVar
 
 import httpx
 import pytest
 from pydantic import ValidationError
 from pydantic_ai import Agent
+from pydantic_ai.exceptions import ModelRetry
 from pydantic_ai.models.test import TestModel
+from pydantic_ai.tools import RunContext
+from pydantic_ai.usage import RunUsage
 
 from pydantic_ai_harness.youdotcom import Youdotcom, YoudotcomToolset
+
+T = TypeVar('T')
+
+
+def build_run_context(deps: T, run_step: int = 0) -> RunContext[T]:
+    """Build a `RunContext` for invoking toolsets directly in tests."""
+    return RunContext[T](
+        deps=deps,
+        model=TestModel(),
+        usage=RunUsage(),
+        prompt=None,
+        messages=[],
+        run_step=run_step,
+        pending_messages=[],
+    )
+
+
+class _CapturedRequest:
+    """Attributes of an outgoing httpx request captured for assertions."""
+
+    def __init__(self) -> None:
+        self.method: str = ''
+        self.params: dict[str, str] = {}
+        self.param_items: list[tuple[str, str]] = []
+        self.body: dict[str, object] | None = None
+
+
+def _search_capture() -> tuple[httpx.AsyncClient, _CapturedRequest]:
+    """Return a client whose mock transport records the outgoing search request."""
+    cap = _CapturedRequest()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        cap.method = request.method
+        cap.param_items = list(request.url.params.multi_items())
+        cap.params = dict(cap.param_items)
+        if request.content:
+            cap.body = json.loads(request.content)
+        return httpx.Response(200, json=_make_empty_search_payload())
+
+    return httpx.AsyncClient(transport=httpx.MockTransport(handler)), cap
+
 
 # ---------------------------------------------------------------------------
 # Payload helpers
@@ -569,505 +615,217 @@ class TestResearchResultFields:
 # ---------------------------------------------------------------------------
 
 
-class TestBuildSearchParams:
-    def test_query_always_present(self) -> None:
-        toolset = YoudotcomToolset(api_key='test')
-        params = toolset._build_search_params(
-            query='hello',
-            count=None,
-            freshness=None,
-            country=None,
-            language=None,
-            safesearch=None,
-            livecrawl=None,
-            livecrawl_formats=None,
-            include_domains=None,
-            exclude_domains=None,
-            boost_domains=None,
-            crawl_timeout=None,
-        )
-        assert params['query'] == 'hello'
-        assert len(params) == 1
+class TestSearchRequest:
+    """Search parameter locking and GET/POST selection, exercised through `search()`."""
 
-    def test_configured_count_locks(self) -> None:
-        toolset = YoudotcomToolset(api_key='test', count=5)
-        params = toolset._build_search_params(
-            query='q',
-            count=10,
-            freshness=None,
-            country=None,
-            language=None,
-            safesearch=None,
-            livecrawl=None,
-            livecrawl_formats=None,
-            include_domains=None,
-            exclude_domains=None,
-            boost_domains=None,
-            crawl_timeout=None,
-        )
-        assert params['count'] == 5
+    async def test_query_only_uses_get(self) -> None:
+        client, cap = _search_capture()
+        toolset = YoudotcomToolset(api_key='test', http_client=client)
+        try:
+            await toolset.search('hello')
+            assert cap.method == 'GET'
+            assert cap.params['query'] == 'hello'
+            assert cap.body is None
+        finally:
+            await client.aclose()
 
-    def test_llm_count_when_not_configured(self) -> None:
-        toolset = YoudotcomToolset(api_key='test')
-        params = toolset._build_search_params(
-            query='q',
-            count=10,
-            freshness=None,
-            country=None,
-            language=None,
-            safesearch=None,
-            livecrawl=None,
-            livecrawl_formats=None,
-            include_domains=None,
-            exclude_domains=None,
-            boost_domains=None,
-            crawl_timeout=None,
-        )
-        assert params['count'] == 10
+    async def test_configured_count_locks(self) -> None:
+        client, cap = _search_capture()
+        toolset = YoudotcomToolset(api_key='test', http_client=client, count=5)
+        try:
+            await toolset.search('q', count=8)
+            assert cap.params['count'] == '5'
+        finally:
+            await client.aclose()
 
-    def test_offset_always_included(self) -> None:
-        toolset = YoudotcomToolset(api_key='test', offset=20)
-        params = toolset._build_search_params(
-            query='q',
-            count=None,
-            freshness=None,
-            country=None,
-            language=None,
-            safesearch=None,
-            livecrawl=None,
-            livecrawl_formats=None,
-            include_domains=None,
-            exclude_domains=None,
-            boost_domains=None,
-            crawl_timeout=None,
-        )
-        assert params['offset'] == 20
+    async def test_llm_count_when_not_configured(self) -> None:
+        client, cap = _search_capture()
+        toolset = YoudotcomToolset(api_key='test', http_client=client)
+        try:
+            await toolset.search('q', count=8)
+            assert cap.params['count'] == '8'
+        finally:
+            await client.aclose()
 
-    def test_offset_never_from_llm(self) -> None:
-        toolset = YoudotcomToolset(api_key='test')
-        params = toolset._build_search_params(
-            query='q',
-            count=None,
-            freshness=None,
-            country=None,
-            language=None,
-            safesearch=None,
-            livecrawl=None,
-            livecrawl_formats=None,
-            include_domains=None,
-            exclude_domains=None,
-            boost_domains=None,
-            crawl_timeout=None,
-        )
-        assert 'offset' not in params
+    async def test_offset_included_when_configured(self) -> None:
+        client, cap = _search_capture()
+        toolset = YoudotcomToolset(api_key='test', http_client=client, offset=5)
+        try:
+            await toolset.search('q')
+            assert cap.params['offset'] == '5'
+        finally:
+            await client.aclose()
 
-    def test_configured_freshness_locks(self) -> None:
-        toolset = YoudotcomToolset(api_key='test', freshness='day')
-        params = toolset._build_search_params(
-            query='q',
-            count=None,
-            freshness='week',
-            country=None,
-            language=None,
-            safesearch=None,
-            livecrawl=None,
-            livecrawl_formats=None,
-            include_domains=None,
-            exclude_domains=None,
-            boost_domains=None,
-            crawl_timeout=None,
-        )
-        assert params['freshness'] == 'day'
+    async def test_offset_absent_by_default(self) -> None:
+        client, cap = _search_capture()
+        toolset = YoudotcomToolset(api_key='test', http_client=client)
+        try:
+            await toolset.search('q')
+            assert 'offset' not in cap.params
+        finally:
+            await client.aclose()
 
-    def test_llm_freshness_when_not_configured(self) -> None:
-        toolset = YoudotcomToolset(api_key='test')
-        params = toolset._build_search_params(
-            query='q',
-            count=None,
-            freshness='week',
-            country=None,
-            language=None,
-            safesearch=None,
-            livecrawl=None,
-            livecrawl_formats=None,
-            include_domains=None,
-            exclude_domains=None,
-            boost_domains=None,
-            crawl_timeout=None,
-        )
-        assert params['freshness'] == 'week'
+    async def test_configured_freshness_locks(self) -> None:
+        client, cap = _search_capture()
+        toolset = YoudotcomToolset(api_key='test', http_client=client, freshness='day')
+        try:
+            await toolset.search('q', freshness='week')
+            assert cap.params['freshness'] == 'day'
+        finally:
+            await client.aclose()
 
-    def test_configured_country_locks(self) -> None:
-        toolset = YoudotcomToolset(api_key='test', country='US')
-        params = toolset._build_search_params(
-            query='q',
-            count=None,
-            freshness=None,
-            country='GB',
-            language=None,
-            safesearch=None,
-            livecrawl=None,
-            livecrawl_formats=None,
-            include_domains=None,
-            exclude_domains=None,
-            boost_domains=None,
-            crawl_timeout=None,
-        )
-        assert params['country'] == 'US'
+    async def test_llm_freshness_when_not_configured(self) -> None:
+        client, cap = _search_capture()
+        toolset = YoudotcomToolset(api_key='test', http_client=client)
+        try:
+            await toolset.search('q', freshness='week')
+            assert cap.params['freshness'] == 'week'
+        finally:
+            await client.aclose()
 
-    def test_llm_country_when_not_configured(self) -> None:
-        toolset = YoudotcomToolset(api_key='test')
-        params = toolset._build_search_params(
-            query='q',
-            count=None,
-            freshness=None,
-            country='GB',
-            language=None,
-            safesearch=None,
-            livecrawl=None,
-            livecrawl_formats=None,
-            include_domains=None,
-            exclude_domains=None,
-            boost_domains=None,
-            crawl_timeout=None,
-        )
-        assert params['country'] == 'GB'
+    async def test_llm_freshness_accepts_date_range(self) -> None:
+        client, cap = _search_capture()
+        toolset = YoudotcomToolset(api_key='test', http_client=client)
+        try:
+            await toolset.search('q', freshness='2024-01-01to2024-01-31')
+            assert cap.params['freshness'] == '2024-01-01to2024-01-31'
+        finally:
+            await client.aclose()
 
-    def test_configured_language_locks(self) -> None:
-        toolset = YoudotcomToolset(api_key='test', language='EN')
-        params = toolset._build_search_params(
-            query='q',
-            count=None,
-            freshness=None,
-            country=None,
-            language='FR',
-            safesearch=None,
-            livecrawl=None,
-            livecrawl_formats=None,
-            include_domains=None,
-            exclude_domains=None,
-            boost_domains=None,
-            crawl_timeout=None,
-        )
-        assert params['language'] == 'EN'
+    async def test_configured_country_locks(self) -> None:
+        client, cap = _search_capture()
+        toolset = YoudotcomToolset(api_key='test', http_client=client, country='US')
+        try:
+            await toolset.search('q', country='GB')
+            assert cap.params['country'] == 'US'
+        finally:
+            await client.aclose()
 
-    def test_configured_safesearch_locks(self) -> None:
-        toolset = YoudotcomToolset(api_key='test', safesearch='strict')
-        params = toolset._build_search_params(
-            query='q',
-            count=None,
-            freshness=None,
-            country=None,
-            language=None,
-            safesearch='off',
-            livecrawl=None,
-            livecrawl_formats=None,
-            include_domains=None,
-            exclude_domains=None,
-            boost_domains=None,
-            crawl_timeout=None,
-        )
-        assert params['safesearch'] == 'strict'
+    async def test_llm_country_when_not_configured(self) -> None:
+        client, cap = _search_capture()
+        toolset = YoudotcomToolset(api_key='test', http_client=client)
+        try:
+            await toolset.search('q', country='GB')
+            assert cap.params['country'] == 'GB'
+        finally:
+            await client.aclose()
 
-    def test_configured_livecrawl_locks(self) -> None:
-        toolset = YoudotcomToolset(api_key='test', livecrawl='all')
-        params = toolset._build_search_params(
-            query='q',
-            count=None,
-            freshness=None,
-            country=None,
-            language=None,
-            safesearch=None,
-            livecrawl='web',
-            livecrawl_formats=None,
-            include_domains=None,
-            exclude_domains=None,
-            boost_domains=None,
-            crawl_timeout=None,
-        )
-        assert params['livecrawl'] == 'all'
+    async def test_configured_language_locks(self) -> None:
+        client, cap = _search_capture()
+        toolset = YoudotcomToolset(api_key='test', http_client=client, language='JA')
+        try:
+            await toolset.search('q', language='EN')
+            assert cap.params['language'] == 'JA'
+        finally:
+            await client.aclose()
 
-    def test_configured_livecrawl_formats_locks(self) -> None:
-        toolset = YoudotcomToolset(api_key='test', livecrawl_formats=['html'])
-        params = toolset._build_search_params(
-            query='q',
-            count=None,
-            freshness=None,
-            country=None,
-            language=None,
-            safesearch=None,
-            livecrawl=None,
-            livecrawl_formats=['markdown'],
-            include_domains=None,
-            exclude_domains=None,
-            boost_domains=None,
-            crawl_timeout=None,
-        )
-        assert params['livecrawl_formats'] == ['html']
+    async def test_configured_safesearch_locks(self) -> None:
+        client, cap = _search_capture()
+        toolset = YoudotcomToolset(api_key='test', http_client=client, safesearch='strict')
+        try:
+            await toolset.search('q', safesearch='off')
+            assert cap.params['safesearch'] == 'strict'
+        finally:
+            await client.aclose()
 
-    def test_all_params_configured(self) -> None:
-        toolset = YoudotcomToolset(
-            api_key='test',
-            count=5,
-            offset=10,
-            freshness='day',
-            country='US',
-            language='EN',
-            safesearch='strict',
-            livecrawl='all',
-            livecrawl_formats=['markdown'],
-            include_domains=['nytimes.com'],
-            exclude_domains=['spam.com'],
-            boost_domains=['good.com'],
-            search_crawl_timeout=30,
-        )
-        params = toolset._build_search_params(
-            query='q',
-            count=100,
-            freshness='year',
-            country='GB',
-            language='FR',
-            safesearch='off',
-            livecrawl='web',
-            livecrawl_formats=['html'],
-            include_domains=['bbc.com'],
-            exclude_domains=['other.com'],
-            boost_domains=['bad.com'],
-            crawl_timeout=10,
-        )
-        assert params == {
-            'query': 'q',
-            'count': 5,
-            'offset': 10,
-            'freshness': 'day',
-            'country': 'US',
-            'language': 'EN',
-            'safesearch': 'strict',
-            'livecrawl': 'all',
-            'livecrawl_formats': ['markdown'],
-            'include_domains': 'nytimes.com',
-            'exclude_domains': 'spam.com',
-            'boost_domains': 'good.com',
-            'crawl_timeout': 30,
-        }
+    async def test_configured_livecrawl_locks(self) -> None:
+        client, cap = _search_capture()
+        toolset = YoudotcomToolset(api_key='test', http_client=client, livecrawl='all')
+        try:
+            await toolset.search('q', livecrawl='web')
+            assert cap.params['livecrawl'] == 'all'
+        finally:
+            await client.aclose()
 
-    def test_freshness_date_range_string(self) -> None:
-        toolset = YoudotcomToolset(api_key='test')
-        params = toolset._build_search_params(
-            query='q',
-            count=None,
-            freshness='2025-01-01to2025-06-01',
-            country=None,
-            language=None,
-            safesearch=None,
-            livecrawl=None,
-            livecrawl_formats=None,
-            include_domains=None,
-            exclude_domains=None,
-            boost_domains=None,
-            crawl_timeout=None,
-        )
-        assert params['freshness'] == '2025-01-01to2025-06-01'
+    async def test_livecrawl_formats_sent_as_repeated_params(self) -> None:
+        client, cap = _search_capture()
+        toolset = YoudotcomToolset(api_key='test', http_client=client)
+        try:
+            await toolset.search('q', livecrawl_formats=['html', 'markdown'])
+            formats = [v for k, v in cap.param_items if k == 'livecrawl_formats']
+            assert formats == ['html', 'markdown']
+        finally:
+            await client.aclose()
 
-    def test_configured_include_domains_locks(self) -> None:
-        toolset = YoudotcomToolset(api_key='test', include_domains=['nytimes.com'])
-        params = toolset._build_search_params(
-            query='q',
-            count=None,
-            freshness=None,
-            country=None,
-            language=None,
-            safesearch=None,
-            livecrawl=None,
-            livecrawl_formats=None,
-            include_domains=['bbc.com'],
-            exclude_domains=None,
-            boost_domains=None,
-            crawl_timeout=None,
-        )
-        assert params['include_domains'] == 'nytimes.com'
+    async def test_configured_crawl_timeout_locks(self) -> None:
+        client, cap = _search_capture()
+        toolset = YoudotcomToolset(api_key='test', http_client=client, search_crawl_timeout=30)
+        try:
+            await toolset.search('q', crawl_timeout=10)
+            assert cap.params['crawl_timeout'] == '30'
+        finally:
+            await client.aclose()
 
-    def test_llm_include_domains_when_not_configured(self) -> None:
-        toolset = YoudotcomToolset(api_key='test')
-        params = toolset._build_search_params(
-            query='q',
-            count=None,
-            freshness=None,
-            country=None,
-            language=None,
-            safesearch=None,
-            livecrawl=None,
-            livecrawl_formats=None,
-            include_domains=['bbc.com', 'reuters.com'],
-            exclude_domains=None,
-            boost_domains=None,
-            crawl_timeout=None,
-        )
-        assert params['include_domains'] == 'bbc.com,reuters.com'
+    async def test_llm_crawl_timeout_when_not_configured(self) -> None:
+        client, cap = _search_capture()
+        toolset = YoudotcomToolset(api_key='test', http_client=client)
+        try:
+            await toolset.search('q', crawl_timeout=10)
+            assert cap.params['crawl_timeout'] == '10'
+        finally:
+            await client.aclose()
 
-    def test_configured_exclude_domains_locks(self) -> None:
-        toolset = YoudotcomToolset(api_key='test', exclude_domains=['spam.com'])
-        params = toolset._build_search_params(
-            query='q',
-            count=None,
-            freshness=None,
-            country=None,
-            language=None,
-            safesearch=None,
-            livecrawl=None,
-            livecrawl_formats=None,
-            include_domains=None,
-            exclude_domains=['other.com'],
-            boost_domains=None,
-            crawl_timeout=None,
-        )
-        assert params['exclude_domains'] == 'spam.com'
+    async def test_no_crawl_timeout_when_absent(self) -> None:
+        client, cap = _search_capture()
+        toolset = YoudotcomToolset(api_key='test', http_client=client)
+        try:
+            await toolset.search('q')
+            assert 'crawl_timeout' not in cap.params
+        finally:
+            await client.aclose()
 
-    def test_llm_exclude_domains_when_not_configured(self) -> None:
-        toolset = YoudotcomToolset(api_key='test')
-        params = toolset._build_search_params(
-            query='q',
-            count=None,
-            freshness=None,
-            country=None,
-            language=None,
-            safesearch=None,
-            livecrawl=None,
-            livecrawl_formats=None,
-            include_domains=None,
-            exclude_domains=['spam.com', 'ads.com'],
-            boost_domains=None,
-            crawl_timeout=None,
-        )
-        assert params['exclude_domains'] == 'spam.com,ads.com'
+    async def test_domain_filter_uses_post_with_json_arrays(self) -> None:
+        client, cap = _search_capture()
+        toolset = YoudotcomToolset(api_key='test', http_client=client)
+        try:
+            await toolset.search('q', include_domains=['nytimes.com', 'bbc.com'])
+            assert cap.method == 'POST'
+            assert cap.body is not None
+            assert cap.body['query'] == 'q'
+            assert cap.body['include_domains'] == ['nytimes.com', 'bbc.com']
+        finally:
+            await client.aclose()
 
-    def test_configured_boost_domains_locks(self) -> None:
-        toolset = YoudotcomToolset(api_key='test', boost_domains=['good.com'])
-        params = toolset._build_search_params(
-            query='q',
-            count=None,
-            freshness=None,
-            country=None,
-            language=None,
-            safesearch=None,
-            livecrawl=None,
-            livecrawl_formats=None,
-            include_domains=None,
-            exclude_domains=None,
-            boost_domains=['other.com'],
-            crawl_timeout=None,
-        )
-        assert params['boost_domains'] == 'good.com'
+    async def test_configured_domains_lock_and_use_post(self) -> None:
+        client, cap = _search_capture()
+        toolset = YoudotcomToolset(api_key='test', http_client=client, include_domains=['arxiv.org'])
+        try:
+            await toolset.search('q', include_domains=['bbc.com'])
+            assert cap.method == 'POST'
+            assert cap.body is not None
+            assert cap.body['include_domains'] == ['arxiv.org']
+        finally:
+            await client.aclose()
 
-    def test_llm_boost_domains_when_not_configured(self) -> None:
-        toolset = YoudotcomToolset(api_key='test')
-        params = toolset._build_search_params(
-            query='q',
-            count=None,
-            freshness=None,
-            country=None,
-            language=None,
-            safesearch=None,
-            livecrawl=None,
-            livecrawl_formats=None,
-            include_domains=None,
-            exclude_domains=None,
-            boost_domains=['good.com', 'great.com'],
-            crawl_timeout=None,
-        )
-        assert params['boost_domains'] == 'good.com,great.com'
+    async def test_exclude_and_boost_combine(self) -> None:
+        client, cap = _search_capture()
+        toolset = YoudotcomToolset(api_key='test', http_client=client)
+        try:
+            await toolset.search('q', exclude_domains=['spam.com'], boost_domains=['good.com'])
+            assert cap.method == 'POST'
+            assert cap.body is not None
+            assert cap.body['exclude_domains'] == ['spam.com']
+            assert cap.body['boost_domains'] == ['good.com']
+        finally:
+            await client.aclose()
 
-    def test_no_domain_filters_when_none(self) -> None:
-        toolset = YoudotcomToolset(api_key='test')
-        params = toolset._build_search_params(
-            query='q',
-            count=None,
-            freshness=None,
-            country=None,
-            language=None,
-            safesearch=None,
-            livecrawl=None,
-            livecrawl_formats=None,
-            include_domains=None,
-            exclude_domains=None,
-            boost_domains=None,
-            crawl_timeout=None,
-        )
-        assert 'include_domains' not in params
-        assert 'exclude_domains' not in params
-        assert 'boost_domains' not in params
+    async def test_include_with_exclude_rejected(self) -> None:
+        client, _cap = _search_capture()
+        toolset = YoudotcomToolset(api_key='test', http_client=client)
+        try:
+            with pytest.raises(ModelRetry, match='include_domains cannot be combined'):
+                await toolset.search('q', include_domains=['a.com'], exclude_domains=['b.com'])
+        finally:
+            await client.aclose()
 
-    def test_configured_search_crawl_timeout_locks(self) -> None:
-        toolset = YoudotcomToolset(api_key='test', search_crawl_timeout=30)
-        params = toolset._build_search_params(
-            query='q',
-            count=None,
-            freshness=None,
-            country=None,
-            language=None,
-            safesearch=None,
-            livecrawl=None,
-            livecrawl_formats=None,
-            include_domains=None,
-            exclude_domains=None,
-            boost_domains=None,
-            crawl_timeout=10,
-        )
-        assert params['crawl_timeout'] == 30
-
-    def test_llm_crawl_timeout_when_not_configured(self) -> None:
-        toolset = YoudotcomToolset(api_key='test')
-        params = toolset._build_search_params(
-            query='q',
-            count=None,
-            freshness=None,
-            country=None,
-            language=None,
-            safesearch=None,
-            livecrawl=None,
-            livecrawl_formats=None,
-            include_domains=None,
-            exclude_domains=None,
-            boost_domains=None,
-            crawl_timeout=15,
-        )
-        assert params['crawl_timeout'] == 15
-
-    def test_no_crawl_timeout_when_none(self) -> None:
-        toolset = YoudotcomToolset(api_key='test')
-        params = toolset._build_search_params(
-            query='q',
-            count=None,
-            freshness=None,
-            country=None,
-            language=None,
-            safesearch=None,
-            livecrawl=None,
-            livecrawl_formats=None,
-            include_domains=None,
-            exclude_domains=None,
-            boost_domains=None,
-            crawl_timeout=None,
-        )
-        assert 'crawl_timeout' not in params
-
-    def test_llm_livecrawl_formats_both(self) -> None:
-        toolset = YoudotcomToolset(api_key='test')
-        params = toolset._build_search_params(
-            query='q',
-            count=None,
-            freshness=None,
-            country=None,
-            language=None,
-            safesearch=None,
-            livecrawl=None,
-            livecrawl_formats=['html', 'markdown'],
-            include_domains=None,
-            exclude_domains=None,
-            boost_domains=None,
-            crawl_timeout=None,
-        )
-        assert params['livecrawl_formats'] == ['html', 'markdown']
+    async def test_include_with_boost_rejected(self) -> None:
+        client, _cap = _search_capture()
+        toolset = YoudotcomToolset(api_key='test', http_client=client)
+        try:
+            with pytest.raises(ModelRetry, match='include_domains cannot be combined'):
+                await toolset.search('q', include_domains=['a.com'], boost_domains=['c.com'])
+        finally:
+            await client.aclose()
 
 
 # ---------------------------------------------------------------------------
@@ -1512,14 +1270,14 @@ class TestResearchIntegration:
         try:
             await toolset.research(
                 'q',
-                include_domains=['arxiv.org'],
                 exclude_domains=['spam.com'],
+                boost_domains=['good.com'],
                 freshness='day',
                 country='US',
             )
             assert captured_body['source_control'] == {
-                'include_domains': ['arxiv.org'],
                 'exclude_domains': ['spam.com'],
+                'boost_domains': ['good.com'],
                 'freshness': 'day',
                 'country': 'US',
             }
@@ -1652,7 +1410,7 @@ class TestHttpGet:
         client = httpx.AsyncClient(transport=transport)
         toolset = YoudotcomToolset(api_key='test-key', http_client=client)
         try:
-            response = await toolset._get('https://api.you.com/v1/search', {'query': 'test'})
+            response = await toolset._get('https://api.you.com/v1/search', {'query': 'test'}, timeout=60.0)
             assert response.status_code == 200
             data = response.json()
             assert 'results' in data
@@ -1666,7 +1424,7 @@ class TestHttpGet:
         toolset = YoudotcomToolset(api_key='bad-key', http_client=client)
         try:
             with pytest.raises(httpx.HTTPStatusError):
-                await toolset._get('https://api.you.com/v1/search', {'query': 'test'})
+                await toolset._get('https://api.you.com/v1/search', {'query': 'test'}, timeout=60.0)
         finally:
             await client.aclose()
 
@@ -1681,7 +1439,7 @@ class TestHttpGet:
 
         monkeypatch.setattr(httpx, 'AsyncClient', _MockAsyncClient)
         toolset = YoudotcomToolset(api_key='test')
-        response = await toolset._get('https://api.you.com/v1/search', {'query': 'test'})
+        response = await toolset._get('https://api.you.com/v1/search', {'query': 'test'}, timeout=60.0)
         assert response.status_code == 200
 
 
@@ -1692,7 +1450,7 @@ class TestHttpPost:
         client = httpx.AsyncClient(transport=transport)
         toolset = YoudotcomToolset(api_key='test-key', http_client=client)
         try:
-            response = await toolset._post('https://api.you.com/v1/research', {'input': 'test'})
+            response = await toolset._post('https://api.you.com/v1/research', {'input': 'test'}, timeout=60.0)
             assert response.status_code == 200
         finally:
             await client.aclose()
@@ -1704,7 +1462,7 @@ class TestHttpPost:
         toolset = YoudotcomToolset(api_key='bad-key', http_client=client)
         try:
             with pytest.raises(httpx.HTTPStatusError):
-                await toolset._post('https://api.you.com/v1/research', {'input': 'test'})
+                await toolset._post('https://api.you.com/v1/research', {'input': 'test'}, timeout=60.0)
         finally:
             await client.aclose()
 
@@ -1719,7 +1477,7 @@ class TestHttpPost:
 
         monkeypatch.setattr(httpx, 'AsyncClient', _MockAsyncClient)
         toolset = YoudotcomToolset(api_key='test')
-        response = await toolset._post('https://api.you.com/v1/research', {'input': 'test'})
+        response = await toolset._post('https://api.you.com/v1/research', {'input': 'test'}, timeout=60.0)
         assert response.status_code == 200
 
 
@@ -1772,48 +1530,6 @@ class TestSearchIntegration:
         finally:
             await client.aclose()
 
-    async def test_search_with_configured_domains(self) -> None:
-        """Configured domain filters are sent as comma-separated strings."""
-        captured_params: dict[str, str] = {}
-
-        def handler(request: httpx.Request) -> httpx.Response:
-            for key, value in request.url.params.multi_items():
-                captured_params[key] = value
-            return httpx.Response(200, json=_make_empty_search_payload())
-
-        transport = httpx.MockTransport(handler)
-        client = httpx.AsyncClient(transport=transport)
-        toolset = YoudotcomToolset(
-            api_key='test',
-            http_client=client,
-            include_domains=['nytimes.com', 'bbc.com'],
-            exclude_domains=['spam.com'],
-        )
-        try:
-            await toolset.search('q', include_domains=['bbc.com'], exclude_domains=['other.com'])
-            assert captured_params['include_domains'] == 'nytimes.com,bbc.com'
-            assert captured_params['exclude_domains'] == 'spam.com'
-        finally:
-            await client.aclose()
-
-    async def test_search_with_llm_domains(self) -> None:
-        """LLM-provided domain filters are sent as comma-separated strings."""
-        captured_params: dict[str, str] = {}
-
-        def handler(request: httpx.Request) -> httpx.Response:
-            for key, value in request.url.params.multi_items():
-                captured_params[key] = value
-            return httpx.Response(200, json=_make_empty_search_payload())
-
-        transport = httpx.MockTransport(handler)
-        client = httpx.AsyncClient(transport=transport)
-        toolset = YoudotcomToolset(api_key='test', http_client=client)
-        try:
-            await toolset.search('q', include_domains=['nytimes.com', 'bbc.com'])
-            assert captured_params['include_domains'] == 'nytimes.com,bbc.com'
-        finally:
-            await client.aclose()
-
     async def test_search_with_livecrawl_formats_list(self) -> None:
         """livecrawl_formats list is sent as repeated query params."""
         captured_formats: list[str] = []
@@ -1861,9 +1577,11 @@ class TestCapability:
         toolset = cap.get_toolset()
         assert isinstance(toolset, YoudotcomToolset)
 
-    def test_capability_passes_search_params(self) -> None:
+    async def test_capability_passes_search_params(self) -> None:
+        client, cap_req = _search_capture()
         cap = Youdotcom(
             api_key='k',
+            http_client=client,
             count=3,
             offset=6,
             freshness='week',
@@ -1872,38 +1590,29 @@ class TestCapability:
             safesearch='moderate',
             livecrawl='web',
             livecrawl_formats=['html'],
-            include_domains=['nytimes.com'],
             exclude_domains=['spam.com'],
             boost_domains=['good.com'],
             search_crawl_timeout=30,
         )
         toolset = cap.get_toolset()
-        params = toolset._build_search_params(
-            query='q',
-            count=None,
-            freshness=None,
-            country=None,
-            language=None,
-            safesearch=None,
-            livecrawl=None,
-            livecrawl_formats=None,
-            include_domains=None,
-            exclude_domains=None,
-            boost_domains=None,
-            crawl_timeout=None,
-        )
-        assert params['count'] == 3
-        assert params['offset'] == 6
-        assert params['freshness'] == 'week'
-        assert params['country'] == 'GB'
-        assert params['language'] == 'EN'
-        assert params['safesearch'] == 'moderate'
-        assert params['livecrawl'] == 'web'
-        assert params['livecrawl_formats'] == ['html']
-        assert params['include_domains'] == 'nytimes.com'
-        assert params['exclude_domains'] == 'spam.com'
-        assert params['boost_domains'] == 'good.com'
-        assert params['crawl_timeout'] == 30
+        try:
+            await toolset.search('q')
+            # Domain filters force a POST, so every configured field lands in the JSON body.
+            assert cap_req.method == 'POST'
+            assert cap_req.body is not None
+            assert cap_req.body['count'] == 3
+            assert cap_req.body['offset'] == 6
+            assert cap_req.body['freshness'] == 'week'
+            assert cap_req.body['country'] == 'GB'
+            assert cap_req.body['language'] == 'EN'
+            assert cap_req.body['safesearch'] == 'moderate'
+            assert cap_req.body['livecrawl'] == 'web'
+            assert cap_req.body['livecrawl_formats'] == ['html']
+            assert cap_req.body['exclude_domains'] == ['spam.com']
+            assert cap_req.body['boost_domains'] == ['good.com']
+            assert cap_req.body['crawl_timeout'] == 30
+        finally:
+            await client.aclose()
 
     def test_capability_passes_contents_params(self) -> None:
         cap = Youdotcom(
@@ -1918,11 +1627,18 @@ class TestCapability:
         assert body['crawl_timeout'] == 15
         assert body['max_age'] == 3600
 
-    def test_capability_passes_research_params(self) -> None:
+    async def test_capability_passes_research_params(self) -> None:
+        captured_body: dict[str, object] = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            captured_body.update(json.loads(request.content))
+            return httpx.Response(200, json=_make_research_empty_payload())
+
+        client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
         cap = Youdotcom(
             api_key='k',
+            http_client=client,
             research_effort='deep',
-            research_include_domains=['arxiv.org'],
             research_exclude_domains=['spam.com'],
             research_boost_domains=['good.com'],
             research_freshness='week',
@@ -1930,24 +1646,18 @@ class TestCapability:
             output_schema={'type': 'object', 'properties': {}},
         )
         toolset = cap.get_toolset()
-        body = toolset._build_research_body(
-            input='q',
-            research_effort=None,
-            include_domains=None,
-            exclude_domains=None,
-            boost_domains=None,
-            freshness=None,
-            country=None,
-        )
-        assert body['research_effort'] == 'deep'
-        assert body['source_control'] == {
-            'include_domains': ['arxiv.org'],
-            'exclude_domains': ['spam.com'],
-            'boost_domains': ['good.com'],
-            'freshness': 'week',
-            'country': 'US',
-        }
-        assert body['output_schema'] == {'type': 'object', 'properties': {}}
+        try:
+            await toolset.research('q')
+            assert captured_body['research_effort'] == 'deep'
+            assert captured_body['source_control'] == {
+                'exclude_domains': ['spam.com'],
+                'boost_domains': ['good.com'],
+                'freshness': 'week',
+                'country': 'US',
+            }
+            assert captured_body['output_schema'] == {'type': 'object', 'properties': {}}
+        finally:
+            await client.aclose()
 
     def test_capability_passes_finance_research_params(self) -> None:
         cap = Youdotcom(api_key='k', finance_research_effort='exhaustive')
@@ -1975,3 +1685,165 @@ class TestCapability:
         assert 'you_search' in toolset.tools
         result = agent.run_sync('Search for test')
         assert result.output == 'done'
+
+
+# ---------------------------------------------------------------------------
+# Locked-parameter schema stripping
+# ---------------------------------------------------------------------------
+
+
+class TestLockedSchema:
+    """Construction-locked parameters are removed from each tool's JSON schema."""
+
+    async def test_locked_search_params_removed_from_schema(self) -> None:
+        toolset = YoudotcomToolset(api_key='test', count=5, include_domains=['a.com'])
+        tools = await toolset.get_tools(build_run_context(None))
+        props: dict[str, object] = tools['you_search'].tool_def.parameters_json_schema.get('properties', {})
+        assert 'count' not in props
+        assert 'include_domains' not in props
+        assert 'query' in props
+
+    async def test_unlocked_search_params_present_in_schema(self) -> None:
+        toolset = YoudotcomToolset(api_key='test')
+        tools = await toolset.get_tools(build_run_context(None))
+        props: dict[str, object] = tools['you_search'].tool_def.parameters_json_schema.get('properties', {})
+        assert 'count' in props
+        assert 'include_domains' in props
+
+    async def test_locked_field_removed_from_required(self) -> None:
+        toolset = YoudotcomToolset(api_key='test', finance_research_effort='deep')
+        tools = await toolset.get_tools(build_run_context(None))
+        schema = tools['you_finance_research'].tool_def.parameters_json_schema
+        props: dict[str, object] = schema.get('properties', {})
+        required: list[object] = schema.get('required', [])
+        assert 'research_effort' not in props
+        assert 'research_effort' not in required
+
+
+# ---------------------------------------------------------------------------
+# Constructor validation of configured values
+# ---------------------------------------------------------------------------
+
+
+class TestConstructorValidation:
+    """Configured values are validated at construction, not only at tool-call time."""
+
+    def test_count_out_of_range_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            YoudotcomToolset(api_key='test', count=0)
+
+    def test_offset_out_of_range_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            YoudotcomToolset(api_key='test', offset=10)
+
+    def test_crawl_timeout_out_of_range_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            YoudotcomToolset(api_key='test', search_crawl_timeout=61)
+
+    def test_freshness_bad_date_range_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            YoudotcomToolset(api_key='test', freshness='2024/01/01')
+
+    def test_configured_include_with_exclude_rejected(self) -> None:
+        with pytest.raises(ValueError, match='include_domains cannot be combined'):
+            YoudotcomToolset(api_key='test', include_domains=['a.com'], exclude_domains=['b.com'])
+
+    def test_configured_research_include_with_boost_rejected(self) -> None:
+        with pytest.raises(ValueError, match='include_domains cannot be combined'):
+            YoudotcomToolset(api_key='test', research_include_domains=['a.com'], research_boost_domains=['c.com'])
+
+    def test_output_schema_with_lite_effort_rejected(self) -> None:
+        with pytest.raises(ValueError, match="not supported with research_effort='lite'"):
+            YoudotcomToolset(api_key='test', output_schema={'type': 'object'}, research_effort='lite')
+
+
+# ---------------------------------------------------------------------------
+# Runtime guards for LLM-supplied values
+# ---------------------------------------------------------------------------
+
+
+class TestResearchGuards:
+    """Runtime guards raise ModelRetry for LLM-supplied invalid combinations."""
+
+    async def test_research_include_with_exclude_rejected(self) -> None:
+        toolset = YoudotcomToolset(api_key='test')
+        with pytest.raises(ModelRetry, match='include_domains cannot be combined'):
+            await toolset.research('q', include_domains=['a.com'], exclude_domains=['b.com'])
+
+    async def test_research_output_schema_with_llm_lite_rejected(self) -> None:
+        toolset = YoudotcomToolset(api_key='test', output_schema={'type': 'object'})
+        with pytest.raises(ModelRetry, match="not supported with research_effort='lite'"):
+            await toolset.research('q', research_effort='lite')
+
+
+class TestMalformedResearchResponse:
+    """A research response missing required fields surfaces as a validation error."""
+
+    async def test_missing_sources_raises(self) -> None:
+        payload: dict[str, object] = {'output': {'content': 'answer', 'content_type': 'text'}}
+        client = httpx.AsyncClient(transport=httpx.MockTransport(lambda req: httpx.Response(200, json=payload)))
+        toolset = YoudotcomToolset(api_key='test', http_client=client)
+        try:
+            with pytest.raises(ValidationError):
+                await toolset.research('q')
+        finally:
+            await client.aclose()
+
+
+# ---------------------------------------------------------------------------
+# Timeouts and secret handling
+# ---------------------------------------------------------------------------
+
+
+class TestTimeouts:
+    """Research/finance use a long default timeout; search/contents use a shorter one."""
+
+    @staticmethod
+    def _timeout_capture(payload: dict[str, object]) -> tuple[httpx.AsyncClient, dict[str, object]]:
+        seen: dict[str, object] = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            ext = request.extensions.get('timeout')
+            seen['read'] = ext['read'] if isinstance(ext, dict) else None
+            return httpx.Response(200, json=payload)
+
+        return httpx.AsyncClient(transport=httpx.MockTransport(handler)), seen
+
+    async def test_research_uses_long_default_timeout(self) -> None:
+        client, seen = self._timeout_capture(_make_research_empty_payload())
+        toolset = YoudotcomToolset(api_key='test', http_client=client)
+        try:
+            await toolset.research('q')
+            assert seen['read'] == 300.0
+        finally:
+            await client.aclose()
+
+    async def test_search_uses_short_default_timeout(self) -> None:
+        client, seen = self._timeout_capture(_make_empty_search_payload())
+        toolset = YoudotcomToolset(api_key='test', http_client=client)
+        try:
+            await toolset.search('q')
+            assert seen['read'] == 60.0
+        finally:
+            await client.aclose()
+
+    async def test_configured_timeout_overrides_default(self) -> None:
+        client, seen = self._timeout_capture(_make_research_empty_payload())
+        toolset = YoudotcomToolset(api_key='test', http_client=client, timeout=5.0)
+        try:
+            await toolset.research('q')
+            assert seen['read'] == 5.0
+        finally:
+            await client.aclose()
+
+
+class TestSecretHandling:
+    """The API key is not exposed through object reprs."""
+
+    def test_capability_api_key_excluded_from_repr(self) -> None:
+        cap = Youdotcom(api_key='super-secret-key')
+        assert 'super-secret-key' not in repr(cap)
+
+    def test_toolset_api_key_not_in_repr(self) -> None:
+        toolset = YoudotcomToolset(api_key='super-secret-key')
+        assert 'super-secret-key' not in repr(toolset)

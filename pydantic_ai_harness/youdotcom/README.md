@@ -5,6 +5,8 @@ Web search, content extraction, and research for Pydantic AI agents, powered by
 
 [Source](https://github.com/pydantic/pydantic-ai-harness/tree/main/pydantic_ai_harness/youdotcom/)
 
+> The API may change between releases. Where practical, breaking changes ship with a deprecation warning.
+
 ## The problem
 
 Agents need live information from the web: searching for current events, reading
@@ -22,10 +24,10 @@ developer should lock.
 - `you_research`: Deep research with cited, synthesized answers.
 - `you_finance_research`: Finance-focused research with cited answers.
 
-Parameters set at construction are locked -- the LLM cannot override them.
-Parameters left unset are exposed to the LLM, giving it dynamic control. `offset`,
-`max_age`, and `output_schema` are never exposed to the LLM; they are always
-human-controlled.
+Parameters set at construction are locked: they are removed from each tool's
+schema, so the LLM neither sees nor can override them. Parameters left unset are
+exposed to the LLM, giving it dynamic control. `offset`, `max_age`, and
+`output_schema` are never exposed to the LLM; they are always human-controlled.
 
 ```python
 import os
@@ -89,8 +91,8 @@ analysis, or earnings summaries.
 | `safesearch` | Content moderation: `'off'`, `'moderate'`, `'strict'`. | Only if not configured |
 | `livecrawl` | Full page content retrieval: `'web'`, `'news'`, `'all'`. | Only if not configured |
 | `livecrawl_formats` | Livecrawl format(s): `'html'`, `'markdown'`, or both. | Only if not configured |
-| `include_domains` | Domain allowlist (max 500). Comma-separated in the API request. | Only if not configured |
-| `exclude_domains` | Domain blocklist (max 500). Comma-separated in the API request. | Only if not configured |
+| `include_domains` | Domain allowlist (max 500). Cannot be combined with `exclude_domains` or `boost_domains`. Setting any domain filter sends the search as a POST request. | Only if not configured |
+| `exclude_domains` | Domain blocklist (max 500). May be combined with `boost_domains`. | Only if not configured |
 | `boost_domains` | Domains to boost in ranking without filtering others (max 500). | Only if not configured |
 | `search_crawl_timeout` | Per-URL livecrawl timeout in seconds (1-60). Separate from Contents `crawl_timeout`. | Only if not configured |
 
@@ -107,12 +109,12 @@ analysis, or earnings summaries.
 | Parameter | Description | LLM Control |
 |---|---|---|
 | `research_effort` | Depth: `'lite'`, `'standard'`, `'deep'`, `'exhaustive'`. Default: `'standard'`. | Only if not configured |
-| `research_include_domains` | Domain allowlist for sources (max 500). `include_domains` and `exclude_domains` cannot be combined. | Only if not configured |
+| `research_include_domains` | Domain allowlist for sources (max 500). Cannot be combined with `research_exclude_domains` or `research_boost_domains`. | Only if not configured |
 | `research_exclude_domains` | Domain blocklist for sources (max 500). | Only if not configured |
 | `research_boost_domains` | Domains to boost in source ranking without filtering others (max 500). | Only if not configured |
 | `research_freshness` | Source recency filter: `'day'`, `'week'`, `'month'`, `'year'`, or `'YYYY-MM-DDtoYYYY-MM-DD'`. | Only if not configured |
 | `research_country` | ISO 3166-1 alpha-2 country code to geographically focus sources. | Only if not configured |
-| `output_schema` | JSON Schema for structured output. When set, `content` is a JSON object and `content_type` is `'object'`. | Never (human-only) |
+| `output_schema` | JSON Schema for structured output. When set, the result is a `YouObjectResearchResult` (`content` is a JSON object, `content_type` is `'object'`); otherwise a `YouTextResearchResult`. Not valid with `research_effort='lite'`. | Never (human-only) |
 
 ### Finance research parameters
 
@@ -137,8 +139,9 @@ return up to 10 total results (5 web + 5 news).
 from pydantic_ai_harness.youdotcom import Youdotcom
 
 Youdotcom(
-    api_key='...',              # required -- You.com API key
+    api_key='...',              # required -- You.com API key (excluded from repr)
     http_client=None,           # optional httpx.AsyncClient for connection pooling
+    timeout=None,               # request timeout override; defaults: 300s research, 60s search/contents
     # Search
     count=5,                    # results per section
     offset=None,                # pagination offset (never exposed to LLM)
@@ -163,7 +166,7 @@ Youdotcom(
     research_boost_domains=None,    # ['good.com'] -- source ranking boost
     research_freshness=None,    # 'day', 'week', 'month', 'year', or date range
     research_country=None,      # ISO 3166-1 alpha-2 for source geographic focus
-    output_schema=None,         # JSON Schema for structured output (never exposed to LLM)
+    output_schema=None,         # JSON Schema for structured output (never exposed to LLM; not valid with research_effort='lite')
     # Finance research
     finance_research_effort=None,  # 'deep', 'exhaustive'
 )
@@ -172,14 +175,35 @@ Youdotcom(
 ## Agent spec (YAML/JSON)
 
 `Youdotcom` works with Pydantic AI's
-[agent spec](https://ai.pydantic.dev/agent-spec/):
+[agent spec](https://ai.pydantic.dev/agent-spec/). Loading agents from files
+needs the `spec` extra (`pip install "pydantic-ai-slim[spec]"`), which this
+harness already pulls in.
+
+Spec values are used verbatim -- the loader does not expand `${...}` or
+environment variables. A placeholder like `${YOU_API_KEY}` would be sent to
+You.com unchanged, so inject the real key in code rather than the file:
+
+```python
+import os
+
+from pydantic_ai import Agent
+from pydantic_ai_harness.youdotcom import Youdotcom
+
+agent = Agent(
+    'openai:gpt-5.1',
+    capabilities=[Youdotcom(api_key=os.environ['YOU_API_KEY'], count=5, freshness='day')],
+)
+```
+
+If you do load `Youdotcom` from a file, `api_key` is required and stored
+literally, so treat the spec file itself as a secret:
 
 ```yaml
-# agent.yaml
+# agent.yaml -- contains a secret; api_key is stored verbatim
 model: openai:gpt-5.1
 capabilities:
   - Youdotcom:
-      api_key: ${YOU_API_KEY}
+      api_key: your-you-com-api-key
       count: 5
       freshness: day
       country: US

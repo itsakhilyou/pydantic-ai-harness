@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import KW_ONLY, dataclass, field
 
 import httpx
 from pydantic_ai.capabilities import AbstractCapability
@@ -20,6 +20,8 @@ from pydantic_ai_harness.youdotcom._toolset import (
     LiveCrawlFormats,
     ResearchEffort,
     SafeSearch,
+    SearchCount,
+    SearchOffset,
     YoudotcomToolset,
 )
 
@@ -62,17 +64,22 @@ class Youdotcom(AbstractCapability[AgentDepsT]):
     <https://you.com/platform> to get an API key.
     """
 
-    api_key: str
-    """You.com API key. Get one at <https://you.com/platform/api-keys>."""
+    api_key: str = field(repr=False)
+    """You.com API key. Get one at <https://you.com/platform/api-keys>. Excluded from `repr` to avoid leaking the secret."""
+
+    _: KW_ONLY
 
     http_client: httpx.AsyncClient | None = None
     """Optional shared `httpx.AsyncClient` for connection pooling. If `None`, a new client is created per request."""
 
+    timeout: float | None = None
+    """Request timeout in seconds applied to all four tools. If `None`, research/finance use 300s and search/contents use 60s."""
+
     # Search
-    count: int | None = None
+    count: SearchCount | None = None
     """Maximum results per section (web/news). Range 1-100. API default is 10."""
 
-    offset: int | None = None
+    offset: SearchOffset | None = None
     """Pagination offset (0-9). Never exposed to the LLM."""
 
     freshness: Freshness | None = None
@@ -109,7 +116,7 @@ class Youdotcom(AbstractCapability[AgentDepsT]):
     contents_formats: list[ContentsFormat] | None = None
     """Formats for `you_contents`: 'html', 'markdown', 'metadata'. API default is 'markdown'."""
 
-    crawl_timeout: int | None = None
+    crawl_timeout: CrawlTimeoutSeconds | None = None
     """Per-URL timeout for `you_contents` in seconds (1-60). API default is 10."""
 
     max_age: int | None = None
@@ -146,6 +153,7 @@ class Youdotcom(AbstractCapability[AgentDepsT]):
         return YoudotcomToolset[AgentDepsT](
             api_key=self.api_key,
             http_client=self.http_client,
+            timeout=self.timeout,
             count=self.count,
             offset=self.offset,
             freshness=self.freshness,

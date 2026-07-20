@@ -1,6 +1,53 @@
 """You.com capability: web search, content extraction, and research via the You.com API."""
 
 from pydantic_ai_harness.youdotcom._capability import Youdotcom
-from pydantic_ai_harness.youdotcom._toolset import YoudotcomToolset
+from pydantic_ai_harness.youdotcom._toolset import (
+    ContentsFormat,
+    Country,
+    CrawlTimeoutSeconds,
+    Domains,
+    FinanceResearchEffort,
+    Freshness,
+    Language,
+    LiveCrawl,
+    LiveCrawlFormats,
+    ResearchEffort,
+    SafeSearch,
+    SearchCount,
+    SearchOffset,
+    YouContentsMetadata,
+    YouContentsResult,
+    YoudotcomToolset,
+    YouLivecrawlContents,
+    YouObjectResearchResult,
+    YouResearchResult,
+    YouResearchSource,
+    YouSearchResult,
+    YouTextResearchResult,
+)
 
-__all__ = ['Youdotcom', 'YoudotcomToolset']
+__all__ = [
+    'ContentsFormat',
+    'Country',
+    'CrawlTimeoutSeconds',
+    'Domains',
+    'FinanceResearchEffort',
+    'Freshness',
+    'Language',
+    'LiveCrawl',
+    'LiveCrawlFormats',
+    'ResearchEffort',
+    'SafeSearch',
+    'SearchCount',
+    'SearchOffset',
+    'YouContentsMetadata',
+    'YouContentsResult',
+    'YouLivecrawlContents',
+    'YouObjectResearchResult',
+    'YouResearchResult',
+    'YouResearchSource',
+    'YouSearchResult',
+    'YouTextResearchResult',
+    'Youdotcom',
+    'YoudotcomToolset',
+]
